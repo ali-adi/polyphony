@@ -1,0 +1,29 @@
+# Global Configuration for ai-orch
+
+defaults:
+  executors:
+    lead: "claude"
+    primary: "agy"
+    secondary: "cursor"
+    python: "python3"
+  
+  limits:
+    max_iterations: 10
+    timeout_seconds: 600
+    claude_max_calls_per_task: 5
+
+safety:
+  enforce_read_only_default: false
+  block_dangerous_git: true
+  enforce_verification_tests: true
+  blocked_global_commands:
+    - "rm -rf /"
+    - "rm -rf ~"
+    - ":(){ :|:& };:"
+    - "mkfs"
+    - "dd if="
+
+logging:
+  log_dir: "logs"
+  level: "INFO"
+  structured_json: true

@@ -1,0 +1,34 @@
+name: medicoder
+path: /Users/ali/root/ai-orch/medicoder
+description: ICD-10 medical coding system using Gemini for taxonomy ranking
+executors:
+  lead: claude
+  primary: agy
+  secondary: cursor
+safety:
+  protected_paths:
+  - database/
+  - '**/database/**'
+  - configs/smoke.yml
+  blocked_commands:
+  - git push
+  - git merge
+  - git add -A
+  - git add .
+  - git add --all
+  - git add -u
+  - git commit -a
+  - git commit -am
+  require_tests_before_stop: true
+  require_approval_for:
+  - full pipeline runs (--config configs/full.yml)
+  - tune_level.py --force-full
+  - external paid API calls
+testing:
+  command: env/bin/python -m unittest discover -s tests -t .
+  interpreter: env/bin/python
+git:
+  automatic_commit: false
+  automatic_push: false
+  block_bulk_add: true
+  block_ai_attribution: true
