@@ -92,6 +92,27 @@ class ModelsHierarchyConfig(BaseModel):
     subagents: SubagentsPolicy = Field(default_factory=SubagentsPolicy)
 
 
+def is_model_compatible(engine: str, model_name: Optional[str]) -> bool:
+    """Check if a model name is compatible with a given engine to prevent cross-contamination."""
+    if not model_name:
+        return True
+    m = model_name.lower().strip()
+    claude_keywords = ("claude", "sonnet", "haiku", "opus")
+    gemini_keywords = ("gemini",)
+
+    if engine == "agy":
+        if any(k in m for k in claude_keywords):
+            return False
+        return True
+    elif engine in ("claude", "cursor"):
+        if any(k in m for k in gemini_keywords):
+            return False
+        return True
+    elif engine == "python":
+        return False
+    return True
+
+
 def resolve_models_config(
     global_cfg: Dict[str, Any],
     project_cfg: Optional[Dict[str, Any]] = None,
@@ -117,9 +138,11 @@ def resolve_models_config(
         thinking = p_prof.get("thinking_level") or g_prof.get("thinking_level")
         fallback = p_prof.get("fallback_model") or g_prof.get("fallback_model")
 
-        # CLI overrides for lead
+        # CLI overrides for lead (only override compatible engines)
         if cli_overrides.get("lead_model"):
-            model = cli_overrides["lead_model"]
+            override_model = cli_overrides["lead_model"]
+            if is_model_compatible(lead_key, override_model):
+                model = override_model
         if cli_overrides.get("lead_thinking"):
             thinking = cli_overrides["lead_thinking"]
 
@@ -140,9 +163,11 @@ def resolve_models_config(
         thinking = p_prof.get("thinking_level") or g_prof.get("thinking_level")
         fallback = p_prof.get("fallback_model") or g_prof.get("fallback_model")
 
-        # CLI overrides for executor
+        # CLI overrides for executor (only override compatible engines)
         if cli_overrides.get("executor_model"):
-            model = cli_overrides["executor_model"]
+            override_model = cli_overrides["executor_model"]
+            if is_model_compatible(exec_key, override_model):
+                model = override_model
         if cli_overrides.get("executor_thinking"):
             thinking = cli_overrides["executor_thinking"]
 

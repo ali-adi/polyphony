@@ -18,7 +18,7 @@ class ClaudeExecutor(BaseExecutor):
     """Executes reasoning or coding actions via Claude Code CLI (`claude -p`)."""
 
     def __init__(self, binary_path: Optional[str] = None):
-        self.binary_path = binary_path or shutil.which("claude") or "/Users/ali/.local/bin/claude"
+        self.binary_path = binary_path or shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
 
     @property
     def name(self) -> str:
@@ -30,22 +30,22 @@ class ClaudeExecutor(BaseExecutor):
         return True
 
     def check_quota_status(self) -> tuple[bool, str]:
-        """Check if Claude CLI is currently functional or rate/quota-limited."""
+        """Check if Claude CLI is currently functional without making wasteful inference calls."""
         if not self.is_available():
             return False, "Claude CLI binary not found."
         try:
             res = subprocess.run(
-                [self.binary_path, "-p", "ping"],
+                [self.binary_path, "--version"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=10,
             )
             output = (res.stdout + res.stderr).strip()
-            if "weekly limit" in output.lower() or "rate limit" in output.lower():
-                return False, output
             if res.returncode == 0:
                 return True, "Available"
-            return False, output
+            if "weekly limit" in output.lower() or "rate limit" in output.lower():
+                return False, output
+            return False, output or f"Claude CLI returned non-zero exit code {res.returncode}"
         except Exception as e:
             return False, str(e)
 
@@ -77,9 +77,16 @@ class ClaudeExecutor(BaseExecutor):
         cmd = [
             self.binary_path,
             "-p",
-            instruction,
             "--dangerously-skip-permissions",
         ]
+
+        # Session continuation
+        session_id = kwargs.get("session_id")
+        continue_session = kwargs.get("continue_session", False)
+        if session_id:
+            cmd.extend(["--resume", str(session_id)])
+        elif continue_session:
+            cmd.append("--continue")
 
         if model:
             cmd.extend(["--model", str(model)])
@@ -115,6 +122,7 @@ class ClaudeExecutor(BaseExecutor):
         try:
             res = subprocess.run(
                 cmd,
+                input=instruction,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -141,6 +149,19 @@ class ClaudeExecutor(BaseExecutor):
                     metadata={"quota_exceeded": True},
                 )
 
+            metadata: Dict[str, Any] = {"cmd": " ".join(cmd)}
+            session_match = re.search(r"session(?:\s+id)?[:=\s]+([0-9a-fA-F-]{36})", output + " " + (error or ""), re.IGNORECASE)
+            if session_match:
+                metadata["session_id"] = session_match.group(1)
+            elif session_id:
+                metadata["session_id"] = session_id
+            try:
+                data = json.loads(output)
+                if isinstance(data, dict) and "session_id" in data:
+                    metadata["session_id"] = data["session_id"]
+            except Exception:
+                pass
+
             return ExecutorResult(
                 success=(res.returncode == 0),
                 executor_name=self.name,
@@ -149,7 +170,7 @@ class ClaudeExecutor(BaseExecutor):
                 exit_code=res.returncode,
                 duration_seconds=duration,
                 files_changed=newly_changed,
-                metadata={"cmd": " ".join(cmd)},
+                metadata=metadata,
             )
         except subprocess.TimeoutExpired:
             duration = time.time() - start_time

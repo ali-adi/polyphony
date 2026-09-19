@@ -89,3 +89,40 @@ def test_fallback_when_primary_unavailable(tmp_path):
     assert result.success is True
     assert used == "cursor"
     assert "Success from cursor" in result.output
+
+
+class TaskErrorExecutor(BaseExecutor):
+    @property
+    def name(self) -> str:
+        return "claude"
+
+    def is_available(self) -> bool:
+        return True
+
+    def execute(self, instruction: str, cwd: str, **kwargs) -> ExecutorResult:
+        return ExecutorResult(
+            success=False,
+            executor_name=self.name,
+            output="SyntaxError: invalid syntax in test.py",
+            error="AssertionError: 1 != 2",
+            exit_code=1,
+        )
+
+
+def test_no_fallback_on_task_error(tmp_path):
+    router = ExecutorRouter()
+    router.executors["claude"] = TaskErrorExecutor()
+    router.executors["agy"] = FailingExecutor("agy", fail_on_execute=False)
+
+    result, used = router.execute(
+        target_executor="claude",
+        instruction="Run tests",
+        cwd=str(tmp_path),
+        custom_fallback_chain=["claude", "agy"],
+    )
+
+    # Should return task error directly to orchestrator without falling back to agy
+    assert result.success is False
+    assert used == "claude"
+    assert "AssertionError" in result.error
+

@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from executors.base import BaseExecutor, ExecutorResult
 
 
@@ -24,9 +24,17 @@ def _get_changed_files_via_git(cwd: str) -> List[str]:
             lines = res.stdout.strip().splitlines()
             files = []
             for line in lines:
+                if not line.strip():
+                    continue
                 parts = line.strip().split(maxsplit=1)
                 if len(parts) == 2:
-                    files.append(parts[1])
+                    path_str = parts[1]
+                    if " -> " in path_str:
+                        # For renames, take the target (new) path
+                        target_file = path_str.split(" -> ", 1)[1].strip().strip('"')
+                        files.append(target_file)
+                    else:
+                        files.append(path_str.strip('"'))
             return files
     except Exception:
         pass
@@ -58,6 +66,24 @@ class PythonExecutor(BaseExecutor):
         **kwargs,
     ) -> ExecutorResult:
         start_time = time.time()
+
+        # Defense-in-depth safety validation
+        engine = kwargs.get("safety_engine")
+        if not engine:
+            from orchestrator.safety import SafetyConfig, SafetyEngine
+            engine = SafetyEngine(SafetyConfig(read_only=read_only), project_root=cwd)
+        safe, reason = engine.validate_command(instruction)
+        if not safe:
+            err_msg = reason if reason and reason.startswith("Blocked") else f"Blocked by safety policy: {reason}"
+            return ExecutorResult(
+                success=False,
+                executor_name=self.name,
+                output="",
+                error=err_msg,
+                exit_code=1,
+                metadata={"command": instruction, "safety_blocked": True},
+            )
+
         initial_files = set(_get_changed_files_via_git(cwd))
 
         # Determine command: if instruction is a full command (e.g. "env/bin/python -m ...")

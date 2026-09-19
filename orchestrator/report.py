@@ -7,8 +7,18 @@ from typing import Optional
 from orchestrator.state import TaskState
 
 
+def estimate_iteration_tokens(rec) -> int:
+    """Approximate tokens consumed during an iteration (chars // 4)."""
+    chars = len(rec.instruction or "") + len(rec.lead_decision.get("analysis", "") or "")
+    if rec.execution_result:
+        chars += len(rec.execution_result.output or "") + len(rec.execution_result.error or "")
+    return max(1, chars // 4)
+
+
 def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None) -> str:
     """Produce a structured Markdown report from a TaskState."""
+
+    total_est_tokens = sum(estimate_iteration_tokens(rec) for rec in task_state.iterations)
 
     lines = [
         f"# Task Report: {task_state.goal}",
@@ -22,6 +32,7 @@ def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None
         f"- **Started**: {task_state.start_time}",
         f"- **Completed**: {task_state.end_time or 'In Progress'}",
         f"- **Iterations Completed**: {len(task_state.iterations)} / {task_state.max_iterations}",
+        f"- **Estimated Token Usage**: ~{total_est_tokens:,} tokens",
         "",
         "## Summary",
         "",
@@ -63,15 +74,38 @@ def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None
     else:
         lines.append("No files modified during this task execution.")
 
-    lines.extend([
+    # Tally safety checks and tests across iterations
+    total_safety_violations = sum(1 for rec in task_state.iterations if not rec.safety_passed)
+    tests_run = sum(1 for rec in task_state.iterations if rec.tests_passed is not None)
+    tests_passed_count = sum(1 for rec in task_state.iterations if rec.tests_passed is True)
+    tests_failed_count = sum(1 for rec in task_state.iterations if rec.tests_passed is False)
+
+    safety_lines = [
         "",
         "## Safety Enforcement",
         "",
-        "- Protected database paths respected: `database/` intact.",
-        "- Dangerous git commands blocked: no bulk staging or unapproved pushes.",
-        "- Verification test gates applied: enforced before stop.",
-        "",
-    ])
+    ]
+    if total_safety_violations == 0:
+        safety_lines.append("- Safety Policies: ✅ All operations complied with safety policies (0 violations).")
+    else:
+        safety_lines.append(f"- Safety Policies: ⚠️ {total_safety_violations} operation(s) blocked by safety policies.")
+        for rec in task_state.iterations:
+            if not rec.safety_passed:
+                safety_lines.append(f"  • Iteration {rec.iteration_number}: {rec.safety_message or 'Safety violation'}")
+
+    if tests_run > 0:
+        if tests_failed_count == 0:
+            safety_lines.append(f"- Verification Tests: ✅ Enforced and passed ({tests_passed_count}/{tests_run} test runs).")
+        else:
+            safety_lines.append(f"- Verification Tests: ⚠️ {tests_failed_count} test failure(s) recorded across {tests_run} run(s).")
+    else:
+        safety_lines.append("- Verification Tests: ℹ️ No verification test suites executed.")
+
+    if task_state.read_only:
+        safety_lines.append("- Mode Enforcement: 🔒 Task executed strictly in read-only mode (no file edits made).")
+
+    lines.extend(safety_lines)
+    lines.append("")
 
     report_text = "\n".join(lines)
 

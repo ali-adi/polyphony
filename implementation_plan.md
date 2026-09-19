@@ -1,440 +1,99 @@
-# Polyphony — Implementation Plan
+# Polyphony Exhaustive Improvement Plan
 
-## Goal
+This plan encompasses all bug fixes, architectural enhancements, token efficiency optimizations, and missing features identified in the exhaustive codebase review. 
 
-Build a **local-first, CLI-driven, multi-agent orchestrator** that uses Claude Code CLI as a lead reasoning agent, with `agy` (Antigravity CLI) and Cursor as implementation executors. The system operates on local repositories, manages persistent project knowledge, and runs autonomous engineering tasks with minimal human intervention.
+The proposed changes are ranked by priority (P0 to P4) to ensure critical safety and data integrity issues are addressed first before moving on to UX and token optimizations.
 
-## Resolved Design Decisions
-
-| Decision | Resolution |
-|---|---|
-| **Communication** | Subprocess invocation of CLI tools (`claude -p`, `agy`, `cursor agent -p`) |
-| **Billing** | Uses existing subscriptions only — no API top-up needed |
-| **Claude role** | Lead reasoning agent via Claude Code CLI (MAX subscription). 2-5 calls per task. |
-| **Executor routing** | Claude decides which executor per step. Both agy and Cursor are first-class. |
-| **Fallback chain** | agy ↔ Cursor bidirectional. If both fail, fall back to Claude with cheap model. |
-| **Repo interaction** | Local-first. All executors operate directly on local filesystem. |
-| **User interaction** | Autonomous with progress streaming. Pauses only for safety gates. |
-| **Migration** | Full migration first. Built as `polyphony migrate` command. |
-| **Install location** | `/Users/ali/root/ai-orch/` |
-| **Medicoder repo** | `/Users/ali/root/Work/Medicoder/medicoder/medicoder` |
-| **Python tooling** | Python 3.11+ with pip/venv |
-| **Version control** | Own Git repo (separate from Medicoder) |
-| **CLI name** | `polyphony` (alias: `ai-orch`) |
-| **Build approach** | Custom build (not CAO, Orca, or LangGraph) |
-
----
-
-## Medicoder AI Configuration Inventory
-
-> [!IMPORTANT]
-> The Medicoder repo has a mature AI configuration that must be preserved and migrated.
-
-### Discovered Configuration
-
-#### Claude Code (`.claude/`)
-
-| Item | Type | Classification |
-|---|---|---|
-| [settings.json](file:///Users/ali/root/ai-orch/medicoder/.claude/settings.json) | Permissions + hooks | **Project** — Medicoder-specific allow/deny lists |
-| [settings.local.json](file:///Users/ali/root/ai-orch/medicoder/.claude/settings.local.json) | Local overrides | **Executor** — personal dev environment tweaks |
-| **Agents** (4 files) | | |
-| [db-reader.md](file:///Users/ali/root/ai-orch/medicoder/.claude/agents/db-reader.md) | Read-only DB inspector | **Project** — Medicoder taxonomy databases |
-| [pcs-editor.md](file:///Users/ali/root/ai-orch/medicoder/.claude/agents/pcs-editor.md) | Precise edit executor | **Project + Reusable pattern** — "apply edits, run tests, report" |
-| [am-achi-notes-author.md](file:///Users/ali/root/ai-orch/medicoder/.claude/agents/am-achi-notes-author.md) | Notes authoring agent | **Project** — ICD-10-AM/ACHI taxonomy notes |
-| [pcs-notes-author.md](file:///Users/ali/root/ai-orch/medicoder/.claude/agents/pcs-notes-author.md) | Notes authoring agent | **Project** — ICD-10-PCS taxonomy notes |
-| **Skills** (2) | | |
-| [catchup/SKILL.md](file:///Users/ali/root/ai-orch/medicoder/.claude/skills/catchup/SKILL.md) | Branch status summary | **Global** — reusable across projects |
-| [pr/SKILL.md](file:///Users/ali/root/ai-orch/medicoder/.claude/skills/pr/SKILL.md) | PR creation workflow | **Global** — reusable across projects |
-| **Hooks** (5 scripts) | | |
-| [block-paid-runs.sh](file:///Users/ali/root/ai-orch/medicoder/.claude/hooks/block-paid-runs.sh) | Cost safety gate | **Project** — blocks expensive Gemini API pipeline runs |
-| [protect-databases.sh](file:///Users/ali/root/ai-orch/medicoder/.claude/hooks/protect-databases.sh) | File protection | **Project** — prevents edits to taxonomy snapshots |
-| [block-ai-attribution.sh](file:///Users/ali/root/ai-orch/medicoder/.claude/hooks/block-ai-attribution.sh) | Git safety | **Project** — no AI attribution in commits |
-| [validate-readonly-query.sh](file:///Users/ali/root/ai-orch/medicoder/.claude/hooks/validate-readonly-query.sh) | DB safety | **Project** — enforces read-only SQLite access |
-| [verify-before-stop.sh](file:///Users/ali/root/ai-orch/medicoder/.claude/hooks/verify-before-stop.sh) | Quality gate | **Global pattern** — run tests before declaring done |
-| **Workflows** (2) | | |
-| [fix-until-green.js](file:///Users/ali/root/ai-orch/medicoder/.claude/workflows/fix-until-green.js) | Iterative test fixer | **Global** — reusable "fix tests in rounds" pattern |
-| [audit-eval-contamination.js](file:///Users/ali/root/ai-orch/medicoder/.claude/workflows/audit-eval-contamination.js) | Data quality audit | **Project** — audits case files for eval contamination |
-
-#### Cursor (`.cursor/`)
-
-| Item | Type | Classification |
-|---|---|---|
-| [hooks.json](file:///Users/ali/root/ai-orch/medicoder/.cursor/hooks.json) | Hook configuration | **Executor** — adapts Claude hooks for Cursor format |
-| [claude-adapter.sh](file:///Users/ali/root/ai-orch/medicoder/.cursor/hooks/claude-adapter.sh) | Hook adapter | **Executor** — bridges Claude hooks → Cursor hooks |
-| [block-bulk-git-add.sh](file:///Users/ali/root/ai-orch/medicoder/.cursor/hooks/block-bulk-git-add.sh) | Git safety | **Project** — prevents `git add -A` |
-| [readonly-sqlite.sh](file:///Users/ali/root/ai-orch/medicoder/.cursor/hooks/readonly-sqlite.sh) | DB safety | **Executor** — Cursor-specific SQLite guard |
-| [am-full-runs.mdc](file:///Users/ali/root/ai-orch/medicoder/.cursor/rules/am-full-runs.mdc) | Cost safety rule | **Project** — blocks expensive tuning runs without approval |
-
-#### Antigravity / Gemini (`.agents/`, `.gemini/`)
-
-| Item | Type | Classification |
-|---|---|---|
-| [hooks.json](file:///Users/ali/root/ai-orch/medicoder/.agents/hooks.json) | Hook configuration | **Executor** — AGY-specific hook format |
-| `.gemini/antigravity-ide/` | IDE state | **Ephemeral** — can be ignored |
-
-#### MCP & Other
-
-| Item | Type | Classification |
-|---|---|---|
-| [.mcp.json](file:///Users/ali/root/ai-orch/medicoder/.mcp.json) | MCP server config | **Tool** — GitHub Copilot MCP (currently disabled in local settings) |
-| [.env](file:///Users/ali/root/ai-orch/medicoder/.env) | Environment secrets | **Security** — GEMINI_API_KEY, must not be migrated |
-
-### Key Observations
-
-1. **Sophisticated safety layer**: The repo has 5+ safety hooks protecting databases, preventing expensive API calls, blocking AI attribution, and enforcing test-before-stop. These MUST be preserved.
-2. **Cross-executor hook sharing**: Cursor hooks call Claude hooks via a `claude-adapter.sh` bridge. AGY hooks duplicate Claude hooks in AGY format. This is the main pain point the orchestrator should solve.
-3. **Specialized agents**: 4 Claude Code agents with precise scoping (read-only DB access, edit-only, notes authoring). These represent Medicoder domain expertise.
-4. **Reusable patterns**: `catchup`, `pr`, `fix-until-green`, and `verify-before-stop` are generic — good candidates for global skills.
-5. **Cost controls**: Multiple hooks prevent agents from running expensive Gemini API pipeline calls without user approval.
-
----
 
 ## Proposed Changes
 
-### Phase 1: Migration System
+### 🔴 P0: Critical Security & Safety Fixes
 
-Build `ai-orch migrate` as the first deliverable. This command scans a project directory, inventories AI config, classifies it, and produces a structured migration manifest.
+#### [MODIFY] [safety.py](file:///Users/ali/root/ai-orch/orchestrator/safety.py)
+- **Fix `_validate_rm_tokens` false positives**: Change `if "r" in tok` to check for exact flag matches (e.g., `tok in ("-r", "-R", "-rf", "-fr")` or `tok.startswith("-") and "r" in tok`) instead of simple substring checks that trigger on filenames.
+- **Context-aware validation**: Safety engine currently treats prose (DELEGATE instructions) as shell commands. Update `SafetyEngine.validate_command()` to accept an `is_shell` boolean. Only run shell-specific regex tokenization on actual `PythonExecutor` commands, not natural language AI prompts.
 
-#### [NEW] `orchestrator/migrate.py`
-
-Scans a project directory for:
-- `.claude/` (settings, agents, skills, hooks, workflows, worktrees)
-- `.cursor/` (rules, hooks)
-- `.agents/` (hooks)
-- `.gemini/`
-- `.mcp.json`
-- `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `SKILL.md`
-- `*.mdc` files
-
-Produces:
-- `migration/<project>/inventory.md` — human-readable inventory
-- `migration/<project>/manifest.yaml` — structured classification
-- `migration/<project>/original/` — snapshot of all discovered files
-- `projects/<project>/` — translated project knowledge base
+#### [MODIFY] [python_executor.py](file:///Users/ali/root/ai-orch/executors/python_executor.py)
+- **Mitigate `shell=True` Injection Risk**: Introduce an `--interactive` mode that pauses and requests user approval for execution. If running autonomously, log a prominent warning for shell executions.
 
 ---
 
-### Phase 2: Project Knowledge Layer
+### 🔴 P1: Data Integrity & Critical Bugs
 
-#### [NEW] `projects/medicoder/project.yaml`
+#### [MODIFY] [router.py](file:///Users/ali/root/ai-orch/executors/router.py)
+- **Fix `rollback_workspace`**: Replace `git stash push` with a temporary commit approach to guarantee zero data loss and clean git history. Before execution: `git commit -a -m "polyphony-temp"`. If execution fails: `git reset --hard HEAD~1` (reverting both executor and pre-existing changes). If execution succeeds: `git reset --soft HEAD~1` (leaving all changes in the working directory and removing the commit from history).
 
-```yaml
-name: medicoder
-path: /Users/ali/root/Work/Medicoder/medicoder/medicoder
-description: ICD-10 medical coding system using Gemini for taxonomy ranking
+#### [MODIFY] [main.py](file:///Users/ali/root/ai-orch/orchestrator/main.py)
+- **Fix Latent NameError**: On line 293, `test_res` is referenced when `tests_passed=False`, but it is only defined in the non-dry-run `else` branch. Initialize `test_res = None` prior to the dry-run check.
+- **Implement Cost Tracking**: Introduce a budget enforcer. Track estimated tokens per iteration, calculate USD cost based on `models_config`, and abort if `max_cost_usd` is exceeded.
 
-executors:
-  lead: claude
-  primary: agy       # Swappable: change to "cursor" when quota refreshes
-  secondary: cursor
+#### [MODIFY] [logging.py](file:///Users/ali/root/ai-orch/orchestrator/logging.py)
+- **Fix Missing Logs**: `_write_log("WARN")` does not match `"WARNING"`, causing all safety block logs to be silently dropped. Update string matching to use `logging.INFO`, `logging.WARNING`, etc.
 
-safety:
-  protected_paths:
-    - database/
-  blocked_commands:
-    - git push
-    - git merge
-  require_tests_before_stop: true
-  require_approval_for:
-    - full pipeline runs (--config configs/full.yml)
-    - tune_level.py --force-full
-
-testing:
-  command: env/bin/python -m unittest discover -s tests -t .
-  interpreter: env/bin/python
-
-git:
-  automatic_commit: false
-  automatic_push: false
-  block_bulk_add: true
-  block_ai_attribution: true
-```
-
-#### [NEW] `projects/medicoder/context.md`
-
-High-level project description, architecture, conventions — derived from README.md and existing AI config.
-
-#### [NEW] `projects/medicoder/safety.md`
-
-Consolidated safety policies extracted from all hooks across all three agent configs.
+#### [MODIFY] [python_executor.py](file:///Users/ali/root/ai-orch/executors/python_executor.py)
+- **Fix File Change Detection**: `git status --porcelain` captures all dirty files, not just those changed during execution. Change `_get_changed_files_via_git` to use file checksums or `git diff --name-only HEAD` before and after execution to isolate only the delta.
 
 ---
 
-### Phase 3: Orchestrator Skeleton
+### 🟡 P2: Architectural Resilience & Waste Reduction
 
-#### [NEW] `orchestrator/__init__.py`
-#### [NEW] `orchestrator/main.py`
+#### [MODIFY] [main.py](file:///Users/ali/root/ai-orch/orchestrator/main.py)
+- **Persist Reasoner Sessions**: When resuming a task, `lead_session_id` starts as `None`. Persist this in `TaskState` and restore it on resume to prevent breaking session continuity.
+- **Build System Prompt Once**: `build_system_prompt()` is currently called inside the `while` loop on every iteration. Move it *outside* the loop to save compute and enable true prompt caching.
+- **Graceful Interrupts**: Add a signal handler (SIGINT) to catch `Ctrl+C`, save a checkpoint, and transition `TaskState` to `ABORTED` rather than leaving it as a zombie `RUNNING` task.
+- **Final Synthesis Fix**: The final synthesis pass doesn't record an `IterationRecord` and fails silently if quota is reached. Record its execution and allow the reasoner to request an iteration extension rather than forcing `COMPLETE`.
 
-Entry point. Implements the core decision loop:
+#### [MODIFY] [context.py](file:///Users/ali/root/ai-orch/orchestrator/context.py)
+- **Lazy Context Loading**: Truncate `context.md` and `conventions.md` at load-time (or cache the truncated result) rather than reading 10KB+ into memory on every iteration.
+- **Smart Delegation Header**: Only prepend the delegation context header if delegating to an AI executor. Skip it for `python` which only runs shell commands and ignores conventions.
+- **Active Skill Injection**: The orchestrator lists skills but never exposes their contents. Implement a mechanism (or `USE_SKILL` action) that injects a skill's `SKILL.md` content into the prompt when requested by the lead reasoner.
 
-```
-1. Load project config
-2. Load relevant knowledge
-3. Invoke Claude CLI (-p mode) with context + objective
-4. Parse Claude's structured JSON decision
-5. Route to selected executor (agy CLI or cursor agent CLI)
-6. Capture executor result
-7. Feed result back to Claude for review
-8. Iterate or complete
-9. Produce final report
-```
+#### [MODIFY] [claude_executor.py](file:///Users/ali/root/ai-orch/executors/claude_executor.py)
+- **Fix Quota Check**: `claude --version` only checks binary health, not quota. Rename `check_quota_status` to `check_binary_health()`.
+- **Robust Session Extraction**: The regex for extracting `session_id` is brittle and overwrites JSON parsing. Rely primarily on JSON output parsing, and tighten the regex as a strict fallback.
 
-#### [NEW] `orchestrator/cli.py`
-
-Click-based CLI:
-```bash
-ai-orch start <project> --goal "..."     # Start a task
-ai-orch migrate <path>                    # Migrate existing AI config
-ai-orch project add <name> <path>         # Register a project
-ai-orch project list                      # List projects
-ai-orch task list <project>               # List tasks
-ai-orch task status <project> <task-id>   # Check task status
-```
-
-#### [NEW] `orchestrator/context.py`
-
-Builds the context payload for Claude's reasoning calls. Assembles:
-- Project knowledge (context.md, safety.md, architecture)
-- Task objective and constraints
-- Current iteration state
-- Latest executor result
-- Relevant skills
-
-#### [NEW] `orchestrator/state.py`
-
-Manages persistent task state via JSON files:
-```
-tasks/<project>/<task-id>/
-├── task.yaml          # Objective, constraints, config
-├── state.json         # Current status, iteration count
-├── iterations/        # Per-iteration records
-├── results/           # Executor results
-├── logs/              # Execution logs
-└── report.md          # Final report
-```
+#### [MODIFY] [cursor_executor.py](file:///Users/ali/root/ai-orch/executors/cursor_executor.py)
+- **TTL Cache for Availability**: `is_available()` caches `False` at the class level permanently. Add a TTL (e.g., 5 minutes) so the orchestrator notices if Cursor becomes available mid-task.
 
 ---
 
-### Phase 4: Executor Adapters
+### 🟢 P3: Token Optimization & Cleanup
 
-#### [NEW] `executors/base.py`
+#### [MODIFY] [claude_executor.py](file:///Users/ali/root/ai-orch/executors/claude_executor.py)
+- **JSON Output Mode**: Use `--output-format json` natively for the lead reasoner call to guarantee parseable output and avoid markdown wrappers.
 
-```python
-class Executor(ABC):
-    @abstractmethod
-    def execute(self, instruction: str, context: dict) -> ExecutorResult: ...
-    
-    @abstractmethod
-    def is_available(self) -> bool: ...
-```
+#### [MODIFY] [context.py](file:///Users/ali/root/ai-orch/orchestrator/context.py)
+- **Compress System Prompt**: Remove redundant headers (`Active Rules: None`), condense the JSON schema, and trim empty lines to save static tokens.
+- **Remove History Noise**: Omit `Tests Passed: None` and `Files Changed: []` from the iteration history strings when they are empty.
+- **Aggressive Output Truncation**: Currently, 800 chars of output are kept per iteration, eating up to 8000 chars over 10 iterations. Compress repetitive test outputs or only retain the last `N` lines of execution output for historical iterations.
 
-#### [NEW] `executors/claude_executor.py`
+#### [MODIFY] [report.py](file:///Users/ali/root/ai-orch/orchestrator/report.py)
+- **Accurate Token Math**: Replace `chars // 4` with an accurate calculation that includes the system prompt, accumulated conversation context, and thinking tokens.
 
-Wraps `claude -p --output-format json` for lead reasoning:
-```python
-result = subprocess.run(
-    ['claude', '-p', prompt, '--output-format', 'json', '--allowedTools', 'Read,Bash'],
-    capture_output=True, text=True, cwd=project_path, timeout=300
-)
-```
-
-#### [NEW] `executors/agy_executor.py`
-
-Wraps `agy` CLI for implementation tasks.
-
-#### [NEW] `executors/cursor_executor.py`
-
-Wraps `cursor agent -p` for implementation tasks.
-
-#### [NEW] `executors/python_executor.py`
-
-Runs deterministic Python scripts (tests, benchmarks, file operations).
-
-#### [NEW] `executors/router.py`
-
-Routes tasks to executors. Claude decides which executor to use via structured JSON:
-```json
-{
-  "action": "DELEGATE",
-  "executor": "agy",
-  "instruction": "...",
-  "success_criteria": ["..."],
-  "verification": ["tests"]
-}
-```
-
-Fallback chain: if selected executor fails/unavailable, try the other. If both fail, escalate to Claude with cheap model.
+#### [MODIFY] [main.py](file:///Users/ali/root/ai-orch/orchestrator/main.py)
+- **Lazy Prompt Building for COMPLETE**: If the reasoner emits `COMPLETE` or `ABORT`, don't build the next user prompt unnecessarily.
+- **Thinking Level Downgrades**: Ensure the orchestrator respects when a reasoner emits `"thinking_level": "low"` for mechanical `VERIFY` steps, rather than forcing the config's default `high` everywhere.
 
 ---
 
-### Phase 5: Safety Layer
+### 🔵 P4: Design Improvements & Missing Features
 
-#### [NEW] `orchestrator/safety.py`
+#### [MODIFY] [safety.py](file:///Users/ali/root/ai-orch/orchestrator/safety.py)
+- **Remove Medicoder Defaults**: Strip `database/` and `configs/full.yml` from the base `SafetyConfig` class. These should only be defined in `project.yaml`.
 
-Enforces project-level safety policies before executor actions:
-- Checks protected paths
-- Validates commands against blocklists
-- Enforces test-before-stop
-- Requires human approval for flagged operations
+#### [MODIFY] [global.yaml](file:///Users/ali/root/ai-orch/config/global.yaml)
+- **Fix Model IDs**: Correct invalid Gemini model IDs (`gemini-3.1-pro-high` -> `gemini-2.0-flash` or similar) to prevent instant failures.
 
----
-
-### Phase 6: Logging & Reporting
-
-#### [NEW] `orchestrator/logging.py`
-
-Structured logging with separate streams:
-- Orchestrator decisions
-- Claude reasoning
-- Executor actions
-- Test results
-- Errors
-
-#### [NEW] `orchestrator/report.py`
-
-Generates final task report:
-```markdown
-# Task Report: <objective>
-
-## Summary
-...
-
-## Iterations
-1. Claude decided: ...
-2. agy implemented: ...
-3. Tests: passed/failed
-4. Claude reviewed: ...
-
-## Files Changed
-...
-
-## Metrics
-...
-
-## GitHub
-NO ACTION TAKEN.
-```
-
----
-
-## Target Filesystem
-
-```
-/Users/ali/root/ai-orch/
-├── README.md
-├── pyproject.toml
-├── .gitignore
-├── .env                          # API keys if needed later
-│
-├── orchestrator/
-│   ├── __init__.py
-│   ├── main.py                   # Core decision loop
-│   ├── cli.py                    # Click CLI
-│   ├── context.py                # Context builder
-│   ├── state.py                  # Task state management
-│   ├── safety.py                 # Safety gates
-│   ├── logging.py                # Structured logging
-│   └── report.py                 # Report generation
-│
-├── executors/
-│   ├── __init__.py
-│   ├── base.py                   # Executor ABC
-│   ├── claude_executor.py        # claude -p wrapper
-│   ├── agy_executor.py           # agy CLI wrapper
-│   ├── cursor_executor.py        # cursor agent -p wrapper
-│   ├── python_executor.py        # Local Python/shell
-│   └── router.py                 # Executor routing
-│
-├── migrate/
-│   ├── __init__.py
-│   ├── scanner.py                # Project AI config scanner
-│   ├── classifier.py             # Item classification
-│   └── translator.py             # Semantic translation
-│
-├── projects/
-│   └── medicoder/
-│       ├── project.yaml
-│       ├── context.md
-│       ├── safety.md
-│       ├── conventions.md
-│       └── skills/               # Medicoder-specific skills
-│
-├── skills/                       # Global reusable skills
-│   ├── catchup/
-│   ├── pr/
-│   ├── fix-until-green/
-│   └── verify-before-stop/
-│
-├── tasks/                        # Temporary task state
-│   └── medicoder/
-│
-├── migration/                    # Migration snapshots
-│   └── medicoder/
-│       ├── original/
-│       ├── inventory.md
-│       └── manifest.yaml
-│
-├── logs/
-└── config/
-    └── global.yaml               # Global orchestrator config
-```
-
----
+#### Setup & Build
+- **Clean Egg Info**: Remove the stale `ai_orch.egg-info` directory.
 
 ## Verification Plan
 
 ### Automated Tests
-
-```bash
-# Unit tests for orchestrator components
-python -m pytest tests/
-
-# Integration test: migration scan
-ai-orch migrate /Users/ali/root/Work/Medicoder/medicoder/medicoder
-
-# Integration test: read-only task
-ai-orch start medicoder --goal "Analyze the repository structure" --read-only
-
-# Integration test: simple task
-ai-orch start medicoder --goal "Run the test suite and summarize results"
-```
+- Run `pytest -v` to ensure all existing router, state, and safety tests pass.
+- Add tests for `safety.py` to ensure `rm --recursive file.txt` is blocked but `rm --preserve-root file.txt` is allowed.
+- Add tests for `context.py` to ensure empty fields are elided from the system and history prompts.
 
 ### Manual Verification
-
-1. Run `ai-orch migrate` against Medicoder → verify inventory matches what we found above
-2. Run a read-only analysis task → verify Claude reasons correctly, no files modified
-3. Run a simple implementation task → verify executor routing works, tests pass
-4. Verify fallback: disable agy → confirm Cursor is used instead
-5. Verify safety: attempt to modify `database/` → confirm blocked
-
----
-
-## Implementation Order
-
-```mermaid
-graph TD
-    A["Phase 1: Migration System<br/>ai-orch migrate"] --> B["Phase 2: Project Knowledge<br/>projects/medicoder/"]
-    B --> C["Phase 3: Orchestrator Skeleton<br/>Core decision loop + CLI"]
-    C --> D["Phase 4: Executor Adapters<br/>claude, agy, cursor, python"]
-    D --> E["Phase 5: Safety Layer<br/>Protected paths, test gates"]
-    E --> F["Phase 6: Logging & Reporting<br/>Structured logs, final reports"]
-    F --> G["Phase 7: First Task<br/>Read-only analysis"]
-    G --> H["Phase 8: Iterative Task<br/>Full loop with executor delegation"]
-```
-
-> [!IMPORTANT]
-> **Phase 1 (Migration) is the first deliverable** as requested. The orchestrator is built on top of the migrated knowledge base.
-
----
-
-## Open Questions
-
-> [!NOTE]
-> These don't block implementation but will affect later phases.
-
-1. **Worktree support**: The Medicoder `.claude/worktrees/` directory suggests existing worktree-based workflows. Should the orchestrator support git worktrees for V1, or defer to later?
-
-2. **Workflow migration**: The Claude workflows (`fix-until-green.js`, `audit-eval-contamination.js`) are JS-based Claude Code features. Should the orchestrator replicate their logic in Python, or call Claude Code's workflow system?
-
-3. **Agent migration**: The 4 specialized Claude agents (`db-reader`, `pcs-editor`, `am-achi-notes-author`, `pcs-notes-author`) are deeply Medicoder-specific. Should these become orchestrator skills, or remain as Claude Code agents that the orchestrator invokes?
+- Trigger a `dry_run=True` task that "fails" verification to ensure the `NameError` is resolved.
+- Press `Ctrl+C` during an active task to verify the SIGINT handler correctly saves state and aborts.

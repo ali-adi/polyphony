@@ -16,7 +16,7 @@ class AgyExecutor(BaseExecutor):
     """Executes reasoning or coding actions via Antigravity CLI (`agy -p`)."""
 
     def __init__(self, binary_path: Optional[str] = None):
-        self.binary_path = binary_path or shutil.which("agy") or "/Users/ali/.local/bin/agy"
+        self.binary_path = binary_path or shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
 
     @property
     def name(self) -> str:
@@ -55,12 +55,20 @@ class AgyExecutor(BaseExecutor):
 
         cmd = [
             self.binary_path,
-            "-p",
-            instruction,
+            "--input-format",
+            "text",
             "--dangerously-skip-permissions",
             "--add-dir",
             cwd,
         ]
+
+        # Session continuation
+        session_id = kwargs.get("session_id") or kwargs.get("conversation_id")
+        continue_session = kwargs.get("continue_session", False)
+        if session_id:
+            cmd.extend(["--conversation", str(session_id)])
+        elif continue_session:
+            cmd.append("--continue")
 
         if output_format in ("text", "json", "stream-json"):
             cmd.extend(["--output-format", output_format])
@@ -84,6 +92,7 @@ class AgyExecutor(BaseExecutor):
         try:
             res = subprocess.run(
                 cmd,
+                input=instruction,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -95,6 +104,13 @@ class AgyExecutor(BaseExecutor):
 
             output = res.stdout.strip()
             error = res.stderr.strip() if res.returncode != 0 else None
+            full_out = (output + " " + (error or "")).lower()
+
+            metadata = {"cmd": " ".join(cmd)}
+            if session_id:
+                metadata["session_id"] = session_id
+            if "quota" in full_out or "rate limit" in full_out or "resource exhausted" in full_out:
+                metadata["quota_exceeded"] = True
 
             return ExecutorResult(
                 success=(res.returncode == 0),
@@ -104,7 +120,7 @@ class AgyExecutor(BaseExecutor):
                 exit_code=res.returncode,
                 duration_seconds=duration,
                 files_changed=newly_changed,
-                metadata={"cmd": " ".join(cmd)},
+                metadata=metadata,
             )
         except subprocess.TimeoutExpired:
             duration = time.time() - start_time

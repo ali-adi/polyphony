@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from executors.base import BaseExecutor, ExecutorResult
 from executors.claude_executor import ClaudeExecutor
@@ -12,6 +13,43 @@ from executors.cursor_executor import CursorExecutor
 from executors.python_executor import PythonExecutor
 
 logger = logging.getLogger("polyphony.router")
+
+
+def is_infrastructure_error(result: ExecutorResult) -> bool:
+    """Determine if a failure is an infrastructure issue (deserving fallback) vs task-level issue."""
+    if result.metadata.get("quota_exceeded") or result.metadata.get("timeout"):
+        return True
+    if result.exit_code in (124, 127):  # timeout or binary not found
+        return True
+    err_str = ((result.error or "") + " " + (result.output or "")).lower()
+    infra_signals = [
+        "quota",
+        "rate limit",
+        "weekly limit",
+        "binary not found",
+        "not available",
+        "resource exhausted",
+        "timed out",
+        "timeout",
+        "failed execution",
+        "command failed to start",
+    ]
+    return any(signal in err_str for signal in infra_signals)
+
+
+def rollback_workspace(cwd: str):
+    """Roll back uncommitted workspace changes after a failed execution in a git repository."""
+    try:
+        git_dir = Path(cwd) / ".git"
+        if git_dir.exists():
+            import subprocess
+            subprocess.run(
+                ["git", "stash", "push", "--include-untracked", "-m", "polyphony-checkpoint"],
+                cwd=cwd,
+                capture_output=True,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to rollback workspace in {cwd}: {e}")
 
 
 class ExecutorRouter:
@@ -97,8 +135,6 @@ class ExecutorRouter:
                     if candidate_name != target_executor or not candidate_kwargs.get("thinking_level"):
                         if exec_profile.thinking_level:
                             candidate_kwargs["thinking_level"] = exec_profile.thinking_level
-                if hasattr(models_config, "subagents") and "subagents" not in candidate_kwargs:
-                    candidate_kwargs["subagents"] = models_config.subagents
 
             result = candidate.execute(
                 instruction=instruction,
@@ -113,11 +149,22 @@ class ExecutorRouter:
                 return result, candidate_name
 
             last_result = result
-            # If failed due to quota limit or binary error, try next in fallback chain
-            logger.warning(
-                f"Executor '{candidate_name}' failed with error: {result.error}. "
-                f"Checking fallback..."
-            )
+            # Distinguish infrastructure errors vs task errors
+            if is_infrastructure_error(result):
+                logger.warning(
+                    f"Executor '{candidate_name}' failed with infrastructure error: {result.error}. "
+                    f"Rolling back changes and attempting fallback..."
+                )
+                if not read_only:
+                    rollback_workspace(cwd)
+                continue
+            else:
+                # Task error (bad code, assertion failure, etc.) -> return to orchestrator for re-planning
+                logger.info(
+                    f"Executor '{candidate_name}' failed with task-level error: {result.error}. "
+                    f"Returning to orchestrator without fallback."
+                )
+                return result, candidate_name
 
         # If all candidates exhausted, return last result or failure record
         if last_result:

@@ -45,3 +45,25 @@ def test_router_fallback():
     assert res.success is True
     assert used == "python"
     assert "routed" in res.output
+
+
+def test_python_executor_safety_blocking(tmp_path):
+    executor = PythonExecutor()
+    res = executor.execute("git push origin main", cwd=str(tmp_path))
+
+    assert res.success is False
+    assert res.metadata.get("safety_blocked") is True
+    assert "Blocked by safety policy" in res.error
+
+
+def test_python_executor_git_rename_parsing(tmp_path, monkeypatch):
+    from executors.python_executor import _get_changed_files_via_git
+    import subprocess
+
+    class DummyProc:
+        returncode = 0
+        stdout = "R  old_file.py -> new_file.py\nM  existing.py\n?? untracked.py\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: DummyProc())
+    changed = _get_changed_files_via_git(str(tmp_path))
+    assert changed == ["new_file.py", "existing.py", "untracked.py"]

@@ -157,13 +157,33 @@ def _generate_project_yaml(
     dest_path: Path,
 ) -> None:
     """Generate projects/<project>/project.yaml."""
-    has_env = (project_path / "env").exists()
-    python_bin = "env/bin/python" if has_env else "python3"
+    has_env = (project_path / "env").exists() or (project_path / ".venv").exists()
+    python_bin = "env/bin/python" if (project_path / "env").exists() else (".venv/bin/python" if (project_path / ".venv").exists() else "python3")
+
+    readme = project_path / "README.md"
+    desc = f"Autonomous orchestrator workspace for {project_name}"
+    if readme.exists():
+        try:
+            for line in readme.read_text(encoding="utf-8").splitlines():
+                clean = line.strip().lstrip("#").strip()
+                if clean:
+                    desc = clean
+                    break
+        except Exception:
+            pass
+
+    test_cmd = f"{python_bin} -m unittest discover -s tests -t ." if (project_path / "tests").exists() else "pytest"
+
+    approvals = ["external paid API calls", "unbudgeted production sweeps"]
+    if (project_path / "configs" / "full.yml").exists():
+        approvals.append("configs/full.yml")
+    if (project_path / "scripts" / "tune_level.py").exists():
+        approvals.append("tune_level.py --force-full")
 
     config_data = {
         "name": project_name,
         "path": str(project_path.resolve()),
-        "description": "ICD-10 medical coding system using Gemini for taxonomy ranking",
+        "description": desc,
         "executors": {
             "lead": "claude",
             "primary": "agy",
@@ -173,7 +193,6 @@ def _generate_project_yaml(
             "protected_paths": [
                 "database/",
                 "**/database/**",
-                "configs/smoke.yml",
             ],
             "blocked_commands": [
                 "git push",
@@ -186,14 +205,10 @@ def _generate_project_yaml(
                 "git commit -am",
             ],
             "require_tests_before_stop": True,
-            "require_approval_for": [
-                "full pipeline runs (--config configs/full.yml)",
-                "tune_level.py --force-full",
-                "external paid API calls",
-            ],
+            "require_approval_for": approvals,
         },
         "testing": {
-            "command": f"{python_bin} -m unittest discover -s tests -t .",
+            "command": test_cmd,
             "interpreter": python_bin,
         },
         "git": {
@@ -218,33 +233,35 @@ def _generate_context_md(
     readme_path = project_path / "README.md"
     readme_content = ""
     if readme_path.exists():
-        readme_content = readme_path.read_text(encoding="utf-8")
+        try:
+            readme_content = readme_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    components = []
+    for item in sorted(project_path.iterdir()):
+        if item.is_dir() and not item.name.startswith(".") and item.name not in ("env", "venv", ".venv", "__pycache__", "node_modules"):
+            components.append(f"- **`{item.name}/`**: Directory module component")
+
+    comp_str = "\n".join(components) if components else "- Flat workspace or single-module structure."
 
     content = f"""# Project Context: {project_name}
 
 ## High-Level Objective
+Autonomous project workspace for `{project_name}` managed by Polyphony.
 
-Medicoder is an autonomous ICD-10 medical coding system that maps free-text clinical notes and diagnosis strings to standardized taxonomy codes (ICD-10-AM, ICD-10-PCS, ACHI) using hierarchical ranking and large language models.
-
-## Architectural Components
-
-- **Core Taxonomy Database**: Pre-built, versioned SQLite taxonomy snapshots located in `database/`. These tables are immutable references and must never be edited directly.
-- **Pipeline Runner**: `medicoder/main.py` runs batch evaluation against clinical case sets. Configured via YAML in `configs/` (`smoke.yml`, `sample.yml`, `full.yml`).
-- **Tuning Harness**: `scripts/tune_level.py` tunes prompt structures and level-by-level decision accuracy with strict run budgets.
-- **Test Suite**: Standard unittest suite under `tests/`. Verified using `env/bin/python -m unittest discover -s tests -t .`.
+## Discovered Project Structure
+{comp_str}
 
 ## Key Technical Conventions
-
-- **Python Runtime**: Python 3.11+ virtualenv located at `env/`.
-- **Database Access**: Read-only SQLite queries (`sqlite3 -safe -readonly`).
 - **Code Edits**: Minimal, focused surgical changes. Always run tests to verify green status before marking tasks complete.
 - **Git Protocol**: Individual explicit file adds only (`git add <file>`). Never run `git add -A` or indiscriminate staging.
+- **Safety Gate**: Never alter protected databases or configuration assets without operator verification.
 
 ---
 
 ## Extracted README Reference
-
-{readme_content}
+{readme_content or "No README.md found in repository root."}
 """
     _ensure_dir(dest_path.parent)
     dest_path.write_text(content, encoding="utf-8")
@@ -256,50 +273,43 @@ def _generate_conventions_md(
     dest_path: Path,
 ) -> None:
     """Generate projects/<project>/conventions.md detailing coding standards, style, and rules."""
+    has_env = (project_path / "env").exists() or (project_path / ".venv").exists()
+    py_runtime = "env/bin/python" if (project_path / "env").exists() else (".venv/bin/python" if (project_path / ".venv").exists() else "python3")
+
     runbook_path = project_path / "tuning" / "runbook.md"
     runbook_excerpt = ""
     if runbook_path.exists():
         try:
             rb_lines = runbook_path.read_text(encoding="utf-8").splitlines()
-            runbook_excerpt = "\n".join(rb_lines[30:70])
+            runbook_excerpt = "\n".join(rb_lines[:40])
         except Exception:
             pass
 
     content = f"""# Engineering & Authoring Conventions: {project_name}
 
 ## 1. Code Style & Architecture
-- **Language**: Python 3.11+ adhering to PEP 8 standards.
+- **Language**: Python 3 adhering to standard PEP 8 conventions.
 - **Type Annotations**: Mandatory type hints for public signatures and critical data models.
 - **Docstrings & Comments**: Preserved at all times. Do not strip or alter unrelated comments during edits.
 - **Edits**: Minimal, surgical modifications. Fix the implementation code rather than altering tests, unless the test specification itself is explicitly proven obsolete.
 
 ## 2. Testing & Quality Discipline
-- **Virtual Environment**: All commands, scripts, and tests must be executed using `env/bin/python`.
-- **Green Suite Guarantee**: Keep the unit tests passing at all times. Always run `env/bin/python -m unittest discover -s tests -t .` after any code, notes, or prompt modification.
+- **Virtual Environment**: All commands, scripts, and tests must be executed using `{py_runtime}`.
+- **Green Suite Guarantee**: Keep the unit tests passing at all times. Verify tests pass after any modification.
 - **Zero Broken Changes**: Never declare a task or PR complete if tests are failing.
 
-## 3. Taxonomy Notes Authoring Rules
-- **Note Format**: `<prose>. Includes: term; term; term.`
-- **Formatting Constraints**: Single-line only, no pipe characters (`|`), at most one `Includes:` section per entry.
-- **Prose Content**: State what the code/row covers and where its near neighbors sit in the hierarchy.
-- **Case Contamination Ban**: Nothing in a note or prompt may come directly from evaluation cases. No verbatim phrases or code lists lifted from case misses. Notes draw strictly from taxonomy manuals and domain knowledge.
-
-## 4. Database Interaction Conventions
+## 3. Database Interaction Conventions
 - **Read-Only SQLite**: Database access is strictly read-only (`sqlite3 -safe -readonly`).
-- **Immutable Snapshots**: Never edit anything under `database/` manually. The automated notes generator scripts (`scripts/generate_*_notes.py`) are the sole authorized writers.
+- **Immutable References**: Never edit database files directly without explicit authorization.
 
-## 5. Git Discipline & Safety
+## 4. Git Discipline & Safety
 - **Explicit File Staging**: Only stage explicit file paths (`git add <path>`). Indiscriminate staging (`git add -A`, `git add .`, `git add -u`, `git commit -a`) is prohibited.
 - **Commit Authorship**: Never append AI attribution trailers (`Co-authored-by: ...`).
 - **Commit Responsibility**: Autonomous agents stage and verify; operator reviews and pushes.
-
----
-
-## Reference Runbook Excerpt
-```markdown
-{runbook_excerpt}
-```
 """
+    if runbook_excerpt:
+        content += f"\n---\n\n## Reference Runbook Excerpt\n```markdown\n{runbook_excerpt}\n```\n"
+
     _ensure_dir(dest_path.parent)
     dest_path.write_text(content, encoding="utf-8")
 
@@ -315,28 +325,25 @@ These policies are strictly enforced across all executor engines (`claude`, `agy
 
 ## 1. Protected Database Snapshots
 - **Rule**: Never edit, modify, truncate, or overwrite any file under `database/` or `*/database/*`.
-- **Rationale**: These are pre-computed taxonomy database snapshots. Corrupting them invalidates ICD-10 codings.
+- **Rationale**: Pre-computed database snapshots are treated as immutable references.
 - **Action on Violation**: Immediate execution block and task abort.
 
-## 2. Cost Safety & API Pipeline Throttling
-- **Rule**: Autonomous agents may only run pipeline commands targeting `configs/smoke.yml` or `configs/sample.yml` without `--cases`.
-- **Blocked Commands**:
-  - Direct runs of `--config configs/full.yml`
-  - Running `scripts/tune_level.py --force-full`
-- **Rationale**: Full pipeline sweeps make dozens of paid external Gemini API calls. Full evaluations must be explicitly initiated by the human operator.
+## 2. Cost Safety & Rate Throttling
+- **Rule**: Autonomous agents must not execute unbudgeted full sweeps or large paid external API jobs.
+- **Rationale**: Avoid uncontrolled quota or credit consumption without operator approval.
 
 ## 3. Git Operations & Repository Integrity
 - **Rule**:
   - Bulk staging (`git add -A`, `git add .`, `git add --all`, `git add -u`) is strictly forbidden. Files must be added explicitly by path.
   - Automatic `git push` or `git merge` is disabled.
   - AI attribution signatures (`Co-authored-by: ...`) in git commit messages are blocked.
-- **Rationale**: Prevent accidental inclusion of credentials, temporary evaluation artifacts, or unintended commits.
+- **Rationale**: Prevent accidental leakage of sensitive files or unintended commits.
 
 ## 4. Database Query Safety
 - **Rule**: SQLite database queries must be strictly read-only (`sqlite3 -safe -readonly` or `SELECT` statements only). `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER` are blocked.
 
 ## 5. Verification Before Stop (Quality Gate)
-- **Rule**: Before any task or iteration is declared successful, the full test suite must pass (`env/bin/python -m unittest discover -s tests -t .`).
+- **Rule**: Before any task or iteration is declared successful, verification checks must pass.
 - **Action on Failure**: Agent must inspect failures and fix them or halt with a report.
 """
     _ensure_dir(dest_path.parent)
@@ -458,29 +465,30 @@ description: Migrated domain agent {skill_name} for {project_name}
                     created.append(s_name)
 
     # 3. Claude workflows
-    audit_wf = project_path / ".claude" / "workflows" / "audit-eval-contamination.js"
-    if audit_wf.exists():
-        wf_name = "audit-eval-contamination"
-        wf_dir = target_skills_dir / wf_name
-        _ensure_dir(wf_dir)
-        wf_skill_file = wf_dir / "SKILL.md"
-        wf_code = audit_wf.read_text(encoding="utf-8")
-        wf_content = f"""---
+    claude_wf_dir = project_path / ".claude" / "workflows"
+    if claude_wf_dir.exists():
+        for wf_file in sorted(claude_wf_dir.glob("*.js")):
+            wf_name = wf_file.stem
+            wf_dir = target_skills_dir / wf_name
+            _ensure_dir(wf_dir)
+            wf_skill_file = wf_dir / "SKILL.md"
+            wf_code = wf_file.read_text(encoding="utf-8")
+            wf_content = f"""---
 name: {wf_name}
-description: Audit case files for evaluation contamination against ICD-10 taxonomy
+description: Migrated workflow {wf_name} for {project_name}
 ---
 
 ## Objective
-Audit clinical case files and evaluation sets to detect any data leakage or eval contamination.
+Automated workflow migrated from Claude configuration.
 
 ## Workflow Implementation
 ```javascript
 {wf_code}
 ```
 """
-        wf_skill_file.write_text(wf_content, encoding="utf-8")
-        if wf_name not in created:
-            created.append(wf_name)
+            wf_skill_file.write_text(wf_content, encoding="utf-8")
+            if wf_name not in created:
+                created.append(wf_name)
 
     return sorted(created)
 

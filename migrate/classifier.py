@@ -175,14 +175,6 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
             rationale="Workspace permissions and command allow/deny lists.",
             action="translate",
         )
-    if name in ("settings.local.json", "hooks.json", "claude-adapter.sh"):
-        return ClassifiedItem(
-            item=item,
-            scope=ClassificationScope.EXECUTOR,
-            target_destination=f"migration/{project_name}/original/{item.rel_path}",
-            rationale=f"Executor adapter / tool-specific configuration ({item.source_tool}).",
-            action="copy_as_is",
-        )
 
     # 10. MCP configuration
     if name == ".mcp.json":

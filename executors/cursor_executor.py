@@ -15,6 +15,8 @@ from executors.python_executor import _get_changed_files_via_git
 class CursorExecutor(BaseExecutor):
     """Executes coding actions via Cursor Agent CLI."""
 
+    _class_is_agent_ready: Optional[bool] = None
+
     def __init__(self, binary_path: Optional[str] = None):
         candidate_paths = [
             binary_path,
@@ -23,7 +25,14 @@ class CursorExecutor(BaseExecutor):
             os.path.expanduser("~/.local/bin/cursor"),
         ]
         self.binary_path = next((p for p in candidate_paths if p and Path(p).exists()), None)
-        self._is_agent_ready: Optional[bool] = None
+
+    @property
+    def _is_agent_ready(self) -> Optional[bool]:
+        return CursorExecutor._class_is_agent_ready
+
+    @_is_agent_ready.setter
+    def _is_agent_ready(self, val: Optional[bool]):
+        CursorExecutor._class_is_agent_ready = val
 
     @property
     def name(self) -> str:
@@ -32,8 +41,8 @@ class CursorExecutor(BaseExecutor):
     def is_available(self) -> bool:
         if not self.binary_path or not Path(self.binary_path).exists():
             return False
-        if self._is_agent_ready is not None:
-            return self._is_agent_ready
+        if CursorExecutor._class_is_agent_ready is not None:
+            return CursorExecutor._class_is_agent_ready
 
         # Test if cursor agent subcommand is installed and available
         try:
@@ -45,13 +54,13 @@ class CursorExecutor(BaseExecutor):
             )
             # If it prompts to install from web, agent binary is not locally ready
             if "cursor-agent not found" in res.stdout or "cursor-agent not found" in res.stderr:
-                self._is_agent_ready = False
+                CursorExecutor._class_is_agent_ready = False
             else:
-                self._is_agent_ready = (res.returncode == 0)
+                CursorExecutor._class_is_agent_ready = (res.returncode == 0)
         except Exception:
-            self._is_agent_ready = False
+            CursorExecutor._class_is_agent_ready = False
 
-        return self._is_agent_ready
+        return CursorExecutor._class_is_agent_ready
 
     def execute(
         self,
@@ -77,13 +86,14 @@ class CursorExecutor(BaseExecutor):
         start_time = time.time()
         initial_files = set(_get_changed_files_via_git(cwd))
 
-        cmd = [self.binary_path, "agent", "-p", instruction]
+        cmd = [self.binary_path, "agent", "-p"]
         if model:
             cmd.extend(["--model", str(model)])
 
         try:
             res = subprocess.run(
                 cmd,
+                input=instruction,
                 cwd=cwd,
                 capture_output=True,
                 text=True,

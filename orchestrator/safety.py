@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
-from dataclasses import dataclass, field
+import shlex
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 
@@ -42,6 +43,88 @@ class SafetyConfig(BaseModel):
     )
     block_ai_attribution: bool = True
     read_only: bool = False
+    isolate_git_branch: bool = False
+
+
+def resolve_safety_config(
+    global_cfg: Optional[Dict[str, Any]] = None,
+    project_cfg: Optional[Dict[str, Any]] = None,
+    read_only: bool = False,
+) -> SafetyConfig:
+    """Merge safety configuration from global.yaml and project.yaml."""
+    global_cfg = global_cfg or {}
+    project_cfg = project_cfg or {}
+
+    g_safety = global_cfg.get("safety", {})
+    p_safety = project_cfg.get("safety", {})
+    p_git = project_cfg.get("git", {})
+
+    # 1. Blocked commands merge
+    blocked = list(p_safety.get("blocked_commands", []))
+    for g_cmd in g_safety.get("blocked_global_commands", []):
+        if g_cmd not in blocked:
+            blocked.append(g_cmd)
+
+    if not blocked:
+        # Defaults
+        blocked = [
+            "git push",
+            "git merge",
+            "git add -A",
+            "git add .",
+            "git add --all",
+            "git add -u",
+            "git commit -a",
+            "git commit -am",
+            "rm -rf /",
+            "rm -rf ~",
+            ":(){ :|:& };:",
+            "mkfs",
+            "dd if=",
+        ]
+    else:
+        # Ensure critical dangerous commands from global are present if block_dangerous_git is on
+        if g_safety.get("block_dangerous_git", True):
+            dangerous_git = ["git push", "git merge"]
+            for dg in dangerous_git:
+                if dg not in blocked:
+                    blocked.append(dg)
+
+    # 2. Protected paths merge
+    protected = list(p_safety.get("protected_paths", ["database/", "**/database/**"]))
+    for g_prot in g_safety.get("protected_paths", []):
+        if g_prot not in protected:
+            protected.append(g_prot)
+
+    # 3. Require tests before stop
+    req_tests = p_safety.get(
+        "require_tests_before_stop",
+        g_safety.get("enforce_verification_tests", True),
+    )
+
+    # 4. Approval list
+    approvals = list(p_safety.get("require_approval_for", [
+        "configs/full.yml",
+        "tune_level.py --force-full",
+        "--force-full",
+    ]))
+
+    # 5. Read-only mode
+    enforce_ro = read_only or g_safety.get("enforce_read_only_default", False)
+
+    # 6. Block AI attribution & branch isolation
+    block_attrib = p_git.get("block_ai_attribution", True)
+    isolate_branch = p_git.get("isolate_branch", False) or g_safety.get("isolate_git_branch", False)
+
+    return SafetyConfig(
+        protected_paths=protected,
+        blocked_commands=blocked,
+        require_tests_before_stop=req_tests,
+        require_approval_for=approvals,
+        block_ai_attribution=block_attrib,
+        read_only=enforce_ro,
+        isolate_git_branch=isolate_branch,
+    )
 
 
 class SafetyEngine:
@@ -51,18 +134,40 @@ class SafetyEngine:
         self.config = config or SafetyConfig()
         self.project_root = Path(project_root).resolve() if project_root else None
 
-    def validate_command(self, command: str) -> Tuple[bool, Optional[str]]:
+    def _tokenize(self, text: str) -> List[str]:
+        """Tokenize text into arguments and shell punctuation."""
+        try:
+            lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            return list(lexer)
+        except Exception:
+            return text.strip().split()
+
+    def _split_into_subcommands(self, command: str) -> List[List[str]]:
+        """Tokenize and split command line across chaining operators (; && || | &)."""
+        tokens = self._tokenize(command)
+
+        subcommands: List[List[str]] = []
+        current: List[str] = []
+        for t in tokens:
+            if t in (";", "&&", "||", "|", "&", "\n"):
+                if current:
+                    subcommands.append(current)
+                    current = []
+            else:
+                current.append(t)
+        if current:
+            subcommands.append(current)
+
+        return subcommands
+
+    def validate_command(self, command: str, is_shell: bool = True) -> Tuple[bool, Optional[str]]:
         """Validate whether a shell or CLI command complies with safety policies."""
         cmd_str = command.strip()
+        if not cmd_str:
+            return True, None
 
-        # 1. Check blocked commands
-        for blocked in self.config.blocked_commands:
-            # Match word boundary or exact token
-            pattern = r"(?:^|\s|;|&|\|)" + re.escape(blocked) + r"(?:\s|;|&|\||$)"
-            if re.search(pattern, cmd_str):
-                return False, f"Blocked by safety policy: command matches blocked pattern '{blocked}'"
-
-        # 2. Check commands requiring explicit approval (e.g. expensive pipeline runs)
+        # 1. Check commands requiring explicit approval (e.g. expensive pipeline runs)
         for req in self.config.require_approval_for:
             if req in cmd_str:
                 return (
@@ -71,17 +176,157 @@ class SafetyEngine:
                     f"Full runs must not be triggered autonomously.",
                 )
 
-        # 3. Check AI attribution in git commits
+        # 2. Check AI attribution in git commits
         if self.config.block_ai_attribution:
-            if "git commit" in cmd_str and "co-authored-by" in cmd_str.lower():
+            if "git" in cmd_str and "co-authored-by" in cmd_str.lower():
                 return False, "Blocked by safety policy: AI attribution in git commits is prohibited."
 
-        # 4. If in read-only mode, block file-modifying tools/commands
+        # 3. Check read-only mode violations
         if self.config.read_only:
-            write_indicators = ["git commit", "git add", "rm ", "mv ", "sed -i", "echo >", "tee "]
+            write_indicators = ["git commit", "git add", "git rm", "rm ", "mv ", "sed -i", "echo >", "tee ", "touch "]
             for ind in write_indicators:
                 if ind in cmd_str:
-                    return False, f"Blocked: task is running in read-only mode, write command '{ind}' is disallowed."
+                    return False, f"Blocked: task is running in read-only mode, write command '{ind.strip()}' is disallowed."
+
+        # 4. Check raw substring patterns (e.g. fork bombs, raw byte writing)
+        raw_signatures = [":(){ :|:& };:", "mkfs", "dd if="]
+        for sig in raw_signatures:
+            if sig in self.config.blocked_commands or sig in cmd_str:
+                if sig in cmd_str:
+                    return False, f"Blocked by safety policy: command matches blocked pattern '{sig}'"
+
+        # 5. Tokenized analysis of subcommands (only if executed in a shell environment)
+        if not is_shell:
+            return True, None
+
+        subcommands = self._split_into_subcommands(cmd_str)
+        for sub_tokens in subcommands:
+            if not sub_tokens:
+                continue
+
+            # Normalized subcmd string
+            sub_str = " ".join(sub_tokens)
+
+            # Check if any configured blocked command is an exact or subsequence match
+            for blocked in self.config.blocked_commands:
+                b_tokens = self._tokenize(blocked)
+                if not b_tokens:
+                    continue
+
+                # Check contiguous token subsequence
+                b_len = len(b_tokens)
+                for i in range(len(sub_tokens) - b_len + 1):
+                    if sub_tokens[i : i + b_len] == b_tokens:
+                        return False, f"Blocked by safety policy: command matches blocked pattern '{blocked}'"
+
+            # Check Git commands with flag variations (e.g., git -C repo push, git --no-pager push)
+            if sub_tokens[0] == "git":
+                git_verdict, git_reason = self._validate_git_tokens(sub_tokens)
+                if not git_verdict:
+                    return False, git_reason
+
+            # Check rm commands with split flags (e.g., rm -r -f /, rm -rf /)
+            if sub_tokens[0] == "rm":
+                rm_verdict, rm_reason = self._validate_rm_tokens(sub_tokens)
+                if not rm_verdict:
+                    return False, rm_reason
+
+            # Check sqlite3 commands for unsafe SQL operations
+            if sub_tokens[0] == "sqlite3":
+                # Find SQL query argument
+                for arg in sub_tokens[1:]:
+                    if any(kw in arg.lower() for kw in ["insert", "update", "delete", "drop", "alter", "create"]):
+                        safe_sql, sql_reason = self.validate_sqlite_query(arg)
+                        if not safe_sql:
+                            return False, sql_reason
+
+            # Check redirection or file targeting to protected paths
+            for arg in sub_tokens:
+                # Remove quotes or redirection operators
+                cleaned = arg.lstrip(">").strip()
+                if cleaned and any(cleaned.startswith(p.rstrip("/*")) for p in self.config.protected_paths):
+                    # If this is a write-like command
+                    if sub_tokens[0] in ("rm", "mv", "cp", "touch", "sed", "tee") or ">" in arg:
+                        safe_path, path_reason = self.validate_path_modification(cleaned)
+                        if not safe_path:
+                            return False, path_reason
+
+        return True, None
+
+    def _validate_git_tokens(self, tokens: List[str]) -> Tuple[bool, Optional[str]]:
+        """Inspect git subcommands and flags resisting flag injection like -C or --no-pager."""
+        flags_with_args = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
+
+        idx = 1
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in flags_with_args:
+                idx += 2  # skip flag and its argument
+            elif tok.startswith("--") or tok.startswith("-"):
+                idx += 1  # boolean flag like --no-pager
+            else:
+                break
+
+        if idx >= len(tokens):
+            return True, None
+
+        subcmd = tokens[idx]
+        remaining = tokens[idx + 1 :]
+
+        # 1. Blocked: git push
+        if subcmd == "push" and any("git push" in b for b in self.config.blocked_commands):
+            return False, "Blocked by safety policy: command matches blocked pattern 'git push'"
+
+        # 2. Blocked: git merge
+        if subcmd == "merge" and any("git merge" in b for b in self.config.blocked_commands):
+            return False, "Blocked by safety policy: command matches blocked pattern 'git merge'"
+
+        # 3. Blocked: git add bulk staging (-A, ., --all, -u)
+        if subcmd == "add":
+            bulk_indicators = {"-A", "--all", "-u", "--update", "."}
+            if any(tok in bulk_indicators for tok in remaining) and any("git add" in b for b in self.config.blocked_commands):
+                return False, "Blocked by safety policy: command matches blocked pattern 'git add -A'"
+
+        # 4. Blocked: git commit automatic staging (-a, -am)
+        if subcmd == "commit":
+            for r in remaining:
+                if r in ("-a", "-am") or (r.startswith("-") and "a" in r):
+                    if any("git commit -a" in b or "git commit -am" in b for b in self.config.blocked_commands):
+                        return False, "Blocked by safety policy: command matches blocked pattern 'git commit -am'"
+
+        return True, None
+
+    def _validate_rm_tokens(self, tokens: List[str]) -> Tuple[bool, Optional[str]]:
+        """Inspect rm flags and arguments resisting split flags like rm -r -f /."""
+        has_recursive = False
+        has_force = False
+        targets: List[str] = []
+
+        for tok in tokens[1:]:
+            if tok.startswith("--"):
+                if tok == "--recursive":
+                    has_recursive = True
+                if tok == "--force":
+                    has_force = True
+            elif tok.startswith("-"):
+                if "r" in tok or "R" in tok:
+                    has_recursive = True
+                if "f" in tok:
+                    has_force = True
+            else:
+                targets.append(tok)
+
+        if has_recursive:
+            for tgt in targets:
+                norm_tgt = tgt.rstrip("/")
+                if norm_tgt in ("", "/*") and "/" in tgt:
+                    return False, "Blocked by safety policy: command matches blocked pattern 'rm -rf /'"
+                if norm_tgt in ("~", "~/*", "$HOME"):
+                    return False, "Blocked by safety policy: command matches blocked pattern 'rm -rf ~'"
+                # Also check protected paths
+                safe_p, p_reason = self.validate_path_modification(tgt)
+                if not safe_p:
+                    return False, p_reason
 
         return True, None
 
@@ -104,7 +349,18 @@ class SafetyEngine:
 
         for protected in self.config.protected_paths:
             prot_norm = protected.strip("/").lower()
-            if rel_posix == prot_norm or rel_posix.startswith(prot_norm + "/") or f"/{prot_norm}/" in f"/{rel_posix}/":
+            # Glob match
+            if fnmatch.fnmatch(rel_posix, prot_norm) or fnmatch.fnmatch(rel_posix, f"*/{prot_norm}"):
+                return (
+                    False,
+                    f"Blocked by safety policy: '{target_path}' is in protected location '{protected}'.",
+                )
+            # Prefix or substring match
+            if (
+                rel_posix == prot_norm
+                or rel_posix.startswith(prot_norm + "/")
+                or f"/{prot_norm}/" in f"/{rel_posix}/"
+            ):
                 return (
                     False,
                     f"Blocked by safety policy: '{target_path}' is in protected location '{protected}'.",

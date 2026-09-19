@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import uuid
 from enum import Enum
 from pathlib import Path
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 import yaml
 
 from executors.base import ExecutorResult
+
+logger = logging.getLogger("polyphony.state")
 
 
 class TaskStatus(str, Enum):
@@ -109,24 +112,35 @@ class StateManager:
         return state
 
     def save_state(self, state: TaskState) -> None:
-        task_dir = self._get_task_dir(state.project_name, state.task_id)
-        state_file = task_dir / "state.json"
-        with open(state_file, "w", encoding="utf-8") as f:
-            f.write(state.model_dump_json(indent=2))
+        try:
+            task_dir = self._get_task_dir(state.project_name, state.task_id)
+            task_dir.mkdir(parents=True, exist_ok=True)
+            state_file = task_dir / "state.json"
+            # Exclude iterations list to avoid O(N^2) I/O explosion; individual iterations are saved under iterations/
+            state_data = state.model_dump(exclude={"iterations"})
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save state for task {state.task_id}: {e}")
 
     def record_iteration(self, state: TaskState, record: IterationRecord) -> None:
-        state.iterations.append(record)
-        state.current_iteration = len(state.iterations)
-        for f in record.files_changed:
-            if f not in state.all_files_changed:
-                state.all_files_changed.append(f)
+        try:
+            state.iterations.append(record)
+            state.current_iteration = len(state.iterations)
+            for f in record.files_changed:
+                if f not in state.all_files_changed:
+                    state.all_files_changed.append(f)
 
-        task_dir = self._get_task_dir(state.project_name, state.task_id)
-        iter_file = task_dir / "iterations" / f"iteration_{record.iteration_number:02d}.json"
-        with open(iter_file, "w", encoding="utf-8") as f:
-            f.write(record.model_dump_json(indent=2))
+            task_dir = self._get_task_dir(state.project_name, state.task_id)
+            iter_dir = task_dir / "iterations"
+            iter_dir.mkdir(parents=True, exist_ok=True)
+            iter_file = iter_dir / f"iteration_{record.iteration_number:02d}.json"
+            with open(iter_file, "w", encoding="utf-8") as f:
+                f.write(record.model_dump_json(indent=2))
 
-        self.save_state(state)
+            self.save_state(state)
+        except Exception as e:
+            logger.warning(f"Failed to record iteration {record.iteration_number} for task {state.task_id}: {e}")
 
     def complete_task(
         self,
@@ -135,22 +149,43 @@ class StateManager:
         summary: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
-        state.status = status
-        state.end_time = datetime.datetime.now().isoformat()
-        if summary:
-            state.final_summary = summary
-        if error:
-            state.error = error
-        self.save_state(state)
+        try:
+            state.status = status
+            state.end_time = datetime.datetime.now().isoformat()
+            if summary:
+                state.final_summary = summary
+            if error:
+                state.error = error
+            self.save_state(state)
+        except Exception as e:
+            logger.warning(f"Failed to complete task {state.task_id}: {e}")
 
     def load_state(self, project_name: str, task_id: str) -> Optional[TaskState]:
-        task_dir = self._get_task_dir(project_name, task_id)
-        state_file = task_dir / "state.json"
-        if not state_file.exists():
-            return None
-        with open(state_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            task_dir = self._get_task_dir(project_name, task_id)
+            state_file = task_dir / "state.json"
+            if not state_file.exists():
+                return None
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            # Reconstruct iterations from iterations/ directory if omitted from state.json
+            if "iterations" not in data or not data["iterations"]:
+                data["iterations"] = []
+                iter_dir = task_dir / "iterations"
+                if iter_dir.exists():
+                    for iter_file in sorted(iter_dir.glob("iteration_*.json")):
+                        try:
+                            with open(iter_file, "r", encoding="utf-8") as f_iter:
+                                it_data = json.load(f_iter)
+                                data["iterations"].append(it_data)
+                        except Exception:
+                            pass
+
             return TaskState.model_validate(data)
+        except Exception as e:
+            logger.warning(f"Failed to load state for task {task_id}: {e}")
+            return None
 
     def list_tasks(self, project_name: str) -> List[TaskState]:
         proj_dir = self.tasks_base / project_name

@@ -5,25 +5,54 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+import datetime
+import json
+from typing import Any, Dict, Optional
 import click
+
+
+class JsonLogFormatter(logging.Formatter):
+    """Formats log records as JSON lines."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        data = {
+            "timestamp": datetime.datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        return json.dumps(data)
 
 
 class TaskLogger:
     """Provides human-friendly console output and persistent file logging for tasks."""
 
-    def __init__(self, task_id: str, log_file: Optional[Path] = None):
+    def __init__(
+        self,
+        task_id: str,
+        log_file: Optional[Path] = None,
+        logging_config: Optional[Dict[str, Any]] = None,
+    ):
         self.task_id = task_id
         self.log_file = log_file
+        cfg = logging_config or {}
+
+        level_str = cfg.get("level", "INFO").upper()
+        log_level = getattr(logging, level_str, logging.INFO)
+        use_json = cfg.get("structured_json", False)
 
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
             self._file_handler = logging.FileHandler(str(self.log_file), encoding="utf-8")
-            self._file_handler.setFormatter(
-                logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-            )
+            if use_json:
+                self._file_handler.setFormatter(JsonLogFormatter())
+            else:
+                self._file_handler.setFormatter(
+                    logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+                )
             self._logger = logging.getLogger(f"polyphony.{task_id}")
-            self._logger.setLevel(logging.INFO)
+            self._logger.setLevel(log_level)
+            self._logger.handlers.clear()
             self._logger.addHandler(self._file_handler)
         else:
             self._logger = None

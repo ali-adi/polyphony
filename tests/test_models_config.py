@@ -275,3 +275,27 @@ def test_context_build_reasoning_prompt_includes_models():
     assert "gemini-3.8-flash" in prompt
     assert "subagent-flash" in prompt
     assert "claude-reviewer" in prompt
+
+
+def test_cross_engine_model_override_isolation():
+    global_cfg = {
+        "models": {
+            "lead": {
+                "claude": {"model": "claude-3-7-sonnet-20250219", "thinking_level": "high"},
+                "agy": {"model": "gemini-3.1-pro-high", "thinking_level": "high"},
+            },
+        }
+    }
+    # User overrides lead_model to Claude specific model
+    cli_overrides = {"lead_model": "claude-3-7-sonnet"}
+    resolved = resolve_models_config(global_cfg, cli_overrides=cli_overrides)
+    assert resolved.lead["claude"].model == "claude-3-7-sonnet"
+    # AGY must NOT be contaminated with claude model name
+    assert resolved.lead["agy"].model == "gemini-3.1-pro-high"
+
+    # User overrides lead_model to Gemini specific model
+    cli_overrides2 = {"lead_model": "gemini-3.8-flash"}
+    resolved2 = resolve_models_config(global_cfg, cli_overrides=cli_overrides2)
+    assert resolved2.lead["agy"].model == "gemini-3.8-flash"
+    assert resolved2.lead["claude"].model == "claude-3-7-sonnet-20250219"
+

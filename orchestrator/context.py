@@ -73,40 +73,30 @@ def load_project_knowledge(project_name: str, root_dir: Path) -> Dict[str, Any]:
     return knowledge
 
 
-def build_reasoning_prompt(
-    task_state: TaskState,
+def smart_truncate(text: str, max_chars: int = 2000, boundary: str = "\n\n") -> str:
+    """Truncate text at nearest structural boundary (paragraph, section, or line) to avoid corrupted fragments."""
+    if not text or len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    # Check paragraph boundary
+    last_boundary = truncated.rfind(boundary)
+    if last_boundary > max_chars * 0.5:
+        truncated = truncated[:last_boundary]
+    else:
+        # Check single newline boundary
+        last_line = truncated.rfind("\n")
+        if last_line > max_chars * 0.5:
+            truncated = truncated[:last_line]
+    return truncated.rstrip() + "\n\n[... truncated ...]"
+
+
+def build_system_prompt(
     knowledge: Dict[str, Any],
     available_executors: List[str],
     models_config: Optional[Any] = None,
+    project_path: Optional[str] = None,
 ) -> str:
-    """Build complete prompt for lead reasoning agent (Claude / AGY)."""
-
-    # Summarize iteration history
-    history_blocks = []
-    for rec in task_state.iterations:
-        exec_res_summary = ""
-        if rec.execution_result:
-            out_sample = rec.execution_result.output[:500] if rec.execution_result.output else ""
-            err_sample = rec.execution_result.error[:500] if rec.execution_result.error else ""
-            exec_res_summary = (
-                f"Status: {'Success' if rec.execution_result.success else 'Failed'} (exit code {rec.execution_result.exit_code})\n"
-                f"Output: {out_sample}\n"
-            )
-            if err_sample:
-                exec_res_summary += f"Error: {err_sample}\n"
-
-        history_blocks.append(
-            f"--- Iteration {rec.iteration_number} ---\n"
-            f"Reasoner Action: {rec.lead_decision.get('action')}\n"
-            f"Executor Used: {rec.executor_used}\n"
-            f"Instruction: {rec.instruction}\n"
-            f"{exec_res_summary}"
-            f"Tests Passed: {rec.tests_passed}\n"
-            f"Files Changed: {rec.files_changed}\n"
-        )
-
-    history_text = "\n".join(history_blocks) if history_blocks else "None (starting first iteration)."
-
+    """Build static system prompt containing project context, conventions, safety rules, and schema."""
     skills_text = (
         f"Project Skills: {', '.join(knowledge.get('project_skills', [])) or 'None'}\n"
         f"Global Skills: {', '.join(knowledge.get('global_skills', [])) or 'None'}\n"
@@ -134,28 +124,26 @@ def build_reasoning_prompt(
                     m_lines.append(f"  • {r_name}: model={r_prof.model or 'default'}, thinking={r_prof.thinking_level or 'default'}{desc}")
         models_text = "\n".join(m_lines) + "\n"
 
-    read_only_note = (
-        "\nIMPORTANT: This task is RUNNING IN READ-ONLY MODE. Do NOT propose file edits, writes, or deletions. "
-        "Only inspection, analysis, search, or read-only execution is allowed.\n"
-        if task_state.read_only
-        else ""
-    )
+    context_str = smart_truncate(knowledge.get("context", "No context file found."), 2500)
+    conventions_str = smart_truncate(knowledge.get("conventions", "Follow standard engineering conventions."), 2000)
+    safety_str = smart_truncate(knowledge.get("safety", "Follow repository conventions."), 2000)
+    path_str = project_path or knowledge.get("path", "")
 
-    prompt = f"""You are the Lead Reasoning Agent in `Polyphony`, a local-first multi-agent orchestrator.
+    return f"""You are the Lead Reasoning Agent in `Polyphony`, a local-first multi-agent orchestrator.
 Your role is to reason, plan, and coordinate task execution. You analyze the project context, evaluate progress, and delegate concrete steps to execution engines or deterministic Python scripts.
 
 # PROJECT INFORMATION
 Name: {knowledge.get('name')}
-Path: {task_state.project_path}
+Path: {path_str}
 
 ## Context & Architecture
-{knowledge.get('context', 'No context file found.')[:2000]}
+{context_str}
 
 ## Conventions & Style
-{knowledge.get('conventions', 'Follow standard engineering conventions.')[:2000]}
+{conventions_str}
 
 ## Safety & Operational Policies
-{knowledge.get('safety', 'Follow repository conventions.')[:2000]}
+{safety_str}
 
 ## Active Rules & Hooks
 - Rules: {', '.join(knowledge.get('project_rules', [])) or 'None'}
@@ -167,18 +155,6 @@ Path: {task_state.project_path}
 
 ## Available Executors
 {', '.join(available_executors)}
-
----
-
-# CURRENT TASK
-Task ID: {task_state.task_id}
-Objective / Goal: {task_state.goal}
-Read-Only: {task_state.read_only}
-Current Iteration: {task_state.current_iteration + 1} of max {task_state.max_iterations}
-{read_only_note}
-
-# EXECUTION HISTORY SO FAR
-{history_text}
 
 ---
 
@@ -202,10 +178,103 @@ You MUST respond ONLY with a JSON object matching this exact schema:
 - If the goal has been fully achieved, set "action": "COMPLETE" with a thorough summary in "analysis".
 - If verification is needed, choose action "VERIFY" or "DELEGATE" with executor "python" to run test suites or assertions.
 - If delegating implementation or analysis, select the most appropriate executor ("agy", "cursor", "python", or "claude").
-- Output ONLY the JSON block. Do not include markdown preamble before or after the JSON.
-"""
-    return prompt
-    return prompt
+- Output ONLY the JSON block. Do not include markdown preamble before or after the JSON."""
+
+
+def build_user_prompt(
+    task_state: TaskState,
+    history_window: int = 3,
+) -> str:
+    """Build dynamic user prompt containing task goal, iteration number, and sliding history."""
+    history_blocks = []
+    total_iters = len(task_state.iterations)
+    for i, rec in enumerate(task_state.iterations):
+        if i < total_iters - history_window:
+            analysis_preview = (rec.lead_decision.get("analysis") or "").strip().replace("\n", " ")[:80]
+            exec_status = "Success" if (rec.execution_result and rec.execution_result.success) else ("Failed" if rec.execution_result else "Skipped")
+            history_blocks.append(
+                f"[Iteration {rec.iteration_number}] Action: {rec.lead_decision.get('action')} | "
+                f"Executor: {rec.executor_used} | Status: {exec_status} | "
+                f"Analysis: {analysis_preview}..."
+            )
+        else:
+            exec_res_summary = ""
+            if rec.execution_result:
+                out_sample = smart_truncate(rec.execution_result.output, 800) if rec.execution_result.output else ""
+                err_sample = smart_truncate(rec.execution_result.error, 800) if rec.execution_result.error else ""
+                exec_res_summary = (
+                    f"Status: {'Success' if rec.execution_result.success else 'Failed'} (exit code {rec.execution_result.exit_code})\n"
+                    f"Output: {out_sample}\n"
+                )
+                if err_sample:
+                    exec_res_summary += f"Error: {err_sample}\n"
+
+            history_blocks.append(
+                f"--- Iteration {rec.iteration_number} ---\n"
+                f"Reasoner Action: {rec.lead_decision.get('action')}\n"
+                f"Executor Used: {rec.executor_used}\n"
+                f"Instruction: {rec.instruction}\n"
+                f"{exec_res_summary}"
+                f"Tests Passed: {rec.tests_passed}\n"
+                f"Files Changed: {rec.files_changed}\n"
+            )
+
+    history_text = "\n".join(history_blocks) if history_blocks else "None (starting first iteration)."
+
+    read_only_note = (
+        "\nIMPORTANT: This task is RUNNING IN READ-ONLY MODE. Do NOT propose file edits, writes, or deletions. "
+        "Only inspection, analysis, search, or read-only execution is allowed.\n"
+        if task_state.read_only
+        else ""
+    )
+
+    return f"""# CURRENT TASK
+Task ID: {task_state.task_id}
+Objective / Goal: {task_state.goal}
+Read-Only: {task_state.read_only}
+Current Iteration: {task_state.current_iteration + 1} of max {task_state.max_iterations}
+{read_only_note}
+
+# EXECUTION HISTORY SO FAR
+{history_text}"""
+
+
+def build_reasoning_prompt(
+    task_state: TaskState,
+    knowledge: Dict[str, Any],
+    available_executors: List[str],
+    models_config: Optional[Any] = None,
+    history_window: int = 3,
+) -> str:
+    """Build complete prompt for lead reasoning agent (Claude / AGY) with sliding window history and smart truncation."""
+    sys_prompt = build_system_prompt(
+        knowledge=knowledge,
+        available_executors=available_executors,
+        models_config=models_config,
+        project_path=str(task_state.project_path),
+    )
+    user_prompt = build_user_prompt(
+        task_state=task_state,
+        history_window=history_window,
+    )
+    return f"{sys_prompt}\n\n---\n\n{user_prompt}"
+
+
+def build_delegation_context_header(knowledge: Dict[str, Any], max_chars: int = 600) -> str:
+    """Build a lightweight context header with project conventions and safety constraints to prepend to delegated instructions."""
+    name = knowledge.get("name", "Project")
+    conventions = (knowledge.get("conventions") or "").strip()
+    safety = (knowledge.get("safety") or "").strip()
+
+    parts = [f"[Project Context: {name}]"]
+    if conventions:
+        summary_conv = smart_truncate(conventions, max_chars // 2)
+        parts.append(f"Conventions:\n{summary_conv}")
+    if safety:
+        summary_safety = smart_truncate(safety, max_chars // 2)
+        parts.append(f"Safety Constraints:\n{summary_safety}")
+
+    return "\n\n".join(parts) + "\n\n---\n\n"
 
 
 def parse_reasoner_decision(output_text: str) -> Dict[str, Any]:
