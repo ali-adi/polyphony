@@ -1,4 +1,4 @@
-"""Core decision loop and orchestrator engine for ai-orch."""
+"""Core decision loop and orchestrator engine for Polyphony."""
 
 from __future__ import annotations
 

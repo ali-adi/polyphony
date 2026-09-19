@@ -67,7 +67,7 @@ def _write_inventory_md(
     lines = [
         f"# Migration Inventory: `{project_name}`",
         "",
-        f"Generated automatically by `ai-orch migrate`.",
+        f"Generated automatically by `polyphony migrate`.",
         "",
         "## Summary",
         "",

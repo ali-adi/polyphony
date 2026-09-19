@@ -1,4 +1,4 @@
-# AI Orchestrator (`ai-orch`) — Implementation Plan
+# Polyphony — Implementation Plan
 
 ## Goal
 
@@ -15,12 +15,12 @@ Build a **local-first, CLI-driven, multi-agent orchestrator** that uses Claude C
 | **Fallback chain** | agy ↔ Cursor bidirectional. If both fail, fall back to Claude with cheap model. |
 | **Repo interaction** | Local-first. All executors operate directly on local filesystem. |
 | **User interaction** | Autonomous with progress streaming. Pauses only for safety gates. |
-| **Migration** | Full migration first. Built as `ai-orch migrate` command. |
+| **Migration** | Full migration first. Built as `polyphony migrate` command. |
 | **Install location** | `/Users/ali/root/ai-orch/` |
 | **Medicoder repo** | `/Users/ali/root/Work/Medicoder/medicoder/medicoder` |
 | **Python tooling** | Python 3.11+ with pip/venv |
 | **Version control** | Own Git repo (separate from Medicoder) |
-| **CLI name** | `ai-orch` |
+| **CLI name** | `polyphony` (alias: `ai-orch`) |
 | **Build approach** | Custom build (not CAO, Orca, or LangGraph) |
 
 ---

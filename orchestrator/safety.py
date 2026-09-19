@@ -1,4 +1,4 @@
-"""Safety policy enforcement engine for ai-orch."""
+"""Safety policy enforcement engine for Polyphony."""
 
 from __future__ import annotations
 

@@ -116,7 +116,7 @@ def build_reasoning_prompt(
         else ""
     )
 
-    prompt = f"""You are the Lead Reasoning Agent in `ai-orch`, a local-first multi-agent orchestrator.
+    prompt = f"""You are the Lead Reasoning Agent in `Polyphony`, a local-first multi-agent orchestrator.
 Your role is to reason, plan, and coordinate task execution. You analyze the project context, evaluate progress, and delegate concrete steps to execution engines or deterministic Python scripts.
 
 # PROJECT INFORMATION

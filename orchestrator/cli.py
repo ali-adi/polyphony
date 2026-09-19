@@ -1,4 +1,4 @@
-"""Click CLI entry point for ai-orch."""
+"""Click CLI entry point for Polyphony."""
 
 from __future__ import annotations
 
@@ -16,16 +16,16 @@ from migrate.translator import translate_project
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
-    """ai-orch: Local-first, multi-agent engineering orchestrator."""
+    """Polyphony: Local-first, multi-agent engineering orchestrator."""
     pass
 
 
 @cli.command("migrate")
 @click.argument("project_path", type=click.Path(exists=True, file_okay=False, resolve_path=True))
 @click.option("--name", "-n", default=None, help="Name of project (defaults to directory name)")
-@click.option("--output", "-o", default=".", help="Root directory of ai-orch")
+@click.option("--output", "-o", default=".", help="Root directory of Polyphony")
 def migrate_cmd(project_path: str, name: Optional[str], output: str):
-    """Scan existing repo AI config and migrate to ai-orch format."""
+    """Scan existing repo AI config and migrate to Polyphony format."""
     p_path = Path(project_path).resolve()
     p_name = name or p_path.name
     out_root = Path(output).resolve()
@@ -80,7 +80,7 @@ def project_group():
 
 
 @project_group.command("list")
-@click.option("--orch-root", default=".", help="ai-orch root directory")
+@click.option("--orch-root", default=".", help="Polyphony root directory")
 def project_list(orch_root: str):
     """List all registered projects."""
     projects_dir = Path(orch_root).resolve() / "projects"
@@ -117,7 +117,7 @@ def project_list(orch_root: str):
 @click.option("--read-only", "-r", is_flag=True, default=False, help="Run in read-only inspection mode (no file edits)")
 @click.option("--max-iterations", "-m", default=10, type=int, help="Maximum allowed reasoning/execution loops")
 @click.option("--lead", default=None, help="Force specific lead reasoner ('claude' or 'agy')")
-@click.option("--orch-root", default=".", help="Root directory of ai-orch")
+@click.option("--orch-root", default=".", help="Root directory of Polyphony")
 def start_cmd(project_name: str, goal: str, read_only: bool, max_iterations: int, lead: Optional[str], orch_root: str):
     """Start an autonomous multi-agent task on a project."""
     from orchestrator.main import Orchestrator
@@ -144,7 +144,7 @@ def task_group():
 
 @task_group.command("list")
 @click.argument("project_name")
-@click.option("--orch-root", default=".", help="Root directory of ai-orch")
+@click.option("--orch-root", default=".", help="Root directory of Polyphony")
 def task_list_cmd(project_name: str, orch_root: str):
     """List tasks recorded for a project."""
     from orchestrator.state import StateManager
@@ -171,7 +171,7 @@ def task_list_cmd(project_name: str, orch_root: str):
 @task_group.command("status")
 @click.argument("project_name")
 @click.argument("task_id")
-@click.option("--orch-root", default=".", help="Root directory of ai-orch")
+@click.option("--orch-root", default=".", help="Root directory of Polyphony")
 def task_status_cmd(project_name: str, task_id: str, orch_root: str):
     """Display detailed status and iterations of a task."""
     from orchestrator.state import StateManager

@@ -11,7 +11,7 @@ from executors.agy_executor import AgyExecutor
 from executors.cursor_executor import CursorExecutor
 from executors.python_executor import PythonExecutor
 
-logger = logging.getLogger("ai-orch.router")
+logger = logging.getLogger("polyphony.router")
 
 
 class ExecutorRouter:

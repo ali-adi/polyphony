@@ -1,4 +1,4 @@
-"""Structured logging subsystem for ai-orch."""
+"""Structured logging subsystem for Polyphony."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class TaskLogger:
             self._file_handler.setFormatter(
                 logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
             )
-            self._logger = logging.getLogger(f"ai-orch.{task_id}")
+            self._logger = logging.getLogger(f"polyphony.{task_id}")
             self._logger.setLevel(logging.INFO)
             self._logger.addHandler(self._file_handler)
         else:

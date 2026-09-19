@@ -1,4 +1,4 @@
-# ai-orch Implementation Tasks
+# Polyphony Implementation Tasks
 
 ## Phase 1: Migration System
 - [x] Create project structure (pyproject.toml, .gitignore, README)

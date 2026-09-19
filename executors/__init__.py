@@ -1,4 +1,4 @@
-"""Executors package for ai-orch."""
+"""Executors package for Polyphony."""
 
 from executors.base import BaseExecutor, ExecutorResult
 from executors.claude_executor import ClaudeExecutor
