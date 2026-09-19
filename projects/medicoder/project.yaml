@@ -1,5 +1,5 @@
 name: medicoder
-path: /Users/ali/root/ai-orch/medicoder
+path: /Users/ali/root/Work/Medicoder/medicoder/medicoder
 description: ICD-10 medical coding system using Gemini for taxonomy ranking
 executors:
   lead: claude
