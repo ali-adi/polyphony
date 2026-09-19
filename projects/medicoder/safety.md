@@ -25,5 +25,5 @@ These policies are strictly enforced across all executor engines (`claude`, `agy
 - **Rule**: SQLite database queries must be strictly read-only (`sqlite3 -safe -readonly` or `SELECT` statements only). `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER` are blocked.
 
 ## 5. Verification Before Stop (Quality Gate)
-- **Rule**: Before any task or iteration is declared successful, the full test suite must pass (`python -m unittest discover -s tests -t .`).
+- **Rule**: Before any task or iteration is declared successful, the full test suite must pass (`env/bin/python -m unittest discover -s tests -t .`).
 - **Action on Failure**: Agent must inspect failures and fix them or halt with a report.

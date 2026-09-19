@@ -13,7 +13,7 @@ class ScannedItem:
     rel_path: str
     abs_path: Path
     source_tool: str  # claude | cursor | antigravity | mcp | generic
-    category: str     # agent | skill | hook | rule | workflow | setting | mcp | secret | doc | other
+    category: str     # agent | skill | hook | rule | workflow | setting | mcp | secret | doc | convention
     size_bytes: int
     is_directory: bool = False
     description: str = ""
@@ -36,7 +36,7 @@ def _detect_source_tool(rel_path: str) -> str:
     return "generic"
 
 
-def _detect_category(rel_path: str, is_dir: bool = False) -> str:
+def _detect_category(rel_path: str) -> str:
     p = Path(rel_path)
     name = p.name
     parts = p.parts
@@ -63,99 +63,103 @@ def _detect_category(rel_path: str, is_dir: bool = False) -> str:
         if parent == "rules":
             return "rule"
 
-    if name.endswith(".mdc"):
+    if name.endswith(".mdc") or "rules" in parts:
         return "rule"
+
+    if "runbook" in name.lower() or "convention" in name.lower() or "style" in name.lower() or "guideline" in name.lower():
+        return "convention"
 
     if name in ("CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md", "README.md"):
         return "doc"
 
-    return "other"
+    return "doc" if name.endswith(".md") else "other"
 
 
 def scan_project(project_path: str | Path) -> List[ScannedItem]:
-    """Scan a project directory for AI configurations across Claude, Cursor, AGY, etc."""
+    """Scan a project directory for genuine AI configurations, ignoring worktrees and caches."""
     root = Path(project_path).resolve()
     if not root.exists():
         raise FileNotFoundError(f"Project path does not exist: {root}")
 
     scanned: List[ScannedItem] = []
+    seen_paths = set()
 
-    # Directories to specifically look into
-    target_dirs = [".claude", ".cursor", ".agents", ".gemini"]
-    target_files = [".mcp.json", ".env", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md", "README.md"]
-
-    # 1. Check known top-level files
-    for filename in target_files:
-        file_path = root / filename
-        if file_path.exists() and file_path.is_file():
-            scanned.append(
-                ScannedItem(
-                    rel_path=filename,
-                    abs_path=file_path,
-                    source_tool=_detect_source_tool(filename),
-                    category=_detect_category(filename),
-                    size_bytes=file_path.stat().st_size,
-                    is_directory=False,
-                    description=f"Project-level AI file: {filename}",
-                )
+    def add_item(rel_p: str, abs_p: Path, desc: str = ""):
+        if rel_p in seen_paths:
+            return
+        if not abs_p.exists() or abs_p.is_dir():
+            return
+        seen_paths.add(rel_p)
+        cat = _detect_category(rel_p)
+        tool = _detect_source_tool(rel_p)
+        scanned.append(
+            ScannedItem(
+                rel_path=rel_p,
+                abs_path=abs_p,
+                source_tool=tool,
+                category=cat,
+                size_bytes=abs_p.stat().st_size,
+                description=desc or f"{tool.title()} {cat}: {rel_p}",
             )
+        )
 
-    # 2. Walk target AI directories
+    # 1. Known top-level files
+    target_files = [".mcp.json", ".env", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md", "README.md"]
+    for fname in target_files:
+        fpath = root / fname
+        if fpath.exists() and fpath.is_file():
+            add_item(fname, fpath, f"Top-level {fname}")
+
+    # 2. Walk AI directories: .claude, .cursor, .agents, .gemini
+    target_dirs = [".claude", ".cursor", ".agents"]
+    ignore_dirs = {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "env",
+        "worktrees",  # Critical: never scan worktrees
+        ".pytest_cache",
+        "dist",
+        "build",
+    }
+
     for d_name in target_dirs:
         d_path = root / d_name
         if not d_path.exists() or not d_path.is_dir():
             continue
 
         for dirpath, dirnames, filenames in os.walk(d_path):
-            # Skip VCS / node_modules if any inside
-            dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", "__pycache__")]
+            # Prune ignored subdirectories in-place
+            dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith(".")]
+
+            # Double check path parts
+            path_parts = Path(dirpath).parts
+            if any(part in ignore_dirs for part in path_parts):
+                continue
 
             cur_path = Path(dirpath)
             for fname in sorted(filenames):
-                if fname.startswith(".DS_Store"):
+                if fname.startswith(".DS_Store") or fname.endswith(".pyc"):
                     continue
-
                 full_file = cur_path / fname
                 rel_file = full_file.relative_to(root).as_posix()
+                add_item(rel_file, full_file)
 
-                category = _detect_category(rel_file)
-                source_tool = _detect_source_tool(rel_file)
-
-                scanned.append(
-                    ScannedItem(
-                        rel_path=rel_file,
-                        abs_path=full_file,
-                        source_tool=source_tool,
-                        category=category,
-                        size_bytes=full_file.stat().st_size,
-                        is_directory=False,
-                        description=f"{source_tool.title()} {category}: {rel_file}",
-                    )
-                )
-
-    # 3. Find any other rules or skill files in workspace (e.g. .cursor/rules/*.mdc anywhere or skills/)
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Exclude common large / build directories
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in (".git", "node_modules", "__pycache__", ".venv", "venv", "env", "dist", "build", ".claude", ".cursor", ".agents", ".gemini")
-        ]
-        cur_path = Path(dirpath)
-        for fname in filenames:
-            if fname.endswith(".mdc") or fname in ("CLAUDE.md", "AGENTS.md", "GEMINI.md", "SKILL.md"):
-                full_file = cur_path / fname
-                rel_file = full_file.relative_to(root).as_posix()
-                if not any(item.rel_path == rel_file for item in scanned):
-                    scanned.append(
-                        ScannedItem(
-                            rel_path=rel_file,
-                            abs_path=full_file,
-                            source_tool=_detect_source_tool(rel_file),
-                            category=_detect_category(rel_file),
-                            size_bytes=full_file.stat().st_size,
-                            is_directory=False,
-                            description=f"Workspace rule/doc: {rel_file}",
-                        )
-                    )
+    # 3. Targeted project conventions / runbooks / guidelines in docs/ or tuning/
+    doc_dirs = ["docs", "tuning"]
+    for d_name in doc_dirs:
+        d_path = root / d_name
+        if not d_path.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(d_path):
+            dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith(".")]
+            cur_path = Path(dirpath)
+            for fname in sorted(filenames):
+                if "runbook" in fname.lower() or "convention" in fname.lower() or "guideline" in fname.lower():
+                    full_file = cur_path / fname
+                    rel_file = full_file.relative_to(root).as_posix()
+                    add_item(rel_file, full_file, f"Project convention/runbook: {rel_file}")
 
     return sorted(scanned, key=lambda x: (x.source_tool, x.category, x.rel_path))

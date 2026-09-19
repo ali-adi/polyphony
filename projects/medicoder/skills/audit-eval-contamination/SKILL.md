@@ -6,7 +6,7 @@ description: Audit case files for evaluation contamination against ICD-10 taxono
 ## Objective
 Audit clinical case files and evaluation sets to detect any data leakage or eval contamination.
 
-## Workflow Implementation Reference
+## Workflow Implementation
 ```javascript
 export const meta = {
   name: 'audit-eval-contamination',

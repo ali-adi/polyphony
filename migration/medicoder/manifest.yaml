@@ -2,19 +2,19 @@ project:
   name: medicoder
   path: /Users/ali/root/ai-orch/medicoder
 stats:
-  total_items: 278
-  global_count: 9
-  project_count: 262
-  executor_count: 5
+  total_items: 143
+  global_count: 106
+  project_count: 32
+  executor_count: 4
   sensitive_count: 1
-  ephemeral_count: 1
+  ephemeral_count: 0
 items:
 - rel_path: .agents/hooks/block-ai-attribution.sh
   source_tool: antigravity
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/block-ai-attribution.sh
   rationale: 'Git safety: prevents co-authored AI commit metadata'
   size_bytes: 600
 - rel_path: .agents/hooks/block-paid-runs.sh
@@ -22,7 +22,7 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/block-paid-runs.sh
   rationale: 'Cost protection: blocks costly external API runs without explicit flags'
   size_bytes: 1938
 - rel_path: .agents/hooks/protect-databases.sh
@@ -30,7 +30,7 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/protect-databases.sh
   rationale: 'File protection: prevents modifications to taxonomy database snapshots'
   size_bytes: 1008
 - rel_path: .agents/hooks/validate-readonly-query.sh
@@ -38,25 +38,17 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/validate-readonly-query.sh
   rationale: 'Database safety: validates SQLite queries are strictly SELECT statements'
   size_bytes: 1669
 - rel_path: .agents/hooks/verify-before-stop.sh
   source_tool: antigravity
   category: hook
-  scope: global
+  scope: project
   action: translate
-  target_destination: skills/verify-before-stop/
-  rationale: 'Generic reusable workflow or skill across engineering repos: verify-before-stop'
+  target_destination: projects/medicoder/hooks/verify-before-stop.sh
+  rationale: 'Quality gate: enforces running test suite before completing tasks'
   size_bytes: 1366
-- rel_path: .gemini/antigravity-ide/scratch/analyze.py
-  source_tool: antigravity
-  category: other
-  scope: ephemeral
-  action: ignore
-  target_destination: IGNORE
-  rationale: IDE ephemeral state or scratch workspace.
-  size_bytes: 468
 - rel_path: .agents/hooks.json
   source_tool: antigravity
   category: setting
@@ -65,69 +57,868 @@ items:
   target_destination: migration/medicoder/original/.agents/hooks.json
   rationale: Executor adapter / tool-specific configuration (antigravity).
   size_bytes: 1185
+- rel_path: .agents/skills/ask-matt/PHASE-BOUNDARIES.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/ask-matt/
+  rationale: 'Global skill asset: ask-matt'
+  size_bytes: 4249
+- rel_path: .agents/skills/ask-matt/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/ask-matt/
+  rationale: 'Global skill asset: ask-matt'
+  size_bytes: 11417
+- rel_path: .agents/skills/ask-matt/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/ask-matt/
+  rationale: 'Global skill asset: ask-matt'
+  size_bytes: 137
+- rel_path: .agents/skills/claude-handoff/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/claude-handoff/
+  rationale: 'Global skill asset: claude-handoff'
+  size_bytes: 1301
+- rel_path: .agents/skills/claude-handoff/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/claude-handoff/
+  rationale: 'Global skill asset: claude-handoff'
+  size_bytes: 141
+- rel_path: .agents/skills/code-review/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/code-review/
+  rationale: 'Global reusable engineering skill: code-review'
+  size_bytes: 6589
+- rel_path: .agents/skills/code-review/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/code-review/
+  rationale: 'Global reusable engineering skill: code-review'
+  size_bytes: 100
+- rel_path: .agents/skills/codebase-design/DEEPENING.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/codebase-design/
+  rationale: 'Global skill asset: codebase-design'
+  size_bytes: 2553
+- rel_path: .agents/skills/codebase-design/DESIGN-IT-TWICE.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/codebase-design/
+  rationale: 'Global skill asset: codebase-design'
+  size_bytes: 2664
+- rel_path: .agents/skills/codebase-design/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/codebase-design/
+  rationale: 'Global skill asset: codebase-design'
+  size_bytes: 6446
+- rel_path: .agents/skills/codebase-design/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/codebase-design/
+  rationale: 'Global skill asset: codebase-design'
+  size_bytes: 102
+- rel_path: .agents/skills/diagnosing-bugs/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/diagnosing-bugs/
+  rationale: 'Global reusable engineering skill: diagnosing-bugs'
+  size_bytes: 8529
+- rel_path: .agents/skills/diagnosing-bugs/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/diagnosing-bugs/
+  rationale: 'Global reusable engineering skill: diagnosing-bugs'
+  size_bytes: 103
+- rel_path: .agents/skills/diagnosing-bugs/scripts/hitl-loop.template.sh
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/diagnosing-bugs/
+  rationale: 'Global reusable engineering skill: diagnosing-bugs'
+  size_bytes: 1316
+- rel_path: .agents/skills/domain-modeling/ADR-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/domain-modeling/
+  rationale: 'Global skill asset: domain-modeling'
+  size_bytes: 2733
+- rel_path: .agents/skills/domain-modeling/CONTEXT-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/domain-modeling/
+  rationale: 'Global skill asset: domain-modeling'
+  size_bytes: 2290
+- rel_path: .agents/skills/domain-modeling/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/domain-modeling/
+  rationale: 'Global skill asset: domain-modeling'
+  size_bytes: 3331
+- rel_path: .agents/skills/domain-modeling/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/domain-modeling/
+  rationale: 'Global skill asset: domain-modeling'
+  size_bytes: 101
+- rel_path: .agents/skills/git-guardrails-claude-code/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/git-guardrails-claude-code/
+  rationale: 'Global reusable engineering skill: git-guardrails-claude-code'
+  size_bytes: 2313
+- rel_path: .agents/skills/git-guardrails-claude-code/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/git-guardrails-claude-code/
+  rationale: 'Global reusable engineering skill: git-guardrails-claude-code'
+  size_bytes: 112
+- rel_path: .agents/skills/git-guardrails-claude-code/scripts/block-dangerous-git.sh
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/git-guardrails-claude-code/
+  rationale: 'Global reusable engineering skill: git-guardrails-claude-code'
+  size_bytes: 507
+- rel_path: .agents/skills/grill-me/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grill-me/
+  rationale: 'Global reusable engineering skill: grill-me'
+  size_bytes: 157
+- rel_path: .agents/skills/grill-me/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grill-me/
+  rationale: 'Global reusable engineering skill: grill-me'
+  size_bytes: 137
+- rel_path: .agents/skills/grill-with-docs/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grill-with-docs/
+  rationale: 'Global reusable engineering skill: grill-with-docs'
+  size_bytes: 247
+- rel_path: .agents/skills/grill-with-docs/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grill-with-docs/
+  rationale: 'Global reusable engineering skill: grill-with-docs'
+  size_bytes: 145
+- rel_path: .agents/skills/grilling/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grilling/
+  rationale: 'Global skill asset: grilling'
+  size_bytes: 1987
+- rel_path: .agents/skills/grilling/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/grilling/
+  rationale: 'Global skill asset: grilling'
+  size_bytes: 113
+- rel_path: .agents/skills/handoff/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/handoff/
+  rationale: 'Global skill asset: handoff'
+  size_bytes: 894
+- rel_path: .agents/skills/handoff/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/handoff/
+  rationale: 'Global skill asset: handoff'
+  size_bytes: 141
+- rel_path: .agents/skills/implement-spec/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/implement-spec/
+  rationale: 'Global skill asset: implement-spec'
+  size_bytes: 2043
+- rel_path: .agents/skills/implement-spec/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/implement-spec/
+  rationale: 'Global skill asset: implement-spec'
+  size_bytes: 143
+- rel_path: .agents/skills/implement/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/implement/
+  rationale: 'Global skill asset: implement'
+  size_bytes: 433
+- rel_path: .agents/skills/implement/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/implement/
+  rationale: 'Global skill asset: implement'
+  size_bytes: 139
+- rel_path: .agents/skills/improve-codebase-architecture/HTML-REPORT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/improve-codebase-architecture/
+  rationale: 'Global reusable engineering skill: improve-codebase-architecture'
+  size_bytes: 6641
+- rel_path: .agents/skills/improve-codebase-architecture/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/improve-codebase-architecture/
+  rationale: 'Global reusable engineering skill: improve-codebase-architecture'
+  size_bytes: 5993
+- rel_path: .agents/skills/improve-codebase-architecture/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/improve-codebase-architecture/
+  rationale: 'Global reusable engineering skill: improve-codebase-architecture'
+  size_bytes: 166
+- rel_path: .agents/skills/loop-me/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/loop-me/
+  rationale: 'Global skill asset: loop-me'
+  size_bytes: 2522
+- rel_path: .agents/skills/loop-me/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/loop-me/
+  rationale: 'Global skill asset: loop-me'
+  size_bytes: 140
+- rel_path: .agents/skills/migrate-to-shoehorn/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/migrate-to-shoehorn/
+  rationale: 'Global skill asset: migrate-to-shoehorn'
+  size_bytes: 2795
+- rel_path: .agents/skills/migrate-to-shoehorn/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/migrate-to-shoehorn/
+  rationale: 'Global skill asset: migrate-to-shoehorn'
+  size_bytes: 110
+- rel_path: .agents/skills/pr/CREDITS.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/pr/
+  rationale: 'Global reusable engineering skill: pr'
+  size_bytes: 489
+- rel_path: .agents/skills/pr/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/pr/
+  rationale: 'Global reusable engineering skill: pr'
+  size_bytes: 4109
+- rel_path: .agents/skills/pr/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/pr/
+  rationale: 'Global reusable engineering skill: pr'
+  size_bytes: 93
+- rel_path: .agents/skills/prototype/LOGIC.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/prototype/
+  rationale: 'Global skill asset: prototype'
+  size_bytes: 6036
+- rel_path: .agents/skills/prototype/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/prototype/
+  rationale: 'Global skill asset: prototype'
+  size_bytes: 2931
+- rel_path: .agents/skills/prototype/UI.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/prototype/
+  rationale: 'Global skill asset: prototype'
+  size_bytes: 6913
+- rel_path: .agents/skills/prototype/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/prototype/
+  rationale: 'Global skill asset: prototype'
+  size_bytes: 100
+- rel_path: .agents/skills/research/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/research/
+  rationale: 'Global skill asset: research'
+  size_bytes: 794
+- rel_path: .agents/skills/research/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/research/
+  rationale: 'Global skill asset: research'
+  size_bytes: 94
+- rel_path: .agents/skills/resolving-merge-conflicts/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/resolving-merge-conflicts/
+  rationale: 'Global reusable engineering skill: resolving-merge-conflicts'
+  size_bytes: 918
+- rel_path: .agents/skills/resolving-merge-conflicts/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/resolving-merge-conflicts/
+  rationale: 'Global reusable engineering skill: resolving-merge-conflicts'
+  size_bytes: 113
+- rel_path: .agents/skills/retro/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/retro/
+  rationale: 'Global skill asset: retro'
+  size_bytes: 4369
+- rel_path: .agents/skills/retro/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/retro/
+  rationale: 'Global skill asset: retro'
+  size_bytes: 146
+- rel_path: .agents/skills/scaffold-exercises/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/scaffold-exercises/
+  rationale: 'Global skill asset: scaffold-exercises'
+  size_bytes: 3589
+- rel_path: .agents/skills/scaffold-exercises/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/scaffold-exercises/
+  rationale: 'Global skill asset: scaffold-exercises'
+  size_bytes: 108
+- rel_path: .agents/skills/setup-matt-pocock-skills/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 6841
+- rel_path: .agents/skills/setup-matt-pocock-skills/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 152
+- rel_path: .agents/skills/setup-matt-pocock-skills/domain.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 2033
+- rel_path: .agents/skills/setup-matt-pocock-skills/issue-tracker-github.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 3731
+- rel_path: .agents/skills/setup-matt-pocock-skills/issue-tracker-gitlab.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 3809
+- rel_path: .agents/skills/setup-matt-pocock-skills/issue-tracker-local.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 1810
+- rel_path: .agents/skills/setup-matt-pocock-skills/triage-labels.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-matt-pocock-skills/
+  rationale: 'Global skill asset: setup-matt-pocock-skills'
+  size_bytes: 1045
+- rel_path: .agents/skills/setup-pre-commit/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-pre-commit/
+  rationale: 'Global skill asset: setup-pre-commit'
+  size_bytes: 2258
+- rel_path: .agents/skills/setup-pre-commit/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-pre-commit/
+  rationale: 'Global skill asset: setup-pre-commit'
+  size_bytes: 99
+- rel_path: .agents/skills/setup-ts-deep-modules/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-ts-deep-modules/
+  rationale: 'Global skill asset: setup-ts-deep-modules'
+  size_bytes: 7546
+- rel_path: .agents/skills/setup-ts-deep-modules/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-ts-deep-modules/
+  rationale: 'Global skill asset: setup-ts-deep-modules'
+  size_bytes: 149
+- rel_path: .agents/skills/setup-ts-deep-modules/dependency-cruiser.config.cjs
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/setup-ts-deep-modules/
+  rationale: 'Global skill asset: setup-ts-deep-modules'
+  size_bytes: 3712
+- rel_path: .agents/skills/tdd/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/tdd/
+  rationale: 'Global reusable engineering skill: tdd'
+  size_bytes: 3549
+- rel_path: .agents/skills/tdd/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/tdd/
+  rationale: 'Global reusable engineering skill: tdd'
+  size_bytes: 87
+- rel_path: .agents/skills/tdd/mocking.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/tdd/
+  rationale: 'Global reusable engineering skill: tdd'
+  size_bytes: 1481
+- rel_path: .agents/skills/tdd/tests.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/tdd/
+  rationale: 'Global reusable engineering skill: tdd'
+  size_bytes: 2214
+- rel_path: .agents/skills/teach/GLOSSARY-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 2122
+- rel_path: .agents/skills/teach/LEARNING-RECORD-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 2747
+- rel_path: .agents/skills/teach/MISSION-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 1540
+- rel_path: .agents/skills/teach/RESOURCES-FORMAT.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 1924
+- rel_path: .agents/skills/teach/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 9506
+- rel_path: .agents/skills/teach/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/teach/
+  rationale: 'Global skill asset: teach'
+  size_bytes: 139
+- rel_path: .agents/skills/to-questionnaire/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-questionnaire/
+  rationale: 'Global skill asset: to-questionnaire'
+  size_bytes: 2904
+- rel_path: .agents/skills/to-questionnaire/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-questionnaire/
+  rationale: 'Global skill asset: to-questionnaire'
+  size_bytes: 166
+- rel_path: .agents/skills/to-spec/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-spec/
+  rationale: 'Global skill asset: to-spec'
+  size_bytes: 3043
+- rel_path: .agents/skills/to-spec/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-spec/
+  rationale: 'Global skill asset: to-spec'
+  size_bytes: 135
+- rel_path: .agents/skills/to-tickets/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-tickets/
+  rationale: 'Global skill asset: to-tickets'
+  size_bytes: 5671
+- rel_path: .agents/skills/to-tickets/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/to-tickets/
+  rationale: 'Global skill asset: to-tickets'
+  size_bytes: 146
+- rel_path: .agents/skills/triage/AGENT-BRIEF.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/triage/
+  rationale: 'Global skill asset: triage'
+  size_bytes: 7942
+- rel_path: .agents/skills/triage/OUT-OF-SCOPE.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/triage/
+  rationale: 'Global skill asset: triage'
+  size_bytes: 4667
+- rel_path: .agents/skills/triage/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/triage/
+  rationale: 'Global skill asset: triage'
+  size_bytes: 6557
+- rel_path: .agents/skills/triage/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/triage/
+  rationale: 'Global skill asset: triage'
+  size_bytes: 135
+- rel_path: .agents/skills/wait-what/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wait-what/
+  rationale: 'Global skill asset: wait-what'
+  size_bytes: 394
+- rel_path: .agents/skills/wait-what/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wait-what/
+  rationale: 'Global skill asset: wait-what'
+  size_bytes: 158
+- rel_path: .agents/skills/wayfinder/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wayfinder/
+  rationale: 'Global skill asset: wayfinder'
+  size_bytes: 11908
+- rel_path: .agents/skills/wayfinder/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wayfinder/
+  rationale: 'Global skill asset: wayfinder'
+  size_bytes: 144
+- rel_path: .agents/skills/wizard/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wizard/
+  rationale: 'Global skill asset: wizard'
+  size_bytes: 4123
+- rel_path: .agents/skills/wizard/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wizard/
+  rationale: 'Global skill asset: wizard'
+  size_bytes: 96
+- rel_path: .agents/skills/wizard/template.sh
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/wizard/
+  rationale: 'Global skill asset: wizard'
+  size_bytes: 8567
+- rel_path: .agents/skills/writing-beats/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-beats/
+  rationale: 'Global skill asset: writing-beats'
+  size_bytes: 4855
+- rel_path: .agents/skills/writing-beats/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-beats/
+  rationale: 'Global skill asset: writing-beats'
+  size_bytes: 142
+- rel_path: .agents/skills/writing-for-agents/SKILL-MECHANICS.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-for-agents/
+  rationale: 'Global skill asset: writing-for-agents'
+  size_bytes: 2629
+- rel_path: .agents/skills/writing-for-agents/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-for-agents/
+  rationale: 'Global skill asset: writing-for-agents'
+  size_bytes: 10886
+- rel_path: .agents/skills/writing-for-agents/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-for-agents/
+  rationale: 'Global skill asset: writing-for-agents'
+  size_bytes: 102
+- rel_path: .agents/skills/writing-fragments/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-fragments/
+  rationale: 'Global skill asset: writing-fragments'
+  size_bytes: 3558
+- rel_path: .agents/skills/writing-fragments/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-fragments/
+  rationale: 'Global skill asset: writing-fragments'
+  size_bytes: 140
+- rel_path: .agents/skills/writing-shape/SKILL.md
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-shape/
+  rationale: 'Global skill asset: writing-shape'
+  size_bytes: 5922
+- rel_path: .agents/skills/writing-shape/agents/openai.yaml
+  source_tool: antigravity
+  category: skill
+  scope: global
+  action: translate
+  target_destination: skills/writing-shape/
+  rationale: 'Global skill asset: writing-shape'
+  size_bytes: 144
 - rel_path: .claude/agents/am-achi-notes-author.md
   source_tool: claude
   category: agent
   scope: project
   action: translate
-  target_destination: projects/medicoder/skills/am-achi-notes-author/SKILL.md
-  rationale: 'Project domain agent: Authoring agent for ICD-10-AM and ACHI notes'
+  target_destination: projects/medicoder/skills/am-achi-notes-author/
+  rationale: 'Medicoder domain skill/agent: am-achi-notes-author'
   size_bytes: 1461
 - rel_path: .claude/agents/db-reader.md
   source_tool: claude
   category: agent
   scope: project
   action: translate
-  target_destination: projects/medicoder/skills/db-reader/SKILL.md
-  rationale: 'Project domain agent: Read-only database inspector agent for taxonomy
-    tables'
+  target_destination: projects/medicoder/skills/db-reader/
+  rationale: 'Medicoder domain skill/agent: db-reader'
   size_bytes: 1553
 - rel_path: .claude/agents/pcs-editor.md
   source_tool: claude
   category: agent
   scope: project
   action: translate
-  target_destination: projects/medicoder/skills/pcs-editor/SKILL.md
-  rationale: 'Project domain agent: Precise ICD-10-PCS code editor agent'
+  target_destination: projects/medicoder/skills/pcs-editor/
+  rationale: 'Medicoder domain skill/agent: pcs-editor'
   size_bytes: 1118
 - rel_path: .claude/agents/pcs-notes-author.md
   source_tool: claude
   category: agent
   scope: project
   action: translate
-  target_destination: projects/medicoder/skills/pcs-notes-author/SKILL.md
-  rationale: 'Project domain agent: Authoring agent for ICD-10-PCS notes'
+  target_destination: projects/medicoder/skills/pcs-notes-author/
+  rationale: 'Medicoder domain skill/agent: pcs-notes-author'
   size_bytes: 1905
-- rel_path: .claude/worktrees/rewrite/.claude/skills/catchup/SKILL.md
-  source_tool: claude
-  category: doc
-  scope: global
-  action: translate
-  target_destination: skills/catchup/
-  rationale: 'Generic reusable workflow or skill across engineering repos: catchup'
-  size_bytes: 880
-- rel_path: .claude/worktrees/rewrite/.claude/skills/pr/SKILL.md
-  source_tool: claude
-  category: doc
-  scope: global
-  action: translate
-  target_destination: skills/pr/
-  rationale: 'Generic reusable workflow or skill across engineering repos: pr'
-  size_bytes: 1031
-- rel_path: .claude/worktrees/rewrite/README.md
-  source_tool: claude
-  category: doc
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/context.md
-  rationale: 'Project context and instructions: README.md'
-  size_bytes: 2900
 - rel_path: .claude/hooks/block-ai-attribution.sh
   source_tool: claude
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/block-ai-attribution.sh
   rationale: 'Git safety: prevents co-authored AI commit metadata'
   size_bytes: 439
 - rel_path: .claude/hooks/block-paid-runs.sh
@@ -135,7 +926,7 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/block-paid-runs.sh
   rationale: 'Cost protection: blocks costly external API runs without explicit flags'
   size_bytes: 2173
 - rel_path: .claude/hooks/protect-databases.sh
@@ -143,7 +934,7 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/protect-databases.sh
   rationale: 'File protection: prevents modifications to taxonomy database snapshots'
   size_bytes: 675
 - rel_path: .claude/hooks/validate-readonly-query.sh
@@ -151,1969 +942,24 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/validate-readonly-query.sh
   rationale: 'Database safety: validates SQLite queries are strictly SELECT statements'
   size_bytes: 1027
 - rel_path: .claude/hooks/verify-before-stop.sh
   source_tool: claude
   category: hook
-  scope: global
+  scope: project
   action: translate
-  target_destination: skills/verify-before-stop/
-  rationale: 'Generic reusable workflow or skill across engineering repos: verify-before-stop'
+  target_destination: projects/medicoder/hooks/verify-before-stop.sh
+  rationale: 'Quality gate: enforces running test suite before completing tasks'
   size_bytes: 327
-- rel_path: .claude/worktrees/rewrite/.mcp.json
-  source_tool: claude
-  category: mcp
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/project.yaml
-  rationale: MCP tools configuration.
-  size_bytes: 195
-- rel_path: .claude/worktrees/rewrite/.claude/agents/db-reader.md
-  source_tool: claude
-  category: other
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/skills/db-reader/SKILL.md
-  rationale: 'Project domain agent: Read-only database inspector agent for taxonomy
-    tables'
-  size_bytes: 1484
-- rel_path: .claude/worktrees/rewrite/.claude/hooks/block-ai-attribution.sh
-  source_tool: claude
-  category: other
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/safety.md
-  rationale: 'Git safety: prevents co-authored AI commit metadata'
-  size_bytes: 439
-- rel_path: .claude/worktrees/rewrite/.claude/hooks/block-paid-runs.sh
-  source_tool: claude
-  category: other
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/safety.md
-  rationale: 'Cost protection: blocks costly external API runs without explicit flags'
-  size_bytes: 1107
-- rel_path: .claude/worktrees/rewrite/.claude/hooks/protect-databases.sh
-  source_tool: claude
-  category: other
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/safety.md
-  rationale: 'File protection: prevents modifications to taxonomy database snapshots'
-  size_bytes: 675
-- rel_path: .claude/worktrees/rewrite/.claude/hooks/validate-readonly-query.sh
-  source_tool: claude
-  category: other
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/safety.md
-  rationale: 'Database safety: validates SQLite queries are strictly SELECT statements'
-  size_bytes: 1027
-- rel_path: .claude/worktrees/rewrite/.claude/hooks/verify-before-stop.sh
-  source_tool: claude
-  category: other
-  scope: global
-  action: translate
-  target_destination: skills/verify-before-stop/
-  rationale: 'Generic reusable workflow or skill across engineering repos: verify-before-stop'
-  size_bytes: 327
-- rel_path: .claude/worktrees/rewrite/.claude/workflows/audit-eval-contamination.js
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/audit-eval-contamination.js
-  rationale: Unclassified AI asset from claude
-  size_bytes: 5136
-- rel_path: .claude/worktrees/rewrite/.claude/workflows/fix-until-green.js
-  source_tool: claude
-  category: other
-  scope: global
-  action: translate
-  target_destination: skills/fix-until-green/
-  rationale: 'Generic reusable workflow or skill across engineering repos: fix-until-green'
-  size_bytes: 1756
-- rel_path: .claude/worktrees/rewrite/.git
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/.git
-  rationale: Unclassified AI asset from claude
-  size_bytes: 82
-- rel_path: .claude/worktrees/rewrite/.gitignore
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/.gitignore
-  rationale: Unclassified AI asset from claude
-  size_bytes: 330
-- rel_path: .claude/worktrees/rewrite/configs/config.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/config.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 361
-- rel_path: .claude/worktrees/rewrite/configs/prompts/icd10achi.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10achi.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3475
-- rel_path: .claude/worktrees/rewrite/configs/prompts/icd10am.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10am.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2937
-- rel_path: .claude/worktrees/rewrite/configs/prompts/icd10cm.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10cm.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 4131
-- rel_path: .claude/worktrees/rewrite/configs/prompts/icd10pcs.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10pcs.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 4187
-- rel_path: .claude/worktrees/rewrite/configs/smoke.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/smoke.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 440
-- rel_path: .claude/worktrees/rewrite/configs/systems/icd10achi.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10achi.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 494
-- rel_path: .claude/worktrees/rewrite/configs/systems/icd10am.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10am.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 418
-- rel_path: .claude/worktrees/rewrite/configs/systems/icd10cm.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10cm.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 574
-- rel_path: .claude/worktrees/rewrite/configs/systems/icd10pcs.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10pcs.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 575
-- rel_path: .claude/worktrees/rewrite/database/icd10am_achi/icd10achi.sqlite
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10achi.sqlite
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1413120
-- rel_path: .claude/worktrees/rewrite/database/icd10am_achi/icd10am.sqlite
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10am.sqlite
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3670016
-- rel_path: .claude/worktrees/rewrite/database/icd10cm_pcs/icd10cm.sqlite
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10cm.sqlite
-  rationale: Unclassified AI asset from claude
-  size_bytes: 15233024
-- rel_path: .claude/worktrees/rewrite/database/icd10cm_pcs/icd10pcs.sqlite
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/icd10pcs.sqlite
-  rationale: Unclassified AI asset from claude
-  size_bytes: 25260032
-- rel_path: .claude/worktrees/rewrite/database/tosp.sqlite
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/tosp.sqlite
-  rationale: Unclassified AI asset from claude
-  size_bytes: 532480
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000001.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000001.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 352
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000002.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000002.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 397
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000003.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000003.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 388
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000004.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000004.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 385
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000005.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000005.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 347
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000006.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000006.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 400
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000007.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000007.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 367
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000008.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000008.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 327
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000009.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000009.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 365
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000010.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000010.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 428
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000011.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000011.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 344
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000012.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000012.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 460
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000013.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000013.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 481
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000014.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000014.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 395
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000015.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000015.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 413
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000016.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000016.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 322
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000017.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000017.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 317
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000018.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000018.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 444
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000019.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000019.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 365
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000020.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000020.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 496
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000021.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000021.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 475
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000022.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000022.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 369
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000023.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000023.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 450
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000024.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000024.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 474
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000025.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000025.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 595
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000026.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000026.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 501
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000027.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000027.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 317
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000028.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000028.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 317
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000029.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000029.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 392
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000030.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000030.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 387
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000031.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000031.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 307
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000032.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000032.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 449
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000033.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000033.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 430
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000035.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000035.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 444
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000036.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000036.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 452
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000037.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000037.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 380
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000038.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000038.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 429
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000039.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000039.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 459
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000040.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000040.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 387
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000041.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000041.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 390
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000042.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000042.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 413
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000043.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000043.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 464
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000044.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000044.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 420
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000045.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000045.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 420
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000046.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000046.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 514
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000047.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000047.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 450
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000048.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000048.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 543
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000049.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000049.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 484
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000050.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000050.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 466
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000051.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000051.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 423
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000052.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000052.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 558
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000053.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000053.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 430
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000054.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000054.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 522
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000055.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000055.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 383
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000057.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000057.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 483
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000058.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000058.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 526
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000059.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000059.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 471
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000060.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000060.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 459
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000062.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000062.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 408
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000063.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000063.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 552
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000064.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000064.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 445
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000065.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000065.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 395
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000066.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000066.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1091
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000067.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000067.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 686
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000068.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000068.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1530
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000069.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000069.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1115
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000070.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000070.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1212
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000071.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000071.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1518
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000072.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000072.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1037
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000073.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000073.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1101
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000074.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000074.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1216
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000075.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000075.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2159
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000076.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000076.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1225
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000077.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000077.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1446
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000078.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000078.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1652
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000079.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000079.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1984
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000080.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000080.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1465
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000081.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000081.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1455
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000082.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000082.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2063
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000083.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000083.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1386
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000084.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000084.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1138
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000085.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000085.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1290
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000086.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000086.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2195
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000087.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000087.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2385
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000088.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000088.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3723
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000089.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000089.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2751
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000090.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000090.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3515
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000091.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000091.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2400
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000092.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000092.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2227
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000093.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000093.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2464
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000094.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000094.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1370
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000095.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000095.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1813
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000096.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000096.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1730
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000097.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000097.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1410
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000098.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000098.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2151
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000099.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000099.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 944
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000100.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000100.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1888
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000101.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000101.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3107
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000102.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000102.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1615
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000103.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000103.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1817
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000104.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000104.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 839
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000105.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000105.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1307
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000106.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000106.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2292
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000107.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000107.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1276
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000108.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000108.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2536
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000109.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000109.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1779
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000110.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000110.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1668
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000111.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000111.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3611
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000112.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000112.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1185
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000113.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000113.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1249
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000114.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000114.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2316
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000115.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000115.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1205
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000116.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000116.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1152
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000117.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000117.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2105
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000118.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000118.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1059
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000119.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000119.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1599
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000120.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000120.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1177
-- rel_path: .claude/worktrees/rewrite/datasets/cases/000121.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000121.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 915
-- rel_path: .claude/worktrees/rewrite/datasets/smoke/0.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/0.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3723
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000074.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000074.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1216
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000076.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000076.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1225
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000077.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000077.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1446
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000079.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000079.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1984
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000082.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000082.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2063
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000085.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000085.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1290
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000089.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000089.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2751
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000104.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000104.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 839
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000107.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000107.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1276
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000110.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000110.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1668
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l2/000119.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000119.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1599
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000073.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000073.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1101
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000074.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000074.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1216
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000075.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000075.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2159
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000079.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000079.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1984
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000089.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000089.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2751
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000090.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000090.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3515
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000094.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000094.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1370
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000111.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000111.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3611
-- rel_path: .claude/worktrees/rewrite/datasets/tuning/l3/000113.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/000113.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1249
-- rel_path: .claude/worktrees/rewrite/medicoder/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/medicoder/__main__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__main__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 39
-- rel_path: .claude/worktrees/rewrite/medicoder/cli.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/cli.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 4312
-- rel_path: .claude/worktrees/rewrite/medicoder/config/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 258
-- rel_path: .claude/worktrees/rewrite/medicoder/config/loader.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/loader.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 5716
-- rel_path: .claude/worktrees/rewrite/medicoder/config/models.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/models.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 908
-- rel_path: .claude/worktrees/rewrite/medicoder/output/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 144
-- rel_path: .claude/worktrees/rewrite/medicoder/output/html.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/html.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 14442
-- rel_path: .claude/worktrees/rewrite/medicoder/output/markdown.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/markdown.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6546
-- rel_path: .claude/worktrees/rewrite/medicoder/output/metrics.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/metrics.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1293
-- rel_path: .claude/worktrees/rewrite/medicoder/output/report.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/report.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 20495
-- rel_path: .claude/worktrees/rewrite/medicoder/output/summary.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/summary.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 11598
-- rel_path: .claude/worktrees/rewrite/medicoder/pipeline/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 761
-- rel_path: .claude/worktrees/rewrite/medicoder/pipeline/checkpoint.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/checkpoint.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3368
-- rel_path: .claude/worktrees/rewrite/medicoder/pipeline/results.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/results.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1589
-- rel_path: .claude/worktrees/rewrite/medicoder/pipeline/runner.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/runner.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8990
-- rel_path: .claude/worktrees/rewrite/medicoder/pipeline/walk.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/walk.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 9018
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 625
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/gemini.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/gemini.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6218
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/parse.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/parse.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6601
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/prompts.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/prompts.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3835
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/render.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/render.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1501
-- rel_path: .claude/worktrees/rewrite/medicoder/ranking/result.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/result.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 885
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 602
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/achi.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/achi.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 5594
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/companions.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/companions.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2046
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/core.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/core.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6841
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/entry.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/entry.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1112
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/ground_truth.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/ground_truth.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3581
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/hierarchical.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/hierarchical.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2225
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/notes.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/notes.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1145
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/pcs.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/pcs.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2712
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/stubs.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/stubs.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 2904
-- rel_path: .claude/worktrees/rewrite/medicoder/taxonomy/systems.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/systems.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3241
-- rel_path: .claude/worktrees/rewrite/pdf/ACHI.pdf
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/ACHI.pdf
-  rationale: Unclassified AI asset from claude
-  size_bytes: 24199933
-- rel_path: .claude/worktrees/rewrite/pdf/ICD-10-AM.pdf
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/ICD-10-AM.pdf
-  rationale: Unclassified AI asset from claude
-  size_bytes: 25261321
-- rel_path: .claude/worktrees/rewrite/requirements.txt
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/requirements.txt
-  rationale: Unclassified AI asset from claude
-  size_bytes: 167
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/audit.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/audit.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6509574
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/checkpoint.jsonl
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/checkpoint.jsonl
-  rationale: Unclassified AI asset from claude
-  size_bytes: 7082070
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/config.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/config.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3175
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/report.html
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/report.html
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8224505
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/report.md
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/report.md
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6577871
-- rel_path: .claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/results.json
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/results.json
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1901510
-- rel_path: .claude/worktrees/rewrite/scripts/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/scripts/generate_pcs_notes.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/generate_pcs_notes.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8577
-- rel_path: .claude/worktrees/rewrite/scripts/lookup_icd10am.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/lookup_icd10am.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3667
-- rel_path: .claude/worktrees/rewrite/scripts/pcs_level1_notes.yml
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/pcs_level1_notes.yml
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8197
-- rel_path: .claude/worktrees/rewrite/scripts/pcs_notes.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/pcs_notes.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 12511
-- rel_path: .claude/worktrees/rewrite/tests/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/config/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/config/test_loader.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_loader.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 5977
-- rel_path: .claude/worktrees/rewrite/tests/output/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/output/test_metrics.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_metrics.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 4072
-- rel_path: .claude/worktrees/rewrite/tests/output/test_report.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_report.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 24427
-- rel_path: .claude/worktrees/rewrite/tests/output/test_summary.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_summary.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 11534
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/fixtures.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/fixtures.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1597
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/test_checkpoint.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_checkpoint.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8113
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/test_runner.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_runner.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 11999
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/test_walk.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_walk.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 17733
-- rel_path: .claude/worktrees/rewrite/tests/pipeline/test_walk_systems.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_walk_systems.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 15412
-- rel_path: .claude/worktrees/rewrite/tests/ranking/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/ranking/test_gemini.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_gemini.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8678
-- rel_path: .claude/worktrees/rewrite/tests/ranking/test_parse.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_parse.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 11524
-- rel_path: .claude/worktrees/rewrite/tests/ranking/test_prompts.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_prompts.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6648
-- rel_path: .claude/worktrees/rewrite/tests/ranking/test_render.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_render.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 3253
-- rel_path: .claude/worktrees/rewrite/tests/scripts/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/scripts/test_pcs_notes.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_pcs_notes.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 13087
-- rel_path: .claude/worktrees/rewrite/tests/support.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/support.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1431
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/__init__.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/__init__.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 0
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_achi.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_achi.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 10098
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_companions.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_companions.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 8000
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_core.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_core.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 7756
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_ground_truth.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_ground_truth.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 13659
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_hierarchical.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_hierarchical.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1877
-- rel_path: .claude/worktrees/rewrite/tests/taxonomy/test_pcs.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_pcs.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 12979
-- rel_path: .claude/worktrees/rewrite/tests/test_cli.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_cli.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 1771
-- rel_path: .claude/worktrees/rewrite/tests/test_end_to_end.py
-  source_tool: claude
-  category: other
-  scope: project
-  action: copy_as_is
-  target_destination: projects/medicoder/misc/test_end_to_end.py
-  rationale: Unclassified AI asset from claude
-  size_bytes: 6088
 - rel_path: .claude/settings.json
   source_tool: claude
   category: setting
   scope: project
   action: translate
   target_destination: projects/medicoder/project.yaml
-  rationale: Claude Code workspace permissions and command allow/deny lists.
+  rationale: Workspace permissions and command allow/deny lists.
   size_bytes: 1659
 - rel_path: .claude/settings.local.json
   source_tool: claude
@@ -2123,29 +969,13 @@ items:
   target_destination: migration/medicoder/original/.claude/settings.local.json
   rationale: Executor adapter / tool-specific configuration (claude).
   size_bytes: 177
-- rel_path: .claude/worktrees/rewrite/.claude/settings.json
-  source_tool: claude
-  category: setting
-  scope: project
-  action: translate
-  target_destination: projects/medicoder/project.yaml
-  rationale: Claude Code workspace permissions and command allow/deny lists.
-  size_bytes: 1440
-- rel_path: .claude/worktrees/rewrite/.claude/settings.local.json
-  source_tool: claude
-  category: setting
-  scope: executor
-  action: copy_as_is
-  target_destination: migration/medicoder/original/.claude/worktrees/rewrite/.claude/settings.local.json
-  rationale: Executor adapter / tool-specific configuration (claude).
-  size_bytes: 177
 - rel_path: .claude/skills/catchup/SKILL.md
   source_tool: claude
   category: skill
   scope: global
   action: translate
   target_destination: skills/catchup/
-  rationale: 'Generic reusable workflow or skill across engineering repos: catchup'
+  rationale: 'Global reusable engineering skill: catchup'
   size_bytes: 880
 - rel_path: .claude/skills/pr/SKILL.md
   source_tool: claude
@@ -2153,7 +983,7 @@ items:
   scope: global
   action: translate
   target_destination: skills/pr/
-  rationale: 'Generic reusable workflow or skill across engineering repos: pr'
+  rationale: 'Global reusable engineering skill: pr'
   size_bytes: 1031
 - rel_path: .claude/workflows/audit-eval-contamination.js
   source_tool: claude
@@ -2161,7 +991,7 @@ items:
   scope: project
   action: translate
   target_destination: projects/medicoder/skills/audit-eval-contamination/
-  rationale: 'Project-specific automated workflow: audit-eval-contamination.js'
+  rationale: 'Medicoder domain skill/agent: audit-eval-contamination'
   size_bytes: 5154
 - rel_path: .claude/workflows/fix-until-green.js
   source_tool: claude
@@ -2169,14 +999,14 @@ items:
   scope: global
   action: translate
   target_destination: skills/fix-until-green/
-  rationale: 'Generic reusable workflow or skill across engineering repos: fix-until-green'
+  rationale: 'Global reusable engineering skill: fix-until-green'
   size_bytes: 1756
 - rel_path: .cursor/hooks/block-bulk-git-add.sh
   source_tool: cursor
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/block-bulk-git-add.sh
   rationale: 'Git safety: prevents indiscriminate git add -A or git add .'
   size_bytes: 525
 - rel_path: .cursor/hooks/claude-adapter.sh
@@ -2192,7 +1022,7 @@ items:
   category: hook
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
+  target_destination: projects/medicoder/hooks/readonly-sqlite.sh
   rationale: 'Database safety: ensures sqlite connections are opened in readonly mode'
   size_bytes: 457
 - rel_path: .cursor/rules/am-full-runs.mdc
@@ -2200,8 +1030,8 @@ items:
   category: rule
   scope: project
   action: translate
-  target_destination: projects/medicoder/safety.md
-  rationale: 'Cost safety: prohibits running full evaluation pipeline without approval'
+  target_destination: projects/medicoder/rules/am-full-runs.md
+  rationale: 'Project operational rule: am-full-runs'
   size_bytes: 394
 - rel_path: .cursor/hooks.json
   source_tool: cursor
@@ -2211,13 +1041,101 @@ items:
   target_destination: migration/medicoder/original/.cursor/hooks.json
   rationale: Executor adapter / tool-specific configuration (cursor).
   size_bytes: 1033
+- rel_path: .cursor/skills/analyze-runs/SKILL.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/analyze-runs/
+  rationale: 'Medicoder domain skill/agent: analyze-runs'
+  size_bytes: 5403
+- rel_path: .cursor/skills/icd10am-achi/SKILL.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10am-achi/
+  rationale: 'Medicoder domain skill/agent: icd10am-achi'
+  size_bytes: 2209
+- rel_path: .cursor/skills/icd10am-achi/examples.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10am-achi/
+  rationale: 'Medicoder domain skill/agent: icd10am-achi'
+  size_bytes: 2142
+- rel_path: .cursor/skills/icd10am-achi/language.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10am-achi/
+  rationale: 'Medicoder domain skill/agent: icd10am-achi'
+  size_bytes: 3674
+- rel_path: .cursor/skills/icd10am-achi/schema.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10am-achi/
+  rationale: 'Medicoder domain skill/agent: icd10am-achi'
+  size_bytes: 5253
+- rel_path: .cursor/skills/icd10cm-pcs/SKILL.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10cm-pcs/
+  rationale: 'Medicoder domain skill/agent: icd10cm-pcs'
+  size_bytes: 2139
+- rel_path: .cursor/skills/icd10cm-pcs/examples.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10cm-pcs/
+  rationale: 'Medicoder domain skill/agent: icd10cm-pcs'
+  size_bytes: 2179
+- rel_path: .cursor/skills/icd10cm-pcs/language.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10cm-pcs/
+  rationale: 'Medicoder domain skill/agent: icd10cm-pcs'
+  size_bytes: 2330
+- rel_path: .cursor/skills/icd10cm-pcs/schema.md
+  source_tool: cursor
+  category: skill
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/skills/icd10cm-pcs/
+  rationale: 'Medicoder domain skill/agent: icd10cm-pcs'
+  size_bytes: 4236
+- rel_path: docs/tune-level-runbook.md
+  source_tool: generic
+  category: convention
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/conventions.md
+  rationale: 'Project conventions, notes rules, and hard constraints: tune-level-runbook.md'
+  size_bytes: 305
+- rel_path: tuning/runbook.md
+  source_tool: generic
+  category: convention
+  scope: project
+  action: translate
+  target_destination: projects/medicoder/conventions.md
+  rationale: 'Project conventions, notes rules, and hard constraints: runbook.md'
+  size_bytes: 14067
 - rel_path: README.md
   source_tool: generic
   category: doc
   scope: project
   action: translate
   target_destination: projects/medicoder/context.md
-  rationale: 'Project context and instructions: README.md'
+  rationale: 'Project architecture and overview: README.md'
   size_bytes: 3797
 - rel_path: .env
   source_tool: generic
@@ -2225,7 +1143,7 @@ items:
   scope: sensitive
   action: security_block
   target_destination: DO_NOT_MIGRATE
-  rationale: Contains API keys or secrets (e.g. GEMINI_API_KEY). Must not be migrated.
+  rationale: Contains API keys or secrets (e.g. GEMINI_API_KEY). Blocked from copying.
   size_bytes: 243
 - rel_path: .mcp.json
   source_tool: mcp

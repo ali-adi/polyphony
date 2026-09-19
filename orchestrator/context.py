@@ -17,8 +17,11 @@ def load_project_knowledge(project_name: str, root_dir: Path) -> Dict[str, Any]:
         "name": project_name,
         "config": {},
         "context": "",
+        "conventions": "",
         "safety": "",
         "project_skills": [],
+        "project_rules": [],
+        "project_hooks": [],
         "global_skills": [],
     }
 
@@ -31,22 +34,38 @@ def load_project_knowledge(project_name: str, root_dir: Path) -> Dict[str, Any]:
     if context_file.exists():
         knowledge["context"] = context_file.read_text(encoding="utf-8")
 
+    conventions_file = proj_dir / "conventions.md"
+    if conventions_file.exists():
+        knowledge["conventions"] = conventions_file.read_text(encoding="utf-8")
+
     safety_file = proj_dir / "safety.md"
     if safety_file.exists():
         knowledge["safety"] = safety_file.read_text(encoding="utf-8")
 
+    # List project rules
+    rules_dir = proj_dir / "rules"
+    if rules_dir.exists():
+        for r in sorted(rules_dir.glob("*.md")):
+            knowledge["project_rules"].append(r.stem)
+
+    # List project hooks
+    hooks_dir = proj_dir / "hooks"
+    if hooks_dir.exists():
+        for h in sorted(hooks_dir.glob("*.sh")):
+            knowledge["project_hooks"].append(h.name)
+
     # List project skills
     skills_dir = proj_dir / "skills"
     if skills_dir.exists():
-        for s in skills_dir.iterdir():
-            if s.is_dir() and (s / "SKILL.md").exists():
+        for s in sorted(skills_dir.iterdir()):
+            if s.is_dir():
                 knowledge["project_skills"].append(s.name)
 
     # List global skills
     global_skills_dir = root_dir / "skills"
     if global_skills_dir.exists():
-        for s in global_skills_dir.iterdir():
-            if s.is_dir() and (s / "SKILL.md").exists():
+        for s in sorted(global_skills_dir.iterdir()):
+            if s.is_dir():
                 knowledge["global_skills"].append(s.name)
 
     return knowledge
@@ -107,8 +126,15 @@ Path: {task_state.project_path}
 ## Context & Architecture
 {knowledge.get('context', 'No context file found.')[:2000]}
 
+## Conventions & Style
+{knowledge.get('conventions', 'Follow standard engineering conventions.')[:2000]}
+
 ## Safety & Operational Policies
 {knowledge.get('safety', 'Follow repository conventions.')[:2000]}
+
+## Active Rules & Hooks
+- Rules: {', '.join(knowledge.get('project_rules', [])) or 'None'}
+- Safety Hooks: {', '.join(knowledge.get('project_hooks', [])) or 'None'}
 
 ## Available Skills
 {skills_text}

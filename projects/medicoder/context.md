@@ -9,7 +9,7 @@ Medicoder is an autonomous ICD-10 medical coding system that maps free-text clin
 - **Core Taxonomy Database**: Pre-built, versioned SQLite taxonomy snapshots located in `database/`. These tables are immutable references and must never be edited directly.
 - **Pipeline Runner**: `medicoder/main.py` runs batch evaluation against clinical case sets. Configured via YAML in `configs/` (`smoke.yml`, `sample.yml`, `full.yml`).
 - **Tuning Harness**: `scripts/tune_level.py` tunes prompt structures and level-by-level decision accuracy with strict run budgets.
-- **Test Suite**: Standard unittest suite under `tests/`. Verified using `python -m unittest discover -s tests -t .`.
+- **Test Suite**: Standard unittest suite under `tests/`. Verified using `env/bin/python -m unittest discover -s tests -t .`.
 
 ## Key Technical Conventions
 

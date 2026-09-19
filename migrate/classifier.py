@@ -27,26 +27,40 @@ class ClassifiedItem:
     action: str  # "translate" | "copy_as_is" | "ignore" | "security_block"
 
 
-# Known patterns for classification
-GLOBAL_SKILL_NAMES = {"catchup", "pr", "fix-until-green", "verify-before-stop"}
-GLOBAL_HOOK_NAMES = {"verify-before-stop.sh"}
-GLOBAL_WORKFLOW_NAMES = {"fix-until-green.js"}
+GLOBAL_SKILL_NAMES = {
+    "catchup",
+    "pr",
+    "fix-until-green",
+    "verify-before-stop",
+    "tdd",
+    "code-review",
+    "diagnosing-bugs",
+    "grill-me",
+    "grill-with-docs",
+    "git-guardrails-claude-code",
+    "resolving-merge-conflicts",
+    "improve-codebase-architecture",
+}
 
-SAFETY_HOOK_PATTERNS = {
+PROJECT_DOMAIN_SKILLS = {
+    "am-achi-notes-author",
+    "pcs-notes-author",
+    "db-reader",
+    "pcs-editor",
+    "audit-eval-contamination",
+    "analyze-runs",
+    "icd10am-achi",
+    "icd10cm-pcs",
+}
+
+SAFETY_HOOKS = {
     "protect-databases.sh": "File protection: prevents modifications to taxonomy database snapshots",
     "block-paid-runs.sh": "Cost protection: blocks costly external API runs without explicit flags",
     "block-ai-attribution.sh": "Git safety: prevents co-authored AI commit metadata",
     "validate-readonly-query.sh": "Database safety: validates SQLite queries are strictly SELECT statements",
+    "verify-before-stop.sh": "Quality gate: enforces running test suite before completing tasks",
     "block-bulk-git-add.sh": "Git safety: prevents indiscriminate git add -A or git add .",
     "readonly-sqlite.sh": "Database safety: ensures sqlite connections are opened in readonly mode",
-    "am-full-runs.mdc": "Cost safety: prohibits running full evaluation pipeline without approval",
-}
-
-PROJECT_AGENT_NAMES = {
-    "db-reader": "Read-only database inspector agent for taxonomy tables",
-    "pcs-editor": "Precise ICD-10-PCS code editor agent",
-    "am-achi-notes-author": "Authoring agent for ICD-10-AM and ACHI notes",
-    "pcs-notes-author": "Authoring agent for ICD-10-PCS notes",
 }
 
 
@@ -54,6 +68,7 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
     """Classify a single scanned item."""
     p = Path(item.rel_path)
     name = p.name
+    parts = p.parts
 
     # 1. Sensitive items
     if item.category == "secret" or name in (".env", ".env.local"):
@@ -61,7 +76,7 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
             item=item,
             scope=ClassificationScope.SENSITIVE,
             target_destination="DO_NOT_MIGRATE",
-            rationale="Contains API keys or secrets (e.g. GEMINI_API_KEY). Must not be migrated.",
+            rationale="Contains API keys or secrets (e.g. GEMINI_API_KEY). Blocked from copying.",
             action="security_block",
         )
 
@@ -75,60 +90,8 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
             action="ignore",
         )
 
-    # 3. Global skills and workflows
-    skill_or_wf_name = p.stem.lower()
-    if p.parent.name in GLOBAL_SKILL_NAMES or skill_or_wf_name in GLOBAL_SKILL_NAMES or name in GLOBAL_HOOK_NAMES:
-        skill_id = p.parent.name if p.parent.name in GLOBAL_SKILL_NAMES else skill_or_wf_name
-        return ClassifiedItem(
-            item=item,
-            scope=ClassificationScope.GLOBAL,
-            target_destination=f"skills/{skill_id}/",
-            rationale=f"Generic reusable workflow or skill across engineering repos: {skill_id}",
-            action="translate",
-        )
-
-    # 4. Safety hooks and rules (Project-level safety)
-    if name in SAFETY_HOOK_PATTERNS:
-        return ClassifiedItem(
-            item=item,
-            scope=ClassificationScope.PROJECT,
-            target_destination=f"projects/{project_name}/safety.md",
-            rationale=SAFETY_HOOK_PATTERNS[name],
-            action="translate",
-        )
-
-    # 5. Project-specific Agents
-    agent_stem = p.stem
-    if item.category == "agent" or agent_stem in PROJECT_AGENT_NAMES:
-        desc = PROJECT_AGENT_NAMES.get(agent_stem, f"Specialized agent for {project_name}")
-        return ClassifiedItem(
-            item=item,
-            scope=ClassificationScope.PROJECT,
-            target_destination=f"projects/{project_name}/skills/{agent_stem}/SKILL.md",
-            rationale=f"Project domain agent: {desc}",
-            action="translate",
-        )
-
-    # 6. Project-specific workflows
-    if item.category == "workflow":
-        return ClassifiedItem(
-            item=item,
-            scope=ClassificationScope.PROJECT,
-            target_destination=f"projects/{project_name}/skills/{p.stem}/",
-            rationale=f"Project-specific automated workflow: {name}",
-            action="translate",
-        )
-
-    # 7. Tool adapter shims & executor-level configurations
-    if name in ("claude-adapter.sh", "hooks.json") or item.category == "setting":
-        if name == "settings.json":
-            return ClassifiedItem(
-                item=item,
-                scope=ClassificationScope.PROJECT,
-                target_destination=f"projects/{project_name}/project.yaml",
-                rationale="Claude Code workspace permissions and command allow/deny lists.",
-                action="translate",
-            )
+    # 3. Tool adapter shims & executor-level configurations
+    if name in ("claude-adapter.sh", "hooks.json", "settings.local.json"):
         return ClassifiedItem(
             item=item,
             scope=ClassificationScope.EXECUTOR,
@@ -137,8 +100,92 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
             action="copy_as_is",
         )
 
-    # 8. MCP server configs
-    if item.category == "mcp" or name == ".mcp.json":
+    # 4. Executable Safety Hooks
+    if item.category == "hook" or name in SAFETY_HOOKS:
+        rationale = SAFETY_HOOKS.get(name, f"Safety hook: {name}")
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/hooks/{name}",
+            rationale=rationale,
+            action="translate",
+        )
+
+    # 4. Rules
+    if item.category == "rule" or name.endswith(".mdc"):
+        rule_name = p.stem
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/rules/{rule_name}.md",
+            rationale=f"Project operational rule: {rule_name}",
+            action="translate",
+        )
+
+    # 5. Project Domain Agents & Skills (am-achi-notes-author, db-reader, pcs-editor, icd10am-achi, etc.)
+    # Check if inside a skill/agent folder or matches known project domain skills
+    skill_parent = parts[2] if len(parts) > 2 and parts[1] == "skills" else p.stem
+    if p.stem in PROJECT_DOMAIN_SKILLS or skill_parent in PROJECT_DOMAIN_SKILLS or item.category == "agent":
+        skill_id = skill_parent if skill_parent in PROJECT_DOMAIN_SKILLS else p.stem
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/skills/{skill_id}/",
+            rationale=f"Medicoder domain skill/agent: {skill_id}",
+            action="translate",
+        )
+
+    # 6. Project-specific workflows (e.g. audit-eval-contamination)
+    if name == "audit-eval-contamination.js":
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/skills/audit-eval-contamination/SKILL.md",
+            rationale="Project audit workflow for eval set contamination",
+            action="translate",
+        )
+
+    # 7. Global Skills and Workflows
+    if p.stem in GLOBAL_SKILL_NAMES or skill_parent in GLOBAL_SKILL_NAMES or name == "fix-until-green.js":
+        skill_id = skill_parent if skill_parent in GLOBAL_SKILL_NAMES else p.stem
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.GLOBAL,
+            target_destination=f"skills/{skill_id}/",
+            rationale=f"Global reusable engineering skill: {skill_id}",
+            action="translate",
+        )
+
+    # 8. Conventions, Runbooks, Guidelines
+    if item.category == "convention" or "runbook" in name.lower() or "convention" in name.lower():
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/conventions.md",
+            rationale=f"Project conventions, notes rules, and hard constraints: {name}",
+            action="translate",
+        )
+
+    # 9. Tool settings & adapters
+    if name == "settings.json":
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.PROJECT,
+            target_destination=f"projects/{project_name}/project.yaml",
+            rationale="Workspace permissions and command allow/deny lists.",
+            action="translate",
+        )
+    if name in ("settings.local.json", "hooks.json", "claude-adapter.sh"):
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.EXECUTOR,
+            target_destination=f"migration/{project_name}/original/{item.rel_path}",
+            rationale=f"Executor adapter / tool-specific configuration ({item.source_tool}).",
+            action="copy_as_is",
+        )
+
+    # 10. MCP configuration
+    if name == ".mcp.json":
         return ClassifiedItem(
             item=item,
             scope=ClassificationScope.PROJECT,
@@ -147,22 +194,32 @@ def classify_item(item: ScannedItem, project_name: str) -> ClassifiedItem:
             action="translate",
         )
 
-    # 9. Project documentation & rules
-    if item.category in ("doc", "rule") or name in ("README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"):
+    # 11. Project documentation
+    if name in ("README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md"):
         return ClassifiedItem(
             item=item,
             scope=ClassificationScope.PROJECT,
             target_destination=f"projects/{project_name}/context.md",
-            rationale=f"Project context and instructions: {name}",
+            rationale=f"Project architecture and overview: {name}",
             action="translate",
         )
 
-    # Default fallback
+    # Default fallback for other skills in .agents/skills/
+    if len(parts) > 1 and parts[1] == "skills":
+        s_name = parts[2]
+        return ClassifiedItem(
+            item=item,
+            scope=ClassificationScope.GLOBAL,
+            target_destination=f"skills/{s_name}/",
+            rationale=f"Global skill asset: {s_name}",
+            action="translate",
+        )
+
     return ClassifiedItem(
         item=item,
         scope=ClassificationScope.PROJECT,
-        target_destination=f"projects/{project_name}/misc/{name}",
-        rationale=f"Unclassified AI asset from {item.source_tool}",
+        target_destination=f"projects/{project_name}/conventions.md",
+        rationale=f"Project reference asset: {name}",
         action="copy_as_is",
     )
 

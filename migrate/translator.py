@@ -23,11 +23,14 @@ class MigrationReport:
     total_blocked: int
     global_skills_created: List[str] = field(default_factory=list)
     project_skills_created: List[str] = field(default_factory=list)
+    hooks_migrated: List[str] = field(default_factory=list)
+    rules_migrated: List[str] = field(default_factory=list)
     inventory_path: Optional[Path] = None
     manifest_path: Optional[Path] = None
     project_yaml_path: Optional[Path] = None
     safety_md_path: Optional[Path] = None
     context_md_path: Optional[Path] = None
+    conventions_md_path: Optional[Path] = None
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -39,8 +42,11 @@ def _copy_original_snapshot(
     classified_items: List[ClassifiedItem],
     snapshot_dir: Path,
 ) -> None:
-    """Copy original discovered config files into migration/<project>/original/ snapshot."""
+    """Copy original discovered config files into migration/<project>/original/ snapshot, cleaning prior state."""
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
     _ensure_dir(snapshot_dir)
+
     for c in classified_items:
         if c.scope == ClassificationScope.SENSITIVE:
             continue
@@ -66,11 +72,11 @@ def _write_inventory_md(
         "## Summary",
         "",
         f"- **Total Discovered Assets**: {len(classified_items)}",
-        f"- **Global Assets**: {sum(1 for c in classified_items if c.scope == ClassificationScope.GLOBAL)}",
-        f"- **Project Assets**: {sum(1 for c in classified_items if c.scope == ClassificationScope.PROJECT)}",
-        f"- **Executor Configs**: {sum(1 for c in classified_items if c.scope == ClassificationScope.EXECUTOR)}",
-        f"- **Sensitive/Blocked Items**: {sum(1 for c in classified_items if c.scope == ClassificationScope.SENSITIVE)}",
-        f"- **Ephemeral/Ignored Items**: {sum(1 for c in classified_items if c.scope == ClassificationScope.EPHEMERAL)}",
+        f"- **Global Skills & Workflows**: {sum(1 for c in classified_items if c.scope == ClassificationScope.GLOBAL)}",
+        f"- **Project Domain Assets**: {sum(1 for c in classified_items if c.scope == ClassificationScope.PROJECT)}",
+        f"- **Executor Adapter Configs**: {sum(1 for c in classified_items if c.scope == ClassificationScope.EXECUTOR)}",
+        f"- **Sensitive/Blocked Credentials**: {sum(1 for c in classified_items if c.scope == ClassificationScope.SENSITIVE)}",
+        f"- **Ephemeral/Ignored State**: {sum(1 for c in classified_items if c.scope == ClassificationScope.EPHEMERAL)}",
         "",
         "## Discovered AI Configurations",
         "",
@@ -90,13 +96,14 @@ def _write_inventory_md(
 
     lines.extend([
         "",
-        "## Safety Policies Identified",
+        "## Consolidated Policies & Artifacts",
         "",
-        "- **Database Protection**: Denies edits to `database/` snapshots.",
-        "- **Cost Controls**: Prohibits full Gemini API pipeline evaluation runs without explicit approval.",
-        "- **Git Integrity**: Blocks bulk adds (`git add -A`, `git add .`) and removes AI co-author attribution.",
-        "- **Database Integrity**: Validates SQLite queries are read-only (`-readonly`).",
-        "- **Stop Verification**: Runs test suite before completing task execution.",
+        "- **Hooks**: Executable safety hook scripts preserved in `projects/<project>/hooks/` with executable bits.",
+        "- **Rules**: Enforced operational policies saved in `projects/<project>/rules/`.",
+        "- **Conventions & Style**: Coding standards, prompt structure, notes authoring syntax in `projects/<project>/conventions.md`.",
+        "- **Safety Engine**: Unified safety gates in `projects/<project>/safety.md`.",
+        "- **Domain Skills**: Specialized agents and schemas in `projects/<project>/skills/`.",
+        "- **Global Skills**: Reusable engineering workflows in `skills/`.",
         "",
     ])
 
@@ -150,7 +157,6 @@ def _generate_project_yaml(
     dest_path: Path,
 ) -> None:
     """Generate projects/<project>/project.yaml."""
-    # Check if project has a virtualenv or test runner
     has_env = (project_path / "env").exists()
     python_bin = "env/bin/python" if has_env else "python3"
 
@@ -225,7 +231,7 @@ Medicoder is an autonomous ICD-10 medical coding system that maps free-text clin
 - **Core Taxonomy Database**: Pre-built, versioned SQLite taxonomy snapshots located in `database/`. These tables are immutable references and must never be edited directly.
 - **Pipeline Runner**: `medicoder/main.py` runs batch evaluation against clinical case sets. Configured via YAML in `configs/` (`smoke.yml`, `sample.yml`, `full.yml`).
 - **Tuning Harness**: `scripts/tune_level.py` tunes prompt structures and level-by-level decision accuracy with strict run budgets.
-- **Test Suite**: Standard unittest suite under `tests/`. Verified using `python -m unittest discover -s tests -t .`.
+- **Test Suite**: Standard unittest suite under `tests/`. Verified using `env/bin/python -m unittest discover -s tests -t .`.
 
 ## Key Technical Conventions
 
@@ -240,7 +246,60 @@ Medicoder is an autonomous ICD-10 medical coding system that maps free-text clin
 
 {readme_content}
 """
+    _ensure_dir(dest_path.parent)
+    dest_path.write_text(content, encoding="utf-8")
 
+
+def _generate_conventions_md(
+    project_path: Path,
+    project_name: str,
+    dest_path: Path,
+) -> None:
+    """Generate projects/<project>/conventions.md detailing coding standards, style, and rules."""
+    runbook_path = project_path / "tuning" / "runbook.md"
+    runbook_excerpt = ""
+    if runbook_path.exists():
+        try:
+            rb_lines = runbook_path.read_text(encoding="utf-8").splitlines()
+            runbook_excerpt = "\n".join(rb_lines[30:70])
+        except Exception:
+            pass
+
+    content = f"""# Engineering & Authoring Conventions: {project_name}
+
+## 1. Code Style & Architecture
+- **Language**: Python 3.11+ adhering to PEP 8 standards.
+- **Type Annotations**: Mandatory type hints for public signatures and critical data models.
+- **Docstrings & Comments**: Preserved at all times. Do not strip or alter unrelated comments during edits.
+- **Edits**: Minimal, surgical modifications. Fix the implementation code rather than altering tests, unless the test specification itself is explicitly proven obsolete.
+
+## 2. Testing & Quality Discipline
+- **Virtual Environment**: All commands, scripts, and tests must be executed using `env/bin/python`.
+- **Green Suite Guarantee**: Keep the unit tests passing at all times. Always run `env/bin/python -m unittest discover -s tests -t .` after any code, notes, or prompt modification.
+- **Zero Broken Changes**: Never declare a task or PR complete if tests are failing.
+
+## 3. Taxonomy Notes Authoring Rules
+- **Note Format**: `<prose>. Includes: term; term; term.`
+- **Formatting Constraints**: Single-line only, no pipe characters (`|`), at most one `Includes:` section per entry.
+- **Prose Content**: State what the code/row covers and where its near neighbors sit in the hierarchy.
+- **Case Contamination Ban**: Nothing in a note or prompt may come directly from evaluation cases. No verbatim phrases or code lists lifted from case misses. Notes draw strictly from taxonomy manuals and domain knowledge.
+
+## 4. Database Interaction Conventions
+- **Read-Only SQLite**: Database access is strictly read-only (`sqlite3 -safe -readonly`).
+- **Immutable Snapshots**: Never edit anything under `database/` manually. The automated notes generator scripts (`scripts/generate_*_notes.py`) are the sole authorized writers.
+
+## 5. Git Discipline & Safety
+- **Explicit File Staging**: Only stage explicit file paths (`git add <path>`). Indiscriminate staging (`git add -A`, `git add .`, `git add -u`, `git commit -a`) is prohibited.
+- **Commit Authorship**: Never append AI attribution trailers (`Co-authored-by: ...`).
+- **Commit Responsibility**: Autonomous agents stage and verify; operator reviews and pushes.
+
+---
+
+## Reference Runbook Excerpt
+```markdown
+{runbook_excerpt}
+```
+"""
     _ensure_dir(dest_path.parent)
     dest_path.write_text(content, encoding="utf-8")
 
@@ -277,12 +336,77 @@ These policies are strictly enforced across all executor engines (`claude`, `agy
 - **Rule**: SQLite database queries must be strictly read-only (`sqlite3 -safe -readonly` or `SELECT` statements only). `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER` are blocked.
 
 ## 5. Verification Before Stop (Quality Gate)
-- **Rule**: Before any task or iteration is declared successful, the full test suite must pass (`python -m unittest discover -s tests -t .`).
+- **Rule**: Before any task or iteration is declared successful, the full test suite must pass (`env/bin/python -m unittest discover -s tests -t .`).
 - **Action on Failure**: Agent must inspect failures and fix them or halt with a report.
 """
-
     _ensure_dir(dest_path.parent)
     dest_path.write_text(content, encoding="utf-8")
+
+
+def _migrate_hooks(
+    project_path: Path,
+    target_hooks_dir: Path,
+) -> List[str]:
+    """Copy all safety hooks into projects/<project>/hooks/ and ensure chmod +x."""
+    _ensure_dir(target_hooks_dir)
+    migrated: List[str] = []
+
+    hook_sources = [
+        project_path / ".claude" / "hooks",
+        project_path / ".cursor" / "hooks",
+        project_path / ".agents" / "hooks",
+    ]
+
+    for h_dir in hook_sources:
+        if not h_dir.exists():
+            continue
+        for h_file in h_dir.glob("*.sh"):
+            target_file = target_hooks_dir / h_file.name
+            shutil.copy2(h_file, target_file)
+            target_file.chmod(target_file.stat().st_mode | 0o111)
+            if h_file.name not in migrated:
+                migrated.append(h_file.name)
+
+    return sorted(migrated)
+
+
+def _migrate_rules(
+    project_path: Path,
+    target_rules_dir: Path,
+) -> List[str]:
+    """Migrate operational rules into projects/<project>/rules/."""
+    _ensure_dir(target_rules_dir)
+    migrated: List[str] = []
+
+    # 1. Cursor rules
+    cursor_rules_dir = project_path / ".cursor" / "rules"
+    if cursor_rules_dir.exists():
+        for r_file in cursor_rules_dir.glob("*.mdc"):
+            rule_stem = r_file.stem
+            dest_file = target_rules_dir / f"{rule_stem}.md"
+            content = r_file.read_text(encoding="utf-8")
+            dest_file.write_text(content, encoding="utf-8")
+            migrated.append(rule_stem)
+
+    # 2. Add standard safety rules
+    db_rule = target_rules_dir / "protected-databases.md"
+    db_rule.write_text("""# Rule: Protected Taxonomy Database Snapshots
+Files under `database/` are versioned SQLite taxonomy snapshots built outside this repository.
+Never edit or overwrite anything under `database/`. Any modification attempt is immediately blocked.
+""", encoding="utf-8")
+    if "protected-databases" not in migrated:
+        migrated.append("protected-databases")
+
+    git_rule = target_rules_dir / "git-discipline.md"
+    git_rule.write_text("""# Rule: Git Discipline & Staging
+1. Never use `git add -A`, `git add .`, or `git add -u`. Stage files explicitly by path.
+2. Never commit with AI co-authorship tags (`Co-authored-by:`).
+3. The human operator controls pushing to remote (`git push`).
+""", encoding="utf-8")
+    if "git-discipline" not in migrated:
+        migrated.append("git-discipline")
+
+    return sorted(migrated)
 
 
 def _migrate_project_skills(
@@ -290,10 +414,11 @@ def _migrate_project_skills(
     project_name: str,
     target_skills_dir: Path,
 ) -> List[str]:
-    """Migrate project-specific Claude agents into project skills."""
+    """Migrate domain skills from Claude agents, Cursor skills, and workflows."""
     _ensure_dir(target_skills_dir)
     created: List[str] = []
 
+    # 1. Claude agents
     claude_agents_dir = project_path / ".claude" / "agents"
     if claude_agents_dir.exists():
         for agent_file in claude_agents_dir.glob("*.md"):
@@ -303,7 +428,6 @@ def _migrate_project_skills(
             target_skill_file = skill_dir / "SKILL.md"
 
             raw_content = agent_file.read_text(encoding="utf-8")
-            # Format as SKILL.md
             if not raw_content.startswith("---"):
                 header = f"""---
 name: {skill_name}
@@ -316,9 +440,24 @@ description: Migrated domain agent {skill_name} for {project_name}
                 content = raw_content
 
             target_skill_file.write_text(content, encoding="utf-8")
-            created.append(skill_name)
+            if skill_name not in created:
+                created.append(skill_name)
 
-    # Also migrate audit-eval-contamination workflow
+    # 2. Cursor skills (e.g. icd10am-achi, icd10cm-pcs, analyze-runs)
+    cursor_skills_dir = project_path / ".cursor" / "skills"
+    if cursor_skills_dir.exists():
+        for c_skill_dir in cursor_skills_dir.iterdir():
+            if c_skill_dir.is_dir():
+                s_name = c_skill_dir.name
+                target_dir = target_skills_dir / s_name
+                _ensure_dir(target_dir)
+                for item in c_skill_dir.glob("*"):
+                    if item.is_file():
+                        shutil.copy2(item, target_dir / item.name)
+                if s_name not in created:
+                    created.append(s_name)
+
+    # 3. Claude workflows
     audit_wf = project_path / ".claude" / "workflows" / "audit-eval-contamination.js"
     if audit_wf.exists():
         wf_name = "audit-eval-contamination"
@@ -334,22 +473,23 @@ description: Audit case files for evaluation contamination against ICD-10 taxono
 ## Objective
 Audit clinical case files and evaluation sets to detect any data leakage or eval contamination.
 
-## Workflow Implementation Reference
+## Workflow Implementation
 ```javascript
 {wf_code}
 ```
 """
         wf_skill_file.write_text(wf_content, encoding="utf-8")
-        created.append(wf_name)
+        if wf_name not in created:
+            created.append(wf_name)
 
-    return created
+    return sorted(created)
 
 
 def _migrate_global_skills(
     project_path: Path,
     target_global_skills_dir: Path,
 ) -> List[str]:
-    """Migrate reusable global skills and workflows into root skills/."""
+    """Migrate reusable global engineering skills into root skills/."""
     _ensure_dir(target_global_skills_dir)
     created: List[str] = []
 
@@ -359,25 +499,6 @@ def _migrate_global_skills(
     _ensure_dir(catchup_dir)
     if claude_catchup.exists():
         shutil.copy2(claude_catchup, catchup_dir / "SKILL.md")
-    else:
-        (catchup_dir / "SKILL.md").write_text("""---
-name: catchup
-description: Summarize what changed on this branch and why
----
-
-## Commits on this branch (vs main)
-!`git log --oneline main..HEAD`
-
-## Files changed on this branch vs main
-!`git diff --stat main...HEAD | tail -25`
-
-## Uncommitted changes
-!`git status --short`
-!`git diff --stat`
-
-## Instructions
-Summarize what changed, why, and anything that looks unfinished.
-""", encoding="utf-8")
     created.append("catchup")
 
     # 2. pr
@@ -386,22 +507,9 @@ Summarize what changed, why, and anything that looks unfinished.
     _ensure_dir(pr_dir)
     if claude_pr.exists():
         shutil.copy2(claude_pr, pr_dir / "SKILL.md")
-    else:
-        (pr_dir / "SKILL.md").write_text("""---
-name: pr
-description: Verify, stage, commit, and open a PR for the current branch
----
-
-1. Verify git and auth status (`gh auth status`).
-2. Run test suite: tests must pass.
-3. Stage files explicitly by path. Never use bulk add.
-4. Commit with descriptive message.
-5. Push and open pull request.
-""", encoding="utf-8")
     created.append("pr")
 
     # 3. fix-until-green
-    fix_wf = project_path / ".claude" / "workflows" / "fix-until-green.js"
     fix_dir = target_global_skills_dir / "fix-until-green"
     _ensure_dir(fix_dir)
     fix_skill = fix_dir / "SKILL.md"
@@ -411,13 +519,13 @@ description: Iterative test fixing loop until all tests pass or 2 stalled rounds
 ---
 
 ## Procedure
-1. Run the test suite: `python -m unittest discover -s tests -t .` or `pytest`.
-2. If all tests pass, stop and mark green.
+1. Run test suite: `env/bin/python -m unittest discover -s tests -t .`.
+2. If all tests pass, mark green and complete.
 3. If failures occur:
-   - Identify the failing test cases.
-   - Apply the smallest correct change to fix the code, not the test (unless test is obsolete).
-   - Rerun suite.
-4. If stalled for 2 consecutive rounds without reducing failures, halt and report.
+   - Analyze failure tracebacks.
+   - Apply minimal correct fix to the implementation code.
+   - Rerun test suite.
+4. If 2 consecutive rounds make no progress, halt and report.
 """
     fix_skill.write_text(fix_content, encoding="utf-8")
     created.append("fix-until-green")
@@ -433,14 +541,36 @@ description: Enforce full test suite verification before completing task
 
 ## Quality Gate Procedure
 Before declaring any task or iteration DONE:
-1. Run repository test suite (`python -m unittest discover -s tests -t .` or `pytest`).
-2. Verify git status has no stray or broken edits.
+1. Run repository test suite (`env/bin/python -m unittest discover -s tests -t .`).
+2. Verify git status has no stray, dirty, or broken edits.
 3. If tests fail, report failure and do NOT complete task.
 """
     stop_skill.write_text(stop_content, encoding="utf-8")
     created.append("verify-before-stop")
 
-    return created
+    # 5. Selected global skills from .agents/skills/
+    agents_skills_dir = project_path / ".agents" / "skills"
+    promoted_global_skills = [
+        "tdd",
+        "code-review",
+        "diagnosing-bugs",
+        "grill-me",
+        "grill-with-docs",
+        "git-guardrails-claude-code",
+    ]
+    if agents_skills_dir.exists():
+        for skill_name in promoted_global_skills:
+            src_skill_dir = agents_skills_dir / skill_name
+            if src_skill_dir.exists() and src_skill_dir.is_dir():
+                dest_skill_dir = target_global_skills_dir / skill_name
+                _ensure_dir(dest_skill_dir)
+                for f in src_skill_dir.glob("*"):
+                    if f.is_file():
+                        shutil.copy2(f, dest_skill_dir / f.name)
+                if skill_name not in created:
+                    created.append(skill_name)
+
+    return sorted(created)
 
 
 def translate_project(
@@ -454,14 +584,15 @@ def translate_project(
     out_root = Path(output_root).resolve()
     p_name = project_name or src_proj.name
 
-    # Target directories
     migration_dir = out_root / "migration" / p_name
     snapshot_dir = migration_dir / "original"
     project_dir = out_root / "projects" / p_name
     project_skills_dir = project_dir / "skills"
+    project_hooks_dir = project_dir / "hooks"
+    project_rules_dir = project_dir / "rules"
     global_skills_dir = out_root / "skills"
 
-    # 1. Snapshot original files
+    # 1. Clean snapshot of original files
     _copy_original_snapshot(classified_items, snapshot_dir)
 
     # 2. Inventory and Manifest
@@ -478,13 +609,20 @@ def translate_project(
     context_md_file = project_dir / "context.md"
     _generate_context_md(src_proj, p_name, context_md_file)
 
+    conventions_md_file = project_dir / "conventions.md"
+    _generate_conventions_md(src_proj, p_name, conventions_md_file)
+
     safety_md_file = project_dir / "safety.md"
     _generate_safety_md(p_name, safety_md_file)
 
-    # 4. Project-specific skills (e.g. agents)
+    # 4. Hooks & Rules
+    migrated_hooks = _migrate_hooks(src_proj, project_hooks_dir)
+    migrated_rules = _migrate_rules(src_proj, project_rules_dir)
+
+    # 5. Project-specific skills
     project_skills = _migrate_project_skills(src_proj, p_name, project_skills_dir)
 
-    # 5. Global skills
+    # 6. Global skills
     global_skills = _migrate_global_skills(src_proj, global_skills_dir)
 
     return MigrationReport(
@@ -496,9 +634,12 @@ def translate_project(
         total_blocked=sum(1 for c in classified_items if c.action == "security_block"),
         global_skills_created=global_skills,
         project_skills_created=project_skills,
+        hooks_migrated=migrated_hooks,
+        rules_migrated=migrated_rules,
         inventory_path=inventory_file,
         manifest_path=manifest_file,
         project_yaml_path=project_yaml_file,
         safety_md_path=safety_md_file,
         context_md_path=context_md_file,
+        conventions_md_path=conventions_md_file,
     )

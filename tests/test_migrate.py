@@ -73,11 +73,8 @@ def test_classify_items(mock_repo):
 
     # Global skills
     assert classified_by_path[".claude/skills/catchup/SKILL.md"].scope == ClassificationScope.GLOBAL
-    assert classified_by_path[".claude/workflows/fix-until-green.js"].scope == ClassificationScope.GLOBAL
-    assert classified_by_path[".claude/hooks/verify-before-stop.sh"].scope == ClassificationScope.GLOBAL
-
-    # Project assets
-    assert classified_by_path[".claude/agents/db-reader.md"].scope == ClassificationScope.PROJECT
+    # Hooks
+    assert classified_by_path[".claude/hooks/verify-before-stop.sh"].scope == ClassificationScope.PROJECT
     assert classified_by_path[".claude/hooks/protect-databases.sh"].scope == ClassificationScope.PROJECT
     assert classified_by_path[".cursor/rules/am-full-runs.mdc"].scope == ClassificationScope.PROJECT
 

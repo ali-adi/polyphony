@@ -4,300 +4,166 @@ Generated automatically by `ai-orch migrate`.
 
 ## Summary
 
-- **Total Discovered Assets**: 278
-- **Global Assets**: 9
-- **Project Assets**: 262
-- **Executor Configs**: 5
-- **Sensitive/Blocked Items**: 1
-- **Ephemeral/Ignored Items**: 1
+- **Total Discovered Assets**: 143
+- **Global Skills & Workflows**: 106
+- **Project Domain Assets**: 32
+- **Executor Adapter Configs**: 4
+- **Sensitive/Blocked Credentials**: 1
+- **Ephemeral/Ignored State**: 0
 
 ## Discovered AI Configurations
 
 | Source Tool | Category | Scope | File Path | Action | Target Destination | Rationale |
 |---|---|---|---|---|---|---|
-| Antigravity | Hook | Project | `.agents/hooks/block-ai-attribution.sh` | translate | `projects/medicoder/safety.md` | Git safety: prevents co-authored AI commit metadata |
-| Antigravity | Hook | Project | `.agents/hooks/block-paid-runs.sh` | translate | `projects/medicoder/safety.md` | Cost protection: blocks costly external API runs without explicit flags |
-| Antigravity | Hook | Project | `.agents/hooks/protect-databases.sh` | translate | `projects/medicoder/safety.md` | File protection: prevents modifications to taxonomy database snapshots |
-| Antigravity | Hook | Project | `.agents/hooks/validate-readonly-query.sh` | translate | `projects/medicoder/safety.md` | Database safety: validates SQLite queries are strictly SELECT statements |
-| Antigravity | Hook | Global | `.agents/hooks/verify-before-stop.sh` | translate | `skills/verify-before-stop/` | Generic reusable workflow or skill across engineering repos: verify-before-stop |
-| Antigravity | Other | Ephemeral | `.gemini/antigravity-ide/scratch/analyze.py` | ignore | `IGNORE` | IDE ephemeral state or scratch workspace. |
+| Antigravity | Hook | Project | `.agents/hooks/block-ai-attribution.sh` | translate | `projects/medicoder/hooks/block-ai-attribution.sh` | Git safety: prevents co-authored AI commit metadata |
+| Antigravity | Hook | Project | `.agents/hooks/block-paid-runs.sh` | translate | `projects/medicoder/hooks/block-paid-runs.sh` | Cost protection: blocks costly external API runs without explicit flags |
+| Antigravity | Hook | Project | `.agents/hooks/protect-databases.sh` | translate | `projects/medicoder/hooks/protect-databases.sh` | File protection: prevents modifications to taxonomy database snapshots |
+| Antigravity | Hook | Project | `.agents/hooks/validate-readonly-query.sh` | translate | `projects/medicoder/hooks/validate-readonly-query.sh` | Database safety: validates SQLite queries are strictly SELECT statements |
+| Antigravity | Hook | Project | `.agents/hooks/verify-before-stop.sh` | translate | `projects/medicoder/hooks/verify-before-stop.sh` | Quality gate: enforces running test suite before completing tasks |
 | Antigravity | Setting | Executor | `.agents/hooks.json` | copy_as_is | `migration/medicoder/original/.agents/hooks.json` | Executor adapter / tool-specific configuration (antigravity). |
-| Claude | Agent | Project | `.claude/agents/am-achi-notes-author.md` | translate | `projects/medicoder/skills/am-achi-notes-author/SKILL.md` | Project domain agent: Authoring agent for ICD-10-AM and ACHI notes |
-| Claude | Agent | Project | `.claude/agents/db-reader.md` | translate | `projects/medicoder/skills/db-reader/SKILL.md` | Project domain agent: Read-only database inspector agent for taxonomy tables |
-| Claude | Agent | Project | `.claude/agents/pcs-editor.md` | translate | `projects/medicoder/skills/pcs-editor/SKILL.md` | Project domain agent: Precise ICD-10-PCS code editor agent |
-| Claude | Agent | Project | `.claude/agents/pcs-notes-author.md` | translate | `projects/medicoder/skills/pcs-notes-author/SKILL.md` | Project domain agent: Authoring agent for ICD-10-PCS notes |
-| Claude | Doc | Global | `.claude/worktrees/rewrite/.claude/skills/catchup/SKILL.md` | translate | `skills/catchup/` | Generic reusable workflow or skill across engineering repos: catchup |
-| Claude | Doc | Global | `.claude/worktrees/rewrite/.claude/skills/pr/SKILL.md` | translate | `skills/pr/` | Generic reusable workflow or skill across engineering repos: pr |
-| Claude | Doc | Project | `.claude/worktrees/rewrite/README.md` | translate | `projects/medicoder/context.md` | Project context and instructions: README.md |
-| Claude | Hook | Project | `.claude/hooks/block-ai-attribution.sh` | translate | `projects/medicoder/safety.md` | Git safety: prevents co-authored AI commit metadata |
-| Claude | Hook | Project | `.claude/hooks/block-paid-runs.sh` | translate | `projects/medicoder/safety.md` | Cost protection: blocks costly external API runs without explicit flags |
-| Claude | Hook | Project | `.claude/hooks/protect-databases.sh` | translate | `projects/medicoder/safety.md` | File protection: prevents modifications to taxonomy database snapshots |
-| Claude | Hook | Project | `.claude/hooks/validate-readonly-query.sh` | translate | `projects/medicoder/safety.md` | Database safety: validates SQLite queries are strictly SELECT statements |
-| Claude | Hook | Global | `.claude/hooks/verify-before-stop.sh` | translate | `skills/verify-before-stop/` | Generic reusable workflow or skill across engineering repos: verify-before-stop |
-| Claude | Mcp | Project | `.claude/worktrees/rewrite/.mcp.json` | translate | `projects/medicoder/project.yaml` | MCP tools configuration. |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/agents/db-reader.md` | translate | `projects/medicoder/skills/db-reader/SKILL.md` | Project domain agent: Read-only database inspector agent for taxonomy tables |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/hooks/block-ai-attribution.sh` | translate | `projects/medicoder/safety.md` | Git safety: prevents co-authored AI commit metadata |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/hooks/block-paid-runs.sh` | translate | `projects/medicoder/safety.md` | Cost protection: blocks costly external API runs without explicit flags |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/hooks/protect-databases.sh` | translate | `projects/medicoder/safety.md` | File protection: prevents modifications to taxonomy database snapshots |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/hooks/validate-readonly-query.sh` | translate | `projects/medicoder/safety.md` | Database safety: validates SQLite queries are strictly SELECT statements |
-| Claude | Other | Global | `.claude/worktrees/rewrite/.claude/hooks/verify-before-stop.sh` | translate | `skills/verify-before-stop/` | Generic reusable workflow or skill across engineering repos: verify-before-stop |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.claude/workflows/audit-eval-contamination.js` | copy_as_is | `projects/medicoder/misc/audit-eval-contamination.js` | Unclassified AI asset from claude |
-| Claude | Other | Global | `.claude/worktrees/rewrite/.claude/workflows/fix-until-green.js` | translate | `skills/fix-until-green/` | Generic reusable workflow or skill across engineering repos: fix-until-green |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.git` | copy_as_is | `projects/medicoder/misc/.git` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/.gitignore` | copy_as_is | `projects/medicoder/misc/.gitignore` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/config.yml` | copy_as_is | `projects/medicoder/misc/config.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/prompts/icd10achi.yml` | copy_as_is | `projects/medicoder/misc/icd10achi.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/prompts/icd10am.yml` | copy_as_is | `projects/medicoder/misc/icd10am.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/prompts/icd10cm.yml` | copy_as_is | `projects/medicoder/misc/icd10cm.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/prompts/icd10pcs.yml` | copy_as_is | `projects/medicoder/misc/icd10pcs.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/smoke.yml` | copy_as_is | `projects/medicoder/misc/smoke.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/systems/icd10achi.yml` | copy_as_is | `projects/medicoder/misc/icd10achi.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/systems/icd10am.yml` | copy_as_is | `projects/medicoder/misc/icd10am.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/systems/icd10cm.yml` | copy_as_is | `projects/medicoder/misc/icd10cm.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/configs/systems/icd10pcs.yml` | copy_as_is | `projects/medicoder/misc/icd10pcs.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/database/icd10am_achi/icd10achi.sqlite` | copy_as_is | `projects/medicoder/misc/icd10achi.sqlite` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/database/icd10am_achi/icd10am.sqlite` | copy_as_is | `projects/medicoder/misc/icd10am.sqlite` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/database/icd10cm_pcs/icd10cm.sqlite` | copy_as_is | `projects/medicoder/misc/icd10cm.sqlite` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/database/icd10cm_pcs/icd10pcs.sqlite` | copy_as_is | `projects/medicoder/misc/icd10pcs.sqlite` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/database/tosp.sqlite` | copy_as_is | `projects/medicoder/misc/tosp.sqlite` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000001.json` | copy_as_is | `projects/medicoder/misc/000001.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000002.json` | copy_as_is | `projects/medicoder/misc/000002.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000003.json` | copy_as_is | `projects/medicoder/misc/000003.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000004.json` | copy_as_is | `projects/medicoder/misc/000004.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000005.json` | copy_as_is | `projects/medicoder/misc/000005.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000006.json` | copy_as_is | `projects/medicoder/misc/000006.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000007.json` | copy_as_is | `projects/medicoder/misc/000007.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000008.json` | copy_as_is | `projects/medicoder/misc/000008.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000009.json` | copy_as_is | `projects/medicoder/misc/000009.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000010.json` | copy_as_is | `projects/medicoder/misc/000010.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000011.json` | copy_as_is | `projects/medicoder/misc/000011.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000012.json` | copy_as_is | `projects/medicoder/misc/000012.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000013.json` | copy_as_is | `projects/medicoder/misc/000013.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000014.json` | copy_as_is | `projects/medicoder/misc/000014.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000015.json` | copy_as_is | `projects/medicoder/misc/000015.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000016.json` | copy_as_is | `projects/medicoder/misc/000016.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000017.json` | copy_as_is | `projects/medicoder/misc/000017.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000018.json` | copy_as_is | `projects/medicoder/misc/000018.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000019.json` | copy_as_is | `projects/medicoder/misc/000019.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000020.json` | copy_as_is | `projects/medicoder/misc/000020.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000021.json` | copy_as_is | `projects/medicoder/misc/000021.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000022.json` | copy_as_is | `projects/medicoder/misc/000022.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000023.json` | copy_as_is | `projects/medicoder/misc/000023.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000024.json` | copy_as_is | `projects/medicoder/misc/000024.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000025.json` | copy_as_is | `projects/medicoder/misc/000025.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000026.json` | copy_as_is | `projects/medicoder/misc/000026.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000027.json` | copy_as_is | `projects/medicoder/misc/000027.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000028.json` | copy_as_is | `projects/medicoder/misc/000028.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000029.json` | copy_as_is | `projects/medicoder/misc/000029.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000030.json` | copy_as_is | `projects/medicoder/misc/000030.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000031.json` | copy_as_is | `projects/medicoder/misc/000031.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000032.json` | copy_as_is | `projects/medicoder/misc/000032.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000033.json` | copy_as_is | `projects/medicoder/misc/000033.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000035.json` | copy_as_is | `projects/medicoder/misc/000035.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000036.json` | copy_as_is | `projects/medicoder/misc/000036.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000037.json` | copy_as_is | `projects/medicoder/misc/000037.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000038.json` | copy_as_is | `projects/medicoder/misc/000038.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000039.json` | copy_as_is | `projects/medicoder/misc/000039.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000040.json` | copy_as_is | `projects/medicoder/misc/000040.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000041.json` | copy_as_is | `projects/medicoder/misc/000041.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000042.json` | copy_as_is | `projects/medicoder/misc/000042.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000043.json` | copy_as_is | `projects/medicoder/misc/000043.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000044.json` | copy_as_is | `projects/medicoder/misc/000044.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000045.json` | copy_as_is | `projects/medicoder/misc/000045.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000046.json` | copy_as_is | `projects/medicoder/misc/000046.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000047.json` | copy_as_is | `projects/medicoder/misc/000047.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000048.json` | copy_as_is | `projects/medicoder/misc/000048.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000049.json` | copy_as_is | `projects/medicoder/misc/000049.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000050.json` | copy_as_is | `projects/medicoder/misc/000050.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000051.json` | copy_as_is | `projects/medicoder/misc/000051.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000052.json` | copy_as_is | `projects/medicoder/misc/000052.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000053.json` | copy_as_is | `projects/medicoder/misc/000053.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000054.json` | copy_as_is | `projects/medicoder/misc/000054.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000055.json` | copy_as_is | `projects/medicoder/misc/000055.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000057.json` | copy_as_is | `projects/medicoder/misc/000057.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000058.json` | copy_as_is | `projects/medicoder/misc/000058.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000059.json` | copy_as_is | `projects/medicoder/misc/000059.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000060.json` | copy_as_is | `projects/medicoder/misc/000060.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000062.json` | copy_as_is | `projects/medicoder/misc/000062.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000063.json` | copy_as_is | `projects/medicoder/misc/000063.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000064.json` | copy_as_is | `projects/medicoder/misc/000064.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000065.json` | copy_as_is | `projects/medicoder/misc/000065.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000066.json` | copy_as_is | `projects/medicoder/misc/000066.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000067.json` | copy_as_is | `projects/medicoder/misc/000067.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000068.json` | copy_as_is | `projects/medicoder/misc/000068.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000069.json` | copy_as_is | `projects/medicoder/misc/000069.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000070.json` | copy_as_is | `projects/medicoder/misc/000070.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000071.json` | copy_as_is | `projects/medicoder/misc/000071.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000072.json` | copy_as_is | `projects/medicoder/misc/000072.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000073.json` | copy_as_is | `projects/medicoder/misc/000073.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000074.json` | copy_as_is | `projects/medicoder/misc/000074.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000075.json` | copy_as_is | `projects/medicoder/misc/000075.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000076.json` | copy_as_is | `projects/medicoder/misc/000076.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000077.json` | copy_as_is | `projects/medicoder/misc/000077.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000078.json` | copy_as_is | `projects/medicoder/misc/000078.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000079.json` | copy_as_is | `projects/medicoder/misc/000079.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000080.json` | copy_as_is | `projects/medicoder/misc/000080.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000081.json` | copy_as_is | `projects/medicoder/misc/000081.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000082.json` | copy_as_is | `projects/medicoder/misc/000082.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000083.json` | copy_as_is | `projects/medicoder/misc/000083.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000084.json` | copy_as_is | `projects/medicoder/misc/000084.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000085.json` | copy_as_is | `projects/medicoder/misc/000085.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000086.json` | copy_as_is | `projects/medicoder/misc/000086.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000087.json` | copy_as_is | `projects/medicoder/misc/000087.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000088.json` | copy_as_is | `projects/medicoder/misc/000088.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000089.json` | copy_as_is | `projects/medicoder/misc/000089.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000090.json` | copy_as_is | `projects/medicoder/misc/000090.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000091.json` | copy_as_is | `projects/medicoder/misc/000091.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000092.json` | copy_as_is | `projects/medicoder/misc/000092.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000093.json` | copy_as_is | `projects/medicoder/misc/000093.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000094.json` | copy_as_is | `projects/medicoder/misc/000094.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000095.json` | copy_as_is | `projects/medicoder/misc/000095.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000096.json` | copy_as_is | `projects/medicoder/misc/000096.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000097.json` | copy_as_is | `projects/medicoder/misc/000097.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000098.json` | copy_as_is | `projects/medicoder/misc/000098.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000099.json` | copy_as_is | `projects/medicoder/misc/000099.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000100.json` | copy_as_is | `projects/medicoder/misc/000100.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000101.json` | copy_as_is | `projects/medicoder/misc/000101.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000102.json` | copy_as_is | `projects/medicoder/misc/000102.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000103.json` | copy_as_is | `projects/medicoder/misc/000103.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000104.json` | copy_as_is | `projects/medicoder/misc/000104.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000105.json` | copy_as_is | `projects/medicoder/misc/000105.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000106.json` | copy_as_is | `projects/medicoder/misc/000106.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000107.json` | copy_as_is | `projects/medicoder/misc/000107.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000108.json` | copy_as_is | `projects/medicoder/misc/000108.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000109.json` | copy_as_is | `projects/medicoder/misc/000109.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000110.json` | copy_as_is | `projects/medicoder/misc/000110.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000111.json` | copy_as_is | `projects/medicoder/misc/000111.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000112.json` | copy_as_is | `projects/medicoder/misc/000112.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000113.json` | copy_as_is | `projects/medicoder/misc/000113.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000114.json` | copy_as_is | `projects/medicoder/misc/000114.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000115.json` | copy_as_is | `projects/medicoder/misc/000115.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000116.json` | copy_as_is | `projects/medicoder/misc/000116.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000117.json` | copy_as_is | `projects/medicoder/misc/000117.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000118.json` | copy_as_is | `projects/medicoder/misc/000118.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000119.json` | copy_as_is | `projects/medicoder/misc/000119.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000120.json` | copy_as_is | `projects/medicoder/misc/000120.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/cases/000121.json` | copy_as_is | `projects/medicoder/misc/000121.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/smoke/0.json` | copy_as_is | `projects/medicoder/misc/0.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000074.json` | copy_as_is | `projects/medicoder/misc/000074.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000076.json` | copy_as_is | `projects/medicoder/misc/000076.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000077.json` | copy_as_is | `projects/medicoder/misc/000077.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000079.json` | copy_as_is | `projects/medicoder/misc/000079.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000082.json` | copy_as_is | `projects/medicoder/misc/000082.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000085.json` | copy_as_is | `projects/medicoder/misc/000085.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000089.json` | copy_as_is | `projects/medicoder/misc/000089.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000104.json` | copy_as_is | `projects/medicoder/misc/000104.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000107.json` | copy_as_is | `projects/medicoder/misc/000107.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000110.json` | copy_as_is | `projects/medicoder/misc/000110.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l2/000119.json` | copy_as_is | `projects/medicoder/misc/000119.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000073.json` | copy_as_is | `projects/medicoder/misc/000073.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000074.json` | copy_as_is | `projects/medicoder/misc/000074.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000075.json` | copy_as_is | `projects/medicoder/misc/000075.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000079.json` | copy_as_is | `projects/medicoder/misc/000079.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000089.json` | copy_as_is | `projects/medicoder/misc/000089.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000090.json` | copy_as_is | `projects/medicoder/misc/000090.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000094.json` | copy_as_is | `projects/medicoder/misc/000094.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000111.json` | copy_as_is | `projects/medicoder/misc/000111.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/datasets/tuning/l3/000113.json` | copy_as_is | `projects/medicoder/misc/000113.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/__main__.py` | copy_as_is | `projects/medicoder/misc/__main__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/cli.py` | copy_as_is | `projects/medicoder/misc/cli.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/config/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/config/loader.py` | copy_as_is | `projects/medicoder/misc/loader.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/config/models.py` | copy_as_is | `projects/medicoder/misc/models.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/html.py` | copy_as_is | `projects/medicoder/misc/html.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/markdown.py` | copy_as_is | `projects/medicoder/misc/markdown.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/metrics.py` | copy_as_is | `projects/medicoder/misc/metrics.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/report.py` | copy_as_is | `projects/medicoder/misc/report.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/output/summary.py` | copy_as_is | `projects/medicoder/misc/summary.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/pipeline/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/pipeline/checkpoint.py` | copy_as_is | `projects/medicoder/misc/checkpoint.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/pipeline/results.py` | copy_as_is | `projects/medicoder/misc/results.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/pipeline/runner.py` | copy_as_is | `projects/medicoder/misc/runner.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/pipeline/walk.py` | copy_as_is | `projects/medicoder/misc/walk.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/gemini.py` | copy_as_is | `projects/medicoder/misc/gemini.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/parse.py` | copy_as_is | `projects/medicoder/misc/parse.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/prompts.py` | copy_as_is | `projects/medicoder/misc/prompts.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/render.py` | copy_as_is | `projects/medicoder/misc/render.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/ranking/result.py` | copy_as_is | `projects/medicoder/misc/result.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/achi.py` | copy_as_is | `projects/medicoder/misc/achi.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/companions.py` | copy_as_is | `projects/medicoder/misc/companions.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/core.py` | copy_as_is | `projects/medicoder/misc/core.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/entry.py` | copy_as_is | `projects/medicoder/misc/entry.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/ground_truth.py` | copy_as_is | `projects/medicoder/misc/ground_truth.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/hierarchical.py` | copy_as_is | `projects/medicoder/misc/hierarchical.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/notes.py` | copy_as_is | `projects/medicoder/misc/notes.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/pcs.py` | copy_as_is | `projects/medicoder/misc/pcs.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/stubs.py` | copy_as_is | `projects/medicoder/misc/stubs.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/medicoder/taxonomy/systems.py` | copy_as_is | `projects/medicoder/misc/systems.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/pdf/ACHI.pdf` | copy_as_is | `projects/medicoder/misc/ACHI.pdf` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/pdf/ICD-10-AM.pdf` | copy_as_is | `projects/medicoder/misc/ICD-10-AM.pdf` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/requirements.txt` | copy_as_is | `projects/medicoder/misc/requirements.txt` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/audit.json` | copy_as_is | `projects/medicoder/misc/audit.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/checkpoint.jsonl` | copy_as_is | `projects/medicoder/misc/checkpoint.jsonl` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/config.json` | copy_as_is | `projects/medicoder/misc/config.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/report.html` | copy_as_is | `projects/medicoder/misc/report.html` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/report.md` | copy_as_is | `projects/medicoder/misc/report.md` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/results/run_2026-09-14_20-36-38/results.json` | copy_as_is | `projects/medicoder/misc/results.json` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/scripts/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/scripts/generate_pcs_notes.py` | copy_as_is | `projects/medicoder/misc/generate_pcs_notes.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/scripts/lookup_icd10am.py` | copy_as_is | `projects/medicoder/misc/lookup_icd10am.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/scripts/pcs_level1_notes.yml` | copy_as_is | `projects/medicoder/misc/pcs_level1_notes.yml` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/scripts/pcs_notes.py` | copy_as_is | `projects/medicoder/misc/pcs_notes.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/config/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/config/test_loader.py` | copy_as_is | `projects/medicoder/misc/test_loader.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/output/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/output/test_metrics.py` | copy_as_is | `projects/medicoder/misc/test_metrics.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/output/test_report.py` | copy_as_is | `projects/medicoder/misc/test_report.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/output/test_summary.py` | copy_as_is | `projects/medicoder/misc/test_summary.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/fixtures.py` | copy_as_is | `projects/medicoder/misc/fixtures.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/test_checkpoint.py` | copy_as_is | `projects/medicoder/misc/test_checkpoint.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/test_runner.py` | copy_as_is | `projects/medicoder/misc/test_runner.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/test_walk.py` | copy_as_is | `projects/medicoder/misc/test_walk.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/pipeline/test_walk_systems.py` | copy_as_is | `projects/medicoder/misc/test_walk_systems.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/ranking/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/ranking/test_gemini.py` | copy_as_is | `projects/medicoder/misc/test_gemini.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/ranking/test_parse.py` | copy_as_is | `projects/medicoder/misc/test_parse.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/ranking/test_prompts.py` | copy_as_is | `projects/medicoder/misc/test_prompts.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/ranking/test_render.py` | copy_as_is | `projects/medicoder/misc/test_render.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/scripts/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/scripts/test_pcs_notes.py` | copy_as_is | `projects/medicoder/misc/test_pcs_notes.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/support.py` | copy_as_is | `projects/medicoder/misc/support.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/__init__.py` | copy_as_is | `projects/medicoder/misc/__init__.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_achi.py` | copy_as_is | `projects/medicoder/misc/test_achi.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_companions.py` | copy_as_is | `projects/medicoder/misc/test_companions.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_core.py` | copy_as_is | `projects/medicoder/misc/test_core.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_ground_truth.py` | copy_as_is | `projects/medicoder/misc/test_ground_truth.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_hierarchical.py` | copy_as_is | `projects/medicoder/misc/test_hierarchical.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/taxonomy/test_pcs.py` | copy_as_is | `projects/medicoder/misc/test_pcs.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/test_cli.py` | copy_as_is | `projects/medicoder/misc/test_cli.py` | Unclassified AI asset from claude |
-| Claude | Other | Project | `.claude/worktrees/rewrite/tests/test_end_to_end.py` | copy_as_is | `projects/medicoder/misc/test_end_to_end.py` | Unclassified AI asset from claude |
-| Claude | Setting | Project | `.claude/settings.json` | translate | `projects/medicoder/project.yaml` | Claude Code workspace permissions and command allow/deny lists. |
+| Antigravity | Skill | Global | `.agents/skills/ask-matt/PHASE-BOUNDARIES.md` | translate | `skills/ask-matt/` | Global skill asset: ask-matt |
+| Antigravity | Skill | Global | `.agents/skills/ask-matt/SKILL.md` | translate | `skills/ask-matt/` | Global skill asset: ask-matt |
+| Antigravity | Skill | Global | `.agents/skills/ask-matt/agents/openai.yaml` | translate | `skills/ask-matt/` | Global skill asset: ask-matt |
+| Antigravity | Skill | Global | `.agents/skills/claude-handoff/SKILL.md` | translate | `skills/claude-handoff/` | Global skill asset: claude-handoff |
+| Antigravity | Skill | Global | `.agents/skills/claude-handoff/agents/openai.yaml` | translate | `skills/claude-handoff/` | Global skill asset: claude-handoff |
+| Antigravity | Skill | Global | `.agents/skills/code-review/SKILL.md` | translate | `skills/code-review/` | Global reusable engineering skill: code-review |
+| Antigravity | Skill | Global | `.agents/skills/code-review/agents/openai.yaml` | translate | `skills/code-review/` | Global reusable engineering skill: code-review |
+| Antigravity | Skill | Global | `.agents/skills/codebase-design/DEEPENING.md` | translate | `skills/codebase-design/` | Global skill asset: codebase-design |
+| Antigravity | Skill | Global | `.agents/skills/codebase-design/DESIGN-IT-TWICE.md` | translate | `skills/codebase-design/` | Global skill asset: codebase-design |
+| Antigravity | Skill | Global | `.agents/skills/codebase-design/SKILL.md` | translate | `skills/codebase-design/` | Global skill asset: codebase-design |
+| Antigravity | Skill | Global | `.agents/skills/codebase-design/agents/openai.yaml` | translate | `skills/codebase-design/` | Global skill asset: codebase-design |
+| Antigravity | Skill | Global | `.agents/skills/diagnosing-bugs/SKILL.md` | translate | `skills/diagnosing-bugs/` | Global reusable engineering skill: diagnosing-bugs |
+| Antigravity | Skill | Global | `.agents/skills/diagnosing-bugs/agents/openai.yaml` | translate | `skills/diagnosing-bugs/` | Global reusable engineering skill: diagnosing-bugs |
+| Antigravity | Skill | Global | `.agents/skills/diagnosing-bugs/scripts/hitl-loop.template.sh` | translate | `skills/diagnosing-bugs/` | Global reusable engineering skill: diagnosing-bugs |
+| Antigravity | Skill | Global | `.agents/skills/domain-modeling/ADR-FORMAT.md` | translate | `skills/domain-modeling/` | Global skill asset: domain-modeling |
+| Antigravity | Skill | Global | `.agents/skills/domain-modeling/CONTEXT-FORMAT.md` | translate | `skills/domain-modeling/` | Global skill asset: domain-modeling |
+| Antigravity | Skill | Global | `.agents/skills/domain-modeling/SKILL.md` | translate | `skills/domain-modeling/` | Global skill asset: domain-modeling |
+| Antigravity | Skill | Global | `.agents/skills/domain-modeling/agents/openai.yaml` | translate | `skills/domain-modeling/` | Global skill asset: domain-modeling |
+| Antigravity | Skill | Global | `.agents/skills/git-guardrails-claude-code/SKILL.md` | translate | `skills/git-guardrails-claude-code/` | Global reusable engineering skill: git-guardrails-claude-code |
+| Antigravity | Skill | Global | `.agents/skills/git-guardrails-claude-code/agents/openai.yaml` | translate | `skills/git-guardrails-claude-code/` | Global reusable engineering skill: git-guardrails-claude-code |
+| Antigravity | Skill | Global | `.agents/skills/git-guardrails-claude-code/scripts/block-dangerous-git.sh` | translate | `skills/git-guardrails-claude-code/` | Global reusable engineering skill: git-guardrails-claude-code |
+| Antigravity | Skill | Global | `.agents/skills/grill-me/SKILL.md` | translate | `skills/grill-me/` | Global reusable engineering skill: grill-me |
+| Antigravity | Skill | Global | `.agents/skills/grill-me/agents/openai.yaml` | translate | `skills/grill-me/` | Global reusable engineering skill: grill-me |
+| Antigravity | Skill | Global | `.agents/skills/grill-with-docs/SKILL.md` | translate | `skills/grill-with-docs/` | Global reusable engineering skill: grill-with-docs |
+| Antigravity | Skill | Global | `.agents/skills/grill-with-docs/agents/openai.yaml` | translate | `skills/grill-with-docs/` | Global reusable engineering skill: grill-with-docs |
+| Antigravity | Skill | Global | `.agents/skills/grilling/SKILL.md` | translate | `skills/grilling/` | Global skill asset: grilling |
+| Antigravity | Skill | Global | `.agents/skills/grilling/agents/openai.yaml` | translate | `skills/grilling/` | Global skill asset: grilling |
+| Antigravity | Skill | Global | `.agents/skills/handoff/SKILL.md` | translate | `skills/handoff/` | Global skill asset: handoff |
+| Antigravity | Skill | Global | `.agents/skills/handoff/agents/openai.yaml` | translate | `skills/handoff/` | Global skill asset: handoff |
+| Antigravity | Skill | Global | `.agents/skills/implement-spec/SKILL.md` | translate | `skills/implement-spec/` | Global skill asset: implement-spec |
+| Antigravity | Skill | Global | `.agents/skills/implement-spec/agents/openai.yaml` | translate | `skills/implement-spec/` | Global skill asset: implement-spec |
+| Antigravity | Skill | Global | `.agents/skills/implement/SKILL.md` | translate | `skills/implement/` | Global skill asset: implement |
+| Antigravity | Skill | Global | `.agents/skills/implement/agents/openai.yaml` | translate | `skills/implement/` | Global skill asset: implement |
+| Antigravity | Skill | Global | `.agents/skills/improve-codebase-architecture/HTML-REPORT.md` | translate | `skills/improve-codebase-architecture/` | Global reusable engineering skill: improve-codebase-architecture |
+| Antigravity | Skill | Global | `.agents/skills/improve-codebase-architecture/SKILL.md` | translate | `skills/improve-codebase-architecture/` | Global reusable engineering skill: improve-codebase-architecture |
+| Antigravity | Skill | Global | `.agents/skills/improve-codebase-architecture/agents/openai.yaml` | translate | `skills/improve-codebase-architecture/` | Global reusable engineering skill: improve-codebase-architecture |
+| Antigravity | Skill | Global | `.agents/skills/loop-me/SKILL.md` | translate | `skills/loop-me/` | Global skill asset: loop-me |
+| Antigravity | Skill | Global | `.agents/skills/loop-me/agents/openai.yaml` | translate | `skills/loop-me/` | Global skill asset: loop-me |
+| Antigravity | Skill | Global | `.agents/skills/migrate-to-shoehorn/SKILL.md` | translate | `skills/migrate-to-shoehorn/` | Global skill asset: migrate-to-shoehorn |
+| Antigravity | Skill | Global | `.agents/skills/migrate-to-shoehorn/agents/openai.yaml` | translate | `skills/migrate-to-shoehorn/` | Global skill asset: migrate-to-shoehorn |
+| Antigravity | Skill | Global | `.agents/skills/pr/CREDITS.md` | translate | `skills/pr/` | Global reusable engineering skill: pr |
+| Antigravity | Skill | Global | `.agents/skills/pr/SKILL.md` | translate | `skills/pr/` | Global reusable engineering skill: pr |
+| Antigravity | Skill | Global | `.agents/skills/pr/agents/openai.yaml` | translate | `skills/pr/` | Global reusable engineering skill: pr |
+| Antigravity | Skill | Global | `.agents/skills/prototype/LOGIC.md` | translate | `skills/prototype/` | Global skill asset: prototype |
+| Antigravity | Skill | Global | `.agents/skills/prototype/SKILL.md` | translate | `skills/prototype/` | Global skill asset: prototype |
+| Antigravity | Skill | Global | `.agents/skills/prototype/UI.md` | translate | `skills/prototype/` | Global skill asset: prototype |
+| Antigravity | Skill | Global | `.agents/skills/prototype/agents/openai.yaml` | translate | `skills/prototype/` | Global skill asset: prototype |
+| Antigravity | Skill | Global | `.agents/skills/research/SKILL.md` | translate | `skills/research/` | Global skill asset: research |
+| Antigravity | Skill | Global | `.agents/skills/research/agents/openai.yaml` | translate | `skills/research/` | Global skill asset: research |
+| Antigravity | Skill | Global | `.agents/skills/resolving-merge-conflicts/SKILL.md` | translate | `skills/resolving-merge-conflicts/` | Global reusable engineering skill: resolving-merge-conflicts |
+| Antigravity | Skill | Global | `.agents/skills/resolving-merge-conflicts/agents/openai.yaml` | translate | `skills/resolving-merge-conflicts/` | Global reusable engineering skill: resolving-merge-conflicts |
+| Antigravity | Skill | Global | `.agents/skills/retro/SKILL.md` | translate | `skills/retro/` | Global skill asset: retro |
+| Antigravity | Skill | Global | `.agents/skills/retro/agents/openai.yaml` | translate | `skills/retro/` | Global skill asset: retro |
+| Antigravity | Skill | Global | `.agents/skills/scaffold-exercises/SKILL.md` | translate | `skills/scaffold-exercises/` | Global skill asset: scaffold-exercises |
+| Antigravity | Skill | Global | `.agents/skills/scaffold-exercises/agents/openai.yaml` | translate | `skills/scaffold-exercises/` | Global skill asset: scaffold-exercises |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/SKILL.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/agents/openai.yaml` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/domain.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/issue-tracker-github.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/issue-tracker-gitlab.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/issue-tracker-local.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-matt-pocock-skills/triage-labels.md` | translate | `skills/setup-matt-pocock-skills/` | Global skill asset: setup-matt-pocock-skills |
+| Antigravity | Skill | Global | `.agents/skills/setup-pre-commit/SKILL.md` | translate | `skills/setup-pre-commit/` | Global skill asset: setup-pre-commit |
+| Antigravity | Skill | Global | `.agents/skills/setup-pre-commit/agents/openai.yaml` | translate | `skills/setup-pre-commit/` | Global skill asset: setup-pre-commit |
+| Antigravity | Skill | Global | `.agents/skills/setup-ts-deep-modules/SKILL.md` | translate | `skills/setup-ts-deep-modules/` | Global skill asset: setup-ts-deep-modules |
+| Antigravity | Skill | Global | `.agents/skills/setup-ts-deep-modules/agents/openai.yaml` | translate | `skills/setup-ts-deep-modules/` | Global skill asset: setup-ts-deep-modules |
+| Antigravity | Skill | Global | `.agents/skills/setup-ts-deep-modules/dependency-cruiser.config.cjs` | translate | `skills/setup-ts-deep-modules/` | Global skill asset: setup-ts-deep-modules |
+| Antigravity | Skill | Global | `.agents/skills/tdd/SKILL.md` | translate | `skills/tdd/` | Global reusable engineering skill: tdd |
+| Antigravity | Skill | Global | `.agents/skills/tdd/agents/openai.yaml` | translate | `skills/tdd/` | Global reusable engineering skill: tdd |
+| Antigravity | Skill | Global | `.agents/skills/tdd/mocking.md` | translate | `skills/tdd/` | Global reusable engineering skill: tdd |
+| Antigravity | Skill | Global | `.agents/skills/tdd/tests.md` | translate | `skills/tdd/` | Global reusable engineering skill: tdd |
+| Antigravity | Skill | Global | `.agents/skills/teach/GLOSSARY-FORMAT.md` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/teach/LEARNING-RECORD-FORMAT.md` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/teach/MISSION-FORMAT.md` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/teach/RESOURCES-FORMAT.md` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/teach/SKILL.md` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/teach/agents/openai.yaml` | translate | `skills/teach/` | Global skill asset: teach |
+| Antigravity | Skill | Global | `.agents/skills/to-questionnaire/SKILL.md` | translate | `skills/to-questionnaire/` | Global skill asset: to-questionnaire |
+| Antigravity | Skill | Global | `.agents/skills/to-questionnaire/agents/openai.yaml` | translate | `skills/to-questionnaire/` | Global skill asset: to-questionnaire |
+| Antigravity | Skill | Global | `.agents/skills/to-spec/SKILL.md` | translate | `skills/to-spec/` | Global skill asset: to-spec |
+| Antigravity | Skill | Global | `.agents/skills/to-spec/agents/openai.yaml` | translate | `skills/to-spec/` | Global skill asset: to-spec |
+| Antigravity | Skill | Global | `.agents/skills/to-tickets/SKILL.md` | translate | `skills/to-tickets/` | Global skill asset: to-tickets |
+| Antigravity | Skill | Global | `.agents/skills/to-tickets/agents/openai.yaml` | translate | `skills/to-tickets/` | Global skill asset: to-tickets |
+| Antigravity | Skill | Global | `.agents/skills/triage/AGENT-BRIEF.md` | translate | `skills/triage/` | Global skill asset: triage |
+| Antigravity | Skill | Global | `.agents/skills/triage/OUT-OF-SCOPE.md` | translate | `skills/triage/` | Global skill asset: triage |
+| Antigravity | Skill | Global | `.agents/skills/triage/SKILL.md` | translate | `skills/triage/` | Global skill asset: triage |
+| Antigravity | Skill | Global | `.agents/skills/triage/agents/openai.yaml` | translate | `skills/triage/` | Global skill asset: triage |
+| Antigravity | Skill | Global | `.agents/skills/wait-what/SKILL.md` | translate | `skills/wait-what/` | Global skill asset: wait-what |
+| Antigravity | Skill | Global | `.agents/skills/wait-what/agents/openai.yaml` | translate | `skills/wait-what/` | Global skill asset: wait-what |
+| Antigravity | Skill | Global | `.agents/skills/wayfinder/SKILL.md` | translate | `skills/wayfinder/` | Global skill asset: wayfinder |
+| Antigravity | Skill | Global | `.agents/skills/wayfinder/agents/openai.yaml` | translate | `skills/wayfinder/` | Global skill asset: wayfinder |
+| Antigravity | Skill | Global | `.agents/skills/wizard/SKILL.md` | translate | `skills/wizard/` | Global skill asset: wizard |
+| Antigravity | Skill | Global | `.agents/skills/wizard/agents/openai.yaml` | translate | `skills/wizard/` | Global skill asset: wizard |
+| Antigravity | Skill | Global | `.agents/skills/wizard/template.sh` | translate | `skills/wizard/` | Global skill asset: wizard |
+| Antigravity | Skill | Global | `.agents/skills/writing-beats/SKILL.md` | translate | `skills/writing-beats/` | Global skill asset: writing-beats |
+| Antigravity | Skill | Global | `.agents/skills/writing-beats/agents/openai.yaml` | translate | `skills/writing-beats/` | Global skill asset: writing-beats |
+| Antigravity | Skill | Global | `.agents/skills/writing-for-agents/SKILL-MECHANICS.md` | translate | `skills/writing-for-agents/` | Global skill asset: writing-for-agents |
+| Antigravity | Skill | Global | `.agents/skills/writing-for-agents/SKILL.md` | translate | `skills/writing-for-agents/` | Global skill asset: writing-for-agents |
+| Antigravity | Skill | Global | `.agents/skills/writing-for-agents/agents/openai.yaml` | translate | `skills/writing-for-agents/` | Global skill asset: writing-for-agents |
+| Antigravity | Skill | Global | `.agents/skills/writing-fragments/SKILL.md` | translate | `skills/writing-fragments/` | Global skill asset: writing-fragments |
+| Antigravity | Skill | Global | `.agents/skills/writing-fragments/agents/openai.yaml` | translate | `skills/writing-fragments/` | Global skill asset: writing-fragments |
+| Antigravity | Skill | Global | `.agents/skills/writing-shape/SKILL.md` | translate | `skills/writing-shape/` | Global skill asset: writing-shape |
+| Antigravity | Skill | Global | `.agents/skills/writing-shape/agents/openai.yaml` | translate | `skills/writing-shape/` | Global skill asset: writing-shape |
+| Claude | Agent | Project | `.claude/agents/am-achi-notes-author.md` | translate | `projects/medicoder/skills/am-achi-notes-author/` | Medicoder domain skill/agent: am-achi-notes-author |
+| Claude | Agent | Project | `.claude/agents/db-reader.md` | translate | `projects/medicoder/skills/db-reader/` | Medicoder domain skill/agent: db-reader |
+| Claude | Agent | Project | `.claude/agents/pcs-editor.md` | translate | `projects/medicoder/skills/pcs-editor/` | Medicoder domain skill/agent: pcs-editor |
+| Claude | Agent | Project | `.claude/agents/pcs-notes-author.md` | translate | `projects/medicoder/skills/pcs-notes-author/` | Medicoder domain skill/agent: pcs-notes-author |
+| Claude | Hook | Project | `.claude/hooks/block-ai-attribution.sh` | translate | `projects/medicoder/hooks/block-ai-attribution.sh` | Git safety: prevents co-authored AI commit metadata |
+| Claude | Hook | Project | `.claude/hooks/block-paid-runs.sh` | translate | `projects/medicoder/hooks/block-paid-runs.sh` | Cost protection: blocks costly external API runs without explicit flags |
+| Claude | Hook | Project | `.claude/hooks/protect-databases.sh` | translate | `projects/medicoder/hooks/protect-databases.sh` | File protection: prevents modifications to taxonomy database snapshots |
+| Claude | Hook | Project | `.claude/hooks/validate-readonly-query.sh` | translate | `projects/medicoder/hooks/validate-readonly-query.sh` | Database safety: validates SQLite queries are strictly SELECT statements |
+| Claude | Hook | Project | `.claude/hooks/verify-before-stop.sh` | translate | `projects/medicoder/hooks/verify-before-stop.sh` | Quality gate: enforces running test suite before completing tasks |
+| Claude | Setting | Project | `.claude/settings.json` | translate | `projects/medicoder/project.yaml` | Workspace permissions and command allow/deny lists. |
 | Claude | Setting | Executor | `.claude/settings.local.json` | copy_as_is | `migration/medicoder/original/.claude/settings.local.json` | Executor adapter / tool-specific configuration (claude). |
-| Claude | Setting | Project | `.claude/worktrees/rewrite/.claude/settings.json` | translate | `projects/medicoder/project.yaml` | Claude Code workspace permissions and command allow/deny lists. |
-| Claude | Setting | Executor | `.claude/worktrees/rewrite/.claude/settings.local.json` | copy_as_is | `migration/medicoder/original/.claude/worktrees/rewrite/.claude/settings.local.json` | Executor adapter / tool-specific configuration (claude). |
-| Claude | Skill | Global | `.claude/skills/catchup/SKILL.md` | translate | `skills/catchup/` | Generic reusable workflow or skill across engineering repos: catchup |
-| Claude | Skill | Global | `.claude/skills/pr/SKILL.md` | translate | `skills/pr/` | Generic reusable workflow or skill across engineering repos: pr |
-| Claude | Workflow | Project | `.claude/workflows/audit-eval-contamination.js` | translate | `projects/medicoder/skills/audit-eval-contamination/` | Project-specific automated workflow: audit-eval-contamination.js |
-| Claude | Workflow | Global | `.claude/workflows/fix-until-green.js` | translate | `skills/fix-until-green/` | Generic reusable workflow or skill across engineering repos: fix-until-green |
-| Cursor | Hook | Project | `.cursor/hooks/block-bulk-git-add.sh` | translate | `projects/medicoder/safety.md` | Git safety: prevents indiscriminate git add -A or git add . |
+| Claude | Skill | Global | `.claude/skills/catchup/SKILL.md` | translate | `skills/catchup/` | Global reusable engineering skill: catchup |
+| Claude | Skill | Global | `.claude/skills/pr/SKILL.md` | translate | `skills/pr/` | Global reusable engineering skill: pr |
+| Claude | Workflow | Project | `.claude/workflows/audit-eval-contamination.js` | translate | `projects/medicoder/skills/audit-eval-contamination/` | Medicoder domain skill/agent: audit-eval-contamination |
+| Claude | Workflow | Global | `.claude/workflows/fix-until-green.js` | translate | `skills/fix-until-green/` | Global reusable engineering skill: fix-until-green |
+| Cursor | Hook | Project | `.cursor/hooks/block-bulk-git-add.sh` | translate | `projects/medicoder/hooks/block-bulk-git-add.sh` | Git safety: prevents indiscriminate git add -A or git add . |
 | Cursor | Hook | Executor | `.cursor/hooks/claude-adapter.sh` | copy_as_is | `migration/medicoder/original/.cursor/hooks/claude-adapter.sh` | Executor adapter / tool-specific configuration (cursor). |
-| Cursor | Hook | Project | `.cursor/hooks/readonly-sqlite.sh` | translate | `projects/medicoder/safety.md` | Database safety: ensures sqlite connections are opened in readonly mode |
-| Cursor | Rule | Project | `.cursor/rules/am-full-runs.mdc` | translate | `projects/medicoder/safety.md` | Cost safety: prohibits running full evaluation pipeline without approval |
+| Cursor | Hook | Project | `.cursor/hooks/readonly-sqlite.sh` | translate | `projects/medicoder/hooks/readonly-sqlite.sh` | Database safety: ensures sqlite connections are opened in readonly mode |
+| Cursor | Rule | Project | `.cursor/rules/am-full-runs.mdc` | translate | `projects/medicoder/rules/am-full-runs.md` | Project operational rule: am-full-runs |
 | Cursor | Setting | Executor | `.cursor/hooks.json` | copy_as_is | `migration/medicoder/original/.cursor/hooks.json` | Executor adapter / tool-specific configuration (cursor). |
-| Generic | Doc | Project | `README.md` | translate | `projects/medicoder/context.md` | Project context and instructions: README.md |
-| Generic | Secret | Sensitive | `.env` | security_block | `DO_NOT_MIGRATE` | Contains API keys or secrets (e.g. GEMINI_API_KEY). Must not be migrated. |
+| Cursor | Skill | Project | `.cursor/skills/analyze-runs/SKILL.md` | translate | `projects/medicoder/skills/analyze-runs/` | Medicoder domain skill/agent: analyze-runs |
+| Cursor | Skill | Project | `.cursor/skills/icd10am-achi/SKILL.md` | translate | `projects/medicoder/skills/icd10am-achi/` | Medicoder domain skill/agent: icd10am-achi |
+| Cursor | Skill | Project | `.cursor/skills/icd10am-achi/examples.md` | translate | `projects/medicoder/skills/icd10am-achi/` | Medicoder domain skill/agent: icd10am-achi |
+| Cursor | Skill | Project | `.cursor/skills/icd10am-achi/language.md` | translate | `projects/medicoder/skills/icd10am-achi/` | Medicoder domain skill/agent: icd10am-achi |
+| Cursor | Skill | Project | `.cursor/skills/icd10am-achi/schema.md` | translate | `projects/medicoder/skills/icd10am-achi/` | Medicoder domain skill/agent: icd10am-achi |
+| Cursor | Skill | Project | `.cursor/skills/icd10cm-pcs/SKILL.md` | translate | `projects/medicoder/skills/icd10cm-pcs/` | Medicoder domain skill/agent: icd10cm-pcs |
+| Cursor | Skill | Project | `.cursor/skills/icd10cm-pcs/examples.md` | translate | `projects/medicoder/skills/icd10cm-pcs/` | Medicoder domain skill/agent: icd10cm-pcs |
+| Cursor | Skill | Project | `.cursor/skills/icd10cm-pcs/language.md` | translate | `projects/medicoder/skills/icd10cm-pcs/` | Medicoder domain skill/agent: icd10cm-pcs |
+| Cursor | Skill | Project | `.cursor/skills/icd10cm-pcs/schema.md` | translate | `projects/medicoder/skills/icd10cm-pcs/` | Medicoder domain skill/agent: icd10cm-pcs |
+| Generic | Convention | Project | `docs/tune-level-runbook.md` | translate | `projects/medicoder/conventions.md` | Project conventions, notes rules, and hard constraints: tune-level-runbook.md |
+| Generic | Convention | Project | `tuning/runbook.md` | translate | `projects/medicoder/conventions.md` | Project conventions, notes rules, and hard constraints: runbook.md |
+| Generic | Doc | Project | `README.md` | translate | `projects/medicoder/context.md` | Project architecture and overview: README.md |
+| Generic | Secret | Sensitive | `.env` | security_block | `DO_NOT_MIGRATE` | Contains API keys or secrets (e.g. GEMINI_API_KEY). Blocked from copying. |
 | Mcp | Mcp | Project | `.mcp.json` | translate | `projects/medicoder/project.yaml` | MCP tools configuration. |
 
-## Safety Policies Identified
+## Consolidated Policies & Artifacts
 
-- **Database Protection**: Denies edits to `database/` snapshots.
-- **Cost Controls**: Prohibits full Gemini API pipeline evaluation runs without explicit approval.
-- **Git Integrity**: Blocks bulk adds (`git add -A`, `git add .`) and removes AI co-author attribution.
-- **Database Integrity**: Validates SQLite queries are read-only (`-readonly`).
-- **Stop Verification**: Runs test suite before completing task execution.
+- **Hooks**: Executable safety hook scripts preserved in `projects/<project>/hooks/` with executable bits.
+- **Rules**: Enforced operational policies saved in `projects/<project>/rules/`.
+- **Conventions & Style**: Coding standards, prompt structure, notes authoring syntax in `projects/<project>/conventions.md`.
+- **Safety Engine**: Unified safety gates in `projects/<project>/safety.md`.
+- **Domain Skills**: Specialized agents and schemas in `projects/<project>/skills/`.
+- **Global Skills**: Reusable engineering workflows in `skills/`.
