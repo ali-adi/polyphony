@@ -76,6 +76,8 @@ Modern developers frequently pay for multiple AI subscriptions (**Claude Pro/Max
   - **Git Discipline**: Blocks destructive operations (`git push`, `git merge`, wildcard staging `git add -A`).
   - **Attribution Blocking**: Eliminates unsolicited `Co-authored-by` AI commit trailers.
   - **Cost Controls**: Flags and blocks expensive pipeline runs unless explicitly approved.
+- **🎯 Granular Model & Thinking Levels**: Configure exact models and reasoning effort/thinking budgets per agent (Claude, AGY, Cursor).
+- **🤖 Subagent & Dynamic Workflow Policies**: Specify models, thinking levels, and specialized role definitions (reviewer, tester, researcher) passed natively to spawned subagents via Claude `--agents` and AGY effort directives.
 - **🔄 Bidirectional Fallbacks & Quota Resilience**: If Claude reaches weekly/hourly usage quotas, Polyphony automatically promotes AGY as lead reasoner with zero workflow interruption. If an executor fails, Polyphony falls back to the secondary executor.
 - **🧬 Universal Migration (`polyphony migrate`)**: Ingests existing `.claude/`, `.cursor/`, and `.agents/` configurations, automatically classifying items into global skills, project domain knowledge, executable hooks, and rules.
 - **📚 Persistent Project Knowledge**: Injects domain conventions, schema references, and specific prompt notations (e.g. clinical coding grammar) directly into the agent's context window on every iteration.
@@ -136,6 +138,14 @@ polyphony start my-project --goal "Analyze codebase architecture and document se
 
 # Specify iteration ceiling or forced lead reasoner
 polyphony start my-project --goal "Fix flaky integration tests" --max-iterations 5 --lead agy
+
+# Dial in exact models & thinking levels for lead reasoner and executors
+polyphony start my-project \
+  --goal "Architect new microservice" \
+  --lead-model "claude-3-7-sonnet" \
+  --lead-thinking "high" \
+  --executor-model "gemini-3.1-pro-high" \
+  --executor-thinking "high"
 ```
 
 ### Track Task Status & History

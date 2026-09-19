@@ -60,6 +60,7 @@ class ExecutorRouter:
         timeout_seconds: int = 300,
         enable_fallback: bool = True,
         custom_fallback_chain: Optional[List[str]] = None,
+        models_config: Optional[Any] = None,
         **kwargs,
     ) -> Tuple[ExecutorResult, str]:
         """
@@ -84,12 +85,27 @@ class ExecutorRouter:
 
             logger.info(f"Attempting execution using executor: {candidate_name}")
             attempted.append(candidate_name)
+
+            candidate_kwargs = kwargs.copy()
+            if models_config and hasattr(models_config, "executors"):
+                exec_profile = models_config.executors.get(candidate_name)
+                if exec_profile:
+                    # Use candidate-specific model if fallback or if none explicitly supplied
+                    if candidate_name != target_executor or not candidate_kwargs.get("model"):
+                        if exec_profile.model:
+                            candidate_kwargs["model"] = exec_profile.model
+                    if candidate_name != target_executor or not candidate_kwargs.get("thinking_level"):
+                        if exec_profile.thinking_level:
+                            candidate_kwargs["thinking_level"] = exec_profile.thinking_level
+                if hasattr(models_config, "subagents") and "subagents" not in candidate_kwargs:
+                    candidate_kwargs["subagents"] = models_config.subagents
+
             result = candidate.execute(
                 instruction=instruction,
                 cwd=cwd,
                 read_only=read_only,
                 timeout_seconds=timeout_seconds,
-                **kwargs,
+                **candidate_kwargs,
             )
 
             # Check if this execution succeeded

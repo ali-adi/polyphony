@@ -103,9 +103,12 @@ def project_list(orch_root: str):
             path = data.get("path", "")
             lead = data.get("executors", {}).get("lead", "claude")
             primary = data.get("executors", {}).get("primary", "agy")
+            models_info = data.get("models", {})
+            lead_model_name = models_info.get("lead", {}).get(lead, {}).get("model", "default")
+            primary_model_name = models_info.get("executors", {}).get(primary, {}).get("model", "default")
             click.echo(f"  • {click.style(name, bold=True)} ({path})")
             click.echo(f"    Desc: {desc}")
-            click.echo(f"    Executors: lead={lead}, primary={primary}")
+            click.echo(f"    Executors: lead={lead} [{lead_model_name}], primary={primary} [{primary_model_name}]")
         except Exception as e:
             click.echo(f"  • {p.name} (error loading config: {e})")
     click.echo("")
@@ -117,10 +120,39 @@ def project_list(orch_root: str):
 @click.option("--read-only", "-r", is_flag=True, default=False, help="Run in read-only inspection mode (no file edits)")
 @click.option("--max-iterations", "-m", default=10, type=int, help="Maximum allowed reasoning/execution loops")
 @click.option("--lead", default=None, help="Force specific lead reasoner ('claude' or 'agy')")
+@click.option("--lead-model", default=None, help="Model override for the lead reasoner")
+@click.option("--lead-thinking", default=None, help="Thinking effort/budget for lead reasoner (low, medium, high, or tokens)")
+@click.option("--executor-model", default=None, help="Model override for executor agents")
+@click.option("--executor-thinking", default=None, help="Thinking effort for executor agents (low, medium, high)")
+@click.option("--subagent-model", default=None, help="Default model override for child subagents")
+@click.option("--subagent-thinking", default=None, help="Default thinking effort for child subagents")
 @click.option("--orch-root", default=".", help="Root directory of Polyphony")
-def start_cmd(project_name: str, goal: str, read_only: bool, max_iterations: int, lead: Optional[str], orch_root: str):
+def start_cmd(
+    project_name: str,
+    goal: str,
+    read_only: bool,
+    max_iterations: int,
+    lead: Optional[str],
+    lead_model: Optional[str],
+    lead_thinking: Optional[str],
+    executor_model: Optional[str],
+    executor_thinking: Optional[str],
+    subagent_model: Optional[str],
+    subagent_thinking: Optional[str],
+    orch_root: str,
+):
     """Start an autonomous multi-agent task on a project."""
     from orchestrator.main import Orchestrator
+
+    cli_overrides = {
+        "lead_model": lead_model,
+        "lead_thinking": lead_thinking,
+        "executor_model": executor_model,
+        "executor_thinking": executor_thinking,
+        "subagent_model": subagent_model,
+        "subagent_thinking": subagent_thinking,
+    }
+    cli_overrides = {k: v for k, v in cli_overrides.items() if v is not None}
 
     try:
         orch = Orchestrator(
@@ -129,6 +161,7 @@ def start_cmd(project_name: str, goal: str, read_only: bool, max_iterations: int
             read_only=read_only,
             max_iterations=max_iterations,
             preferred_lead=lead,
+            cli_overrides=cli_overrides,
         )
         orch.run_task(goal=goal)
     except Exception as e:

@@ -26,20 +26,35 @@ class Orchestrator:
         read_only: bool = False,
         max_iterations: int = 10,
         preferred_lead: Optional[str] = None,
+        cli_overrides: Optional[Dict[str, Any]] = None,
     ):
         self.root_dir = Path(root_dir).resolve()
         self.project_name = project_name
         self.read_only = read_only
         self.max_iterations = max_iterations
         self.preferred_lead = preferred_lead
+        self.cli_overrides = cli_overrides or {}
 
-        # 1. Load project definition
+        # 1. Load project definition & global config
         self.knowledge = load_project_knowledge(project_name, self.root_dir)
         self.project_cfg = self.knowledge.get("config", {})
         self.project_path = Path(self.project_cfg.get("path", self.root_dir / project_name)).resolve()
 
         if not self.project_path.exists():
             raise FileNotFoundError(f"Target project directory does not exist: {self.project_path}")
+
+        global_path = self.root_dir / "config" / "global.yaml"
+        self.global_cfg = {}
+        if global_path.exists():
+            with open(global_path, "r", encoding="utf-8") as f:
+                self.global_cfg = yaml.safe_load(f) or {}
+
+        from orchestrator.models_config import resolve_models_config
+        self.models_config = resolve_models_config(
+            global_cfg=self.global_cfg,
+            project_cfg=self.project_cfg,
+            cli_overrides=self.cli_overrides,
+        )
 
         # 2. State and Safety
         self.state_mgr = StateManager(self.root_dir)
@@ -108,17 +123,29 @@ class Orchestrator:
             logger.iteration(iter_num, self.max_iterations)
 
             # 1. Build prompt and invoke lead reasoner
-            prompt = build_reasoning_prompt(task_state, self.knowledge, available_executors)
+            prompt = build_reasoning_prompt(
+                task_state=task_state,
+                knowledge=self.knowledge,
+                available_executors=available_executors,
+                models_config=self.models_config,
+            )
 
             reasoner_ex = self.router.get_executor(lead_reasoner)
             if not reasoner_ex:
                 reasoner_ex = self.router.get_executor("agy") or self.router.get_executor("python")
+
+            lead_profile = self.models_config.lead.get(lead_reasoner)
+            lead_model = lead_profile.model if lead_profile else None
+            lead_thinking = lead_profile.thinking_level if lead_profile else None
 
             reason_res = reasoner_ex.execute(
                 instruction=prompt,
                 cwd=str(self.project_path),
                 read_only=True,
                 timeout_seconds=180,
+                model=lead_model,
+                thinking_level=lead_thinking,
+                subagents=self.models_config.subagents,
             )
 
             decision = parse_reasoner_decision(reason_res.output)
@@ -208,12 +235,18 @@ class Orchestrator:
 
             # 3. Execute instruction via router
             logger.execution(target_executor, instruction)
+            step_model = decision.get("model")
+            step_thinking = decision.get("thinking_level")
+
             exec_res, used_executor = self.router.execute(
                 target_executor=target_executor,
                 instruction=instruction,
                 cwd=str(self.project_path),
                 read_only=self.read_only,
                 timeout_seconds=300,
+                models_config=self.models_config,
+                model=step_model,
+                thinking_level=step_thinking,
             )
 
             logger.execution_result(

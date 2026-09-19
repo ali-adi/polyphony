@@ -41,6 +41,9 @@ class BaseExecutor(ABC):
         cwd: str,
         read_only: bool = False,
         timeout_seconds: int = 300,
+        model: Optional[str] = None,
+        thinking_level: Optional[Any] = None,
+        subagents: Optional[Any] = None,
         **kwargs,
     ) -> ExecutorResult:
         """Execute a given instruction inside the target repository working directory."""

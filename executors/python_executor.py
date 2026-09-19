@@ -52,6 +52,9 @@ class PythonExecutor(BaseExecutor):
         cwd: str,
         read_only: bool = False,
         timeout_seconds: int = 300,
+        model: Optional[str] = None,
+        thinking_level: Optional[Any] = None,
+        subagents: Optional[Any] = None,
         **kwargs,
     ) -> ExecutorResult:
         start_time = time.time()

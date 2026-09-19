@@ -57,6 +57,9 @@ class ClaudeExecutor(BaseExecutor):
         timeout_seconds: int = 300,
         output_format: str = "text",
         system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        thinking_level: Optional[Any] = None,
+        subagents: Optional[Any] = None,
         **kwargs,
     ) -> ExecutorResult:
         if not self.is_available():
@@ -78,6 +81,21 @@ class ClaudeExecutor(BaseExecutor):
             "--dangerously-skip-permissions",
         ]
 
+        if model:
+            cmd.extend(["--model", str(model)])
+
+        # Handle subagents specification (--agents <json>)
+        if subagents:
+            agents_json = None
+            if hasattr(subagents, "to_claude_agents_json"):
+                agents_json = subagents.to_claude_agents_json()
+            elif isinstance(subagents, dict):
+                agents_json = json.dumps(subagents)
+            elif isinstance(subagents, str):
+                agents_json = subagents
+            if agents_json:
+                cmd.extend(["--agents", agents_json])
+
         if output_format in ("json", "stream-json"):
             cmd.extend(["--output-format", output_format])
 
@@ -87,6 +105,13 @@ class ClaudeExecutor(BaseExecutor):
         if read_only:
             cmd.extend(["--tools", "Read,Bash"])
 
+        env = os.environ.copy()
+        if thinking_level is not None:
+            from orchestrator.models_config import map_thinking_to_tokens
+            tokens = map_thinking_to_tokens(thinking_level)
+            if tokens:
+                env["MAX_THINKING_TOKENS"] = str(tokens)
+
         try:
             res = subprocess.run(
                 cmd,
@@ -94,6 +119,7 @@ class ClaudeExecutor(BaseExecutor):
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
+                env=env,
             )
             duration = time.time() - start_time
             current_files = set(_get_changed_files_via_git(cwd))

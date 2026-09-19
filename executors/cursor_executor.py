@@ -59,6 +59,9 @@ class CursorExecutor(BaseExecutor):
         cwd: str,
         read_only: bool = False,
         timeout_seconds: int = 300,
+        model: Optional[str] = None,
+        thinking_level: Optional[Any] = None,
+        subagents: Optional[Any] = None,
         **kwargs,
     ) -> ExecutorResult:
         if not self.is_available():
@@ -75,6 +78,8 @@ class CursorExecutor(BaseExecutor):
         initial_files = set(_get_changed_files_via_git(cwd))
 
         cmd = [self.binary_path, "agent", "-p", instruction]
+        if model:
+            cmd.extend(["--model", str(model)])
 
         try:
             res = subprocess.run(

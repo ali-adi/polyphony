@@ -30,6 +30,8 @@ def load_project_knowledge(project_name: str, root_dir: Path) -> Dict[str, Any]:
         with open(yaml_file, "r", encoding="utf-8") as f:
             knowledge["config"] = yaml.safe_load(f) or {}
 
+    knowledge["models"] = knowledge["config"].get("models", {})
+
     context_file = proj_dir / "context.md"
     if context_file.exists():
         knowledge["context"] = context_file.read_text(encoding="utf-8")
@@ -75,6 +77,7 @@ def build_reasoning_prompt(
     task_state: TaskState,
     knowledge: Dict[str, Any],
     available_executors: List[str],
+    models_config: Optional[Any] = None,
 ) -> str:
     """Build complete prompt for lead reasoning agent (Claude / AGY)."""
 
@@ -109,6 +112,28 @@ def build_reasoning_prompt(
         f"Global Skills: {', '.join(knowledge.get('global_skills', [])) or 'None'}\n"
     )
 
+    models_text = ""
+    if models_config:
+        m_lines = ["## Active Model & Thinking Configuration"]
+        if hasattr(models_config, "lead") and models_config.lead:
+            for k, prof in models_config.lead.items():
+                if prof.model:
+                    m_lines.append(f"- Lead ({k}): model={prof.model}, thinking_level={prof.thinking_level or 'default'}")
+        if hasattr(models_config, "executors") and models_config.executors:
+            for k, prof in models_config.executors.items():
+                if prof.model:
+                    m_lines.append(f"- Executor ({k}): model={prof.model}, thinking_level={prof.thinking_level or 'default'}")
+        if hasattr(models_config, "subagents") and models_config.subagents:
+            sub = models_config.subagents
+            if sub.default_model or sub.default_thinking_level:
+                m_lines.append(f"- Subagents Default: model={sub.default_model or 'default'}, thinking_level={sub.default_thinking_level or 'default'}")
+            if sub.roles:
+                m_lines.append("  Subagent Roles:")
+                for r_name, r_prof in sub.roles.items():
+                    desc = f" ({r_prof.description})" if r_prof.description else ""
+                    m_lines.append(f"  • {r_name}: model={r_prof.model or 'default'}, thinking={r_prof.thinking_level or 'default'}{desc}")
+        models_text = "\n".join(m_lines) + "\n"
+
     read_only_note = (
         "\nIMPORTANT: This task is RUNNING IN READ-ONLY MODE. Do NOT propose file edits, writes, or deletions. "
         "Only inspection, analysis, search, or read-only execution is allowed.\n"
@@ -136,6 +161,7 @@ Path: {task_state.project_path}
 - Rules: {', '.join(knowledge.get('project_rules', [])) or 'None'}
 - Safety Hooks: {', '.join(knowledge.get('project_hooks', [])) or 'None'}
 
+{models_text}
 ## Available Skills
 {skills_text}
 
@@ -166,6 +192,8 @@ You MUST respond ONLY with a JSON object matching this exact schema:
   "action": "DELEGATE | VERIFY | COMPLETE | ABORT",
   "executor": "agy | cursor | python | claude",
   "instruction": "Specific, actionable instruction or command for the executor",
+  "model": "optional model override for executor (or subagent) if needed",
+  "thinking_level": "optional thinking effort override (low | medium | high)",
   "success_criteria": ["list of concrete criteria"],
   "verification_needed": true | false
 }}
@@ -176,6 +204,7 @@ You MUST respond ONLY with a JSON object matching this exact schema:
 - If delegating implementation or analysis, select the most appropriate executor ("agy", "cursor", "python", or "claude").
 - Output ONLY the JSON block. Do not include markdown preamble before or after the JSON.
 """
+    return prompt
     return prompt
 
 

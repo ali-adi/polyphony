@@ -5,6 +5,15 @@ executors:
   lead: claude
   primary: agy
   secondary: cursor
+models:
+  lead:
+    claude:
+      model: "claude-3-7-sonnet-20250219"
+      thinking_level: "high"
+  executors:
+    agy:
+      model: "gemini-3.1-pro-high"
+      thinking_level: "high"
 safety:
   protected_paths:
   - database/

@@ -37,6 +37,8 @@ class AgyExecutor(BaseExecutor):
         mode: Optional[str] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
+        thinking_level: Optional[Any] = None,
+        subagents: Optional[Any] = None,
         **kwargs,
     ) -> ExecutorResult:
         if not self.is_available():
@@ -69,10 +71,15 @@ class AgyExecutor(BaseExecutor):
             cmd.extend(["--mode", "plan"])
 
         if model:
-            cmd.extend(["--model", model])
+            cmd.extend(["--model", str(model)])
 
-        if effort:
-            cmd.extend(["--effort", effort])
+        resolved_effort = effort
+        if not resolved_effort and thinking_level is not None:
+            from orchestrator.models_config import map_thinking_to_effort
+            resolved_effort = map_thinking_to_effort(thinking_level)
+
+        if resolved_effort:
+            cmd.extend(["--effort", str(resolved_effort)])
 
         try:
             res = subprocess.run(
