@@ -7,12 +7,33 @@ name = "polyphony"
 version = "0.1.0"
 description = "Local-first, CLI-driven multi-agent orchestrator powered by Claude Code, AGY, and Cursor"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ali Adi" }]
+keywords = ["multi-agent", "orchestration", "claude-code", "antigravity", "cursor", "llm-agents", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+]
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ali-adi/polyphony"
+Repository = "https://github.com/ali-adi/polyphony"
 
 [project.optional-dependencies]
 dev = [
