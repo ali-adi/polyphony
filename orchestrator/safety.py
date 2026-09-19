@@ -18,7 +18,7 @@ class SafetyViolation(Exception):
 
 class SafetyConfig(BaseModel):
     """Safety configuration loaded from project.yaml and global.yaml."""
-    protected_paths: List[str] = Field(default_factory=lambda: ["database/", "**/database/**"])
+    protected_paths: List[str] = Field(default_factory=list)
     blocked_commands: List[str] = Field(
         default_factory=lambda: [
             "git push",
@@ -34,16 +34,11 @@ class SafetyConfig(BaseModel):
         ]
     )
     require_tests_before_stop: bool = True
-    require_approval_for: List[str] = Field(
-        default_factory=lambda: [
-            "configs/full.yml",
-            "tune_level.py --force-full",
-            "--force-full",
-        ]
-    )
+    require_approval_for: List[str] = Field(default_factory=list)
     block_ai_attribution: bool = True
     read_only: bool = False
     isolate_git_branch: bool = False
+    max_cost_usd: Optional[float] = None
 
 
 def resolve_safety_config(
@@ -91,7 +86,7 @@ def resolve_safety_config(
                     blocked.append(dg)
 
     # 2. Protected paths merge
-    protected = list(p_safety.get("protected_paths", ["database/", "**/database/**"]))
+    protected = list(p_safety.get("protected_paths", []))
     for g_prot in g_safety.get("protected_paths", []):
         if g_prot not in protected:
             protected.append(g_prot)
@@ -103,11 +98,10 @@ def resolve_safety_config(
     )
 
     # 4. Approval list
-    approvals = list(p_safety.get("require_approval_for", [
-        "configs/full.yml",
-        "tune_level.py --force-full",
-        "--force-full",
-    ]))
+    approvals = list(p_safety.get("require_approval_for", []))
+    for g_app in g_safety.get("require_approval_for", []):
+        if g_app not in approvals:
+            approvals.append(g_app)
 
     # 5. Read-only mode
     enforce_ro = read_only or g_safety.get("enforce_read_only_default", False)
@@ -115,6 +109,14 @@ def resolve_safety_config(
     # 6. Block AI attribution & branch isolation
     block_attrib = p_git.get("block_ai_attribution", True)
     isolate_branch = p_git.get("isolate_branch", False) or g_safety.get("isolate_git_branch", False)
+
+    # 7. Max cost budget
+    max_cost = p_safety.get("max_cost_usd", g_safety.get("max_cost_usd", None))
+    if max_cost is not None:
+        try:
+            max_cost = float(max_cost)
+        except (ValueError, TypeError):
+            max_cost = None
 
     return SafetyConfig(
         protected_paths=protected,
@@ -124,6 +126,7 @@ def resolve_safety_config(
         block_ai_attribution=block_attrib,
         read_only=enforce_ro,
         isolate_git_branch=isolate_branch,
+        max_cost_usd=max_cost,
     )
 
 
@@ -181,8 +184,8 @@ class SafetyEngine:
             if "git" in cmd_str and "co-authored-by" in cmd_str.lower():
                 return False, "Blocked by safety policy: AI attribution in git commits is prohibited."
 
-        # 3. Check read-only mode violations
-        if self.config.read_only:
+        # 3. Check read-only mode violations (shell commands)
+        if self.config.read_only and is_shell:
             write_indicators = ["git commit", "git add", "git rm", "rm ", "mv ", "sed -i", "echo >", "tee ", "touch "]
             for ind in write_indicators:
                 if ind in cmd_str:
@@ -301,17 +304,23 @@ class SafetyEngine:
         has_recursive = False
         has_force = False
         targets: List[str] = []
+        end_of_flags = False
 
         for tok in tokens[1:]:
-            if tok.startswith("--"):
-                if tok == "--recursive":
+            if end_of_flags:
+                targets.append(tok)
+            elif tok == "--":
+                end_of_flags = True
+            elif tok.startswith("--"):
+                if tok in ("--recursive", "-R"):
                     has_recursive = True
-                if tok == "--force":
+                elif tok == "--force":
                     has_force = True
-            elif tok.startswith("-"):
-                if "r" in tok or "R" in tok:
+            elif tok.startswith("-") and len(tok) > 1:
+                flag_chars = set(tok[1:])
+                if "r" in flag_chars or "R" in flag_chars:
                     has_recursive = True
-                if "f" in tok:
+                if "f" in flag_chars:
                     has_force = True
             else:
                 targets.append(tok)

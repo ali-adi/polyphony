@@ -27,7 +27,8 @@ def test_safety_blocked_commands():
 
 
 def test_safety_cost_controls():
-    engine = SafetyEngine()
+    config = SafetyConfig(require_approval_for=["configs/full.yml", "--force-full"])
+    engine = SafetyEngine(config=config)
 
     expensive_cmd = "python -m medicoder.main --config configs/full.yml"
     ok, reason = engine.validate_command(expensive_cmd)
@@ -40,7 +41,8 @@ def test_safety_cost_controls():
 
 
 def test_safety_protected_paths(tmp_path):
-    engine = SafetyEngine(project_root=str(tmp_path))
+    config = SafetyConfig(protected_paths=["database/", "**/database/**"])
+    engine = SafetyEngine(config=config, project_root=str(tmp_path))
 
     db_path = str(tmp_path / "database" / "snapshot.db")
     ok, reason = engine.validate_path_modification(db_path)

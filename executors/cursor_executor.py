@@ -7,15 +7,34 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from executors.base import BaseExecutor, ExecutorResult
-from executors.python_executor import _get_changed_files_via_git
+from typing import Any, Dict, List, Optional, Tuple
+from executors.base import (
+    BaseExecutor,
+    ExecutorResult,
+    _get_changed_files_via_git as _base_get_changed_files_via_git,
+    _snapshot_file_states as _base_snapshot_file_states,
+    detect_changed_files as _base_detect_changed_files,
+)
+
+
+def _get_changed_files_via_git(cwd: str) -> List[str]:
+    return _base_get_changed_files_via_git(cwd)
+
+
+def _snapshot_file_states(cwd: str) -> Dict[str, Tuple[float, int]]:
+    return _base_snapshot_file_states(cwd, get_changed_files_fn=_get_changed_files_via_git)
+
+
+def detect_changed_files(initial_snapshot: Dict[str, Tuple[float, int]], cwd: str) -> List[str]:
+    return _base_detect_changed_files(initial_snapshot, cwd, snapshot_fn=_snapshot_file_states)
 
 
 class CursorExecutor(BaseExecutor):
     """Executes coding actions via Cursor Agent CLI."""
 
     _class_is_agent_ready: Optional[bool] = None
+    _class_last_checked: float = 0.0
+    _CACHE_TTL_SECONDS: float = 300.0
 
     def __init__(self, binary_path: Optional[str] = None):
         candidate_paths = [
@@ -41,11 +60,16 @@ class CursorExecutor(BaseExecutor):
     def is_available(self) -> bool:
         if not self.binary_path or not Path(self.binary_path).exists():
             return False
-        if CursorExecutor._class_is_agent_ready is not None:
+        now = time.time()
+        if (
+            CursorExecutor._class_is_agent_ready is not None
+            and (now - CursorExecutor._class_last_checked) < CursorExecutor._CACHE_TTL_SECONDS
+        ):
             return CursorExecutor._class_is_agent_ready
 
         # Test if cursor agent subcommand is installed and available
         try:
+            CursorExecutor._class_last_checked = now
             res = subprocess.run(
                 [self.binary_path, "agent", "--help"],
                 capture_output=True,
@@ -84,7 +108,7 @@ class CursorExecutor(BaseExecutor):
             )
 
         start_time = time.time()
-        initial_files = set(_get_changed_files_via_git(cwd))
+        initial_snapshot = _snapshot_file_states(cwd)
 
         cmd = [self.binary_path, "agent", "-p"]
         if model:
@@ -100,8 +124,7 @@ class CursorExecutor(BaseExecutor):
                 timeout=timeout_seconds,
             )
             duration = time.time() - start_time
-            current_files = set(_get_changed_files_via_git(cwd))
-            newly_changed = sorted(list(current_files - initial_files))
+            newly_changed = detect_changed_files(initial_snapshot, cwd)
 
             output = res.stdout.strip()
             error = res.stderr.strip() if res.returncode != 0 else None

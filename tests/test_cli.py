@@ -194,3 +194,91 @@ def test_start_command_dry_run(tmp_path, monkeypatch):
     assert init_args.get("dry_run") is True
     assert init_args.get("history_window") == 5
 
+
+def test_project_add_and_inspect(tmp_path):
+    repo_dir = tmp_path / "my_repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("print('hello')", encoding="utf-8")
+
+    runner = CliRunner()
+    # Test project add
+    add_res = runner.invoke(cli, ["project", "add", "newproj", str(repo_dir), "--orch-root", str(tmp_path)])
+    assert add_res.exit_code == 0
+    assert "Successfully registered project 'newproj'" in add_res.output
+
+    # Verify files created
+    proj_dir = tmp_path / "projects" / "newproj"
+    assert (proj_dir / "project.yaml").exists()
+    assert (proj_dir / "context.md").exists()
+    assert (proj_dir / "architecture.md").exists()
+    assert (proj_dir / "decisions.md").exists()
+    assert (proj_dir / "known_issues.md").exists()
+
+    # Test re-adding existing project
+    readd_res = runner.invoke(cli, ["project", "add", "newproj", str(repo_dir), "--orch-root", str(tmp_path)])
+    assert readd_res.exit_code == 0
+    assert "already exists" in readd_res.output
+
+    # Test project inspect
+    inspect_res = runner.invoke(cli, ["project", "inspect", "newproj", "--orch-root", str(tmp_path)])
+    assert inspect_res.exit_code == 0
+    assert "Project Inspection: 'newproj'" in inspect_res.output
+    assert "context.md" in inspect_res.output
+    assert "architecture.md" in inspect_res.output
+    assert "decisions.md" in inspect_res.output
+
+
+def test_task_abort(tmp_path):
+    mgr = StateManager(root_dir=tmp_path)
+    state = mgr.create_task(
+        project_name="abortproj",
+        project_path=str(tmp_path / "abortproj"),
+        goal="Abort test",
+        read_only=False,
+    )
+    assert state.status == TaskStatus.PENDING
+
+    runner = CliRunner()
+    # Abort running/pending task
+    abort_res = runner.invoke(cli, ["task", "abort", "abortproj", state.task_id, "--orch-root", str(tmp_path)])
+    assert abort_res.exit_code == 0
+    assert "has been aborted" in abort_res.output
+
+    # Verify state updated on disk
+    reloaded = mgr.load_state("abortproj", state.task_id)
+    assert reloaded.status == TaskStatus.ABORTED
+    assert "aborted" in (reloaded.final_summary or "").lower()
+
+    # Re-aborting should notify already finished
+    abort_res2 = runner.invoke(cli, ["task", "abort", "abortproj", state.task_id, "--orch-root", str(tmp_path)])
+    assert abort_res2.exit_code == 0
+    assert "already finished" in abort_res2.output
+
+
+def test_task_diff(tmp_path):
+    repo_dir = tmp_path / "diffproj"
+    repo_dir.mkdir()
+
+    mgr = StateManager(root_dir=tmp_path)
+    state = mgr.create_task(
+        project_name="diffproj",
+        project_path=str(repo_dir),
+        goal="Diff test",
+        read_only=False,
+    )
+
+    runner = CliRunner()
+    # When no files changed
+    diff_res1 = runner.invoke(cli, ["task", "diff", "diffproj", state.task_id, "--orch-root", str(tmp_path)])
+    assert diff_res1.exit_code == 0
+    assert "No files were recorded as modified" in diff_res1.output
+
+    # When files are recorded
+    state.all_files_changed = ["file1.py"]
+    mgr.save_state(state)
+
+    diff_res2 = runner.invoke(cli, ["task", "diff", "diffproj", state.task_id, "--orch-root", str(tmp_path)])
+    assert diff_res2.exit_code == 0
+    assert "file1.py" in diff_res2.output
+
+

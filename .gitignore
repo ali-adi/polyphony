@@ -42,3 +42,7 @@ tasks/
 # External projects / test clones
 /medicoder/
 migration/**/original/
+
+
+implementation_plan.md 
+initial-plan.md

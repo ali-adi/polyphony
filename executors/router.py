@@ -37,19 +37,103 @@ def is_infrastructure_error(result: ExecutorResult) -> bool:
     return any(signal in err_str for signal in infra_signals)
 
 
+def _get_git_root(cwd: str) -> Optional[Path]:
+    """Find top-level Git working tree, handling monorepo subdirectories and worktrees."""
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            p = Path(res.stdout.strip())
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    git_dir = Path(cwd) / ".git"
+    if git_dir.exists():
+        return Path(cwd)
+    return None
+
+
+def _is_temp_checkpoint(cwd: str) -> bool:
+    """Verify if the latest commit is a Polyphony temporary checkpoint commit."""
+    try:
+        import subprocess
+        git_root = _get_git_root(cwd) or Path(cwd)
+        res = subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=str(git_root),
+            capture_output=True,
+            text=True,
+        )
+        return res.stdout.strip() == "polyphony-temp-checkpoint"
+    except Exception:
+        return False
+
+
+def create_workspace_checkpoint(cwd: str) -> bool:
+    """Create a temporary git commit to guarantee rollback safety without data loss."""
+    try:
+        git_root = _get_git_root(cwd)
+        if git_root:
+            import subprocess
+            subprocess.run(["git", "add", "-A"], cwd=str(git_root), capture_output=True)
+            res = subprocess.run(
+                [
+                    "git",
+                    "-c", "user.name=Polyphony",
+                    "-c", "user.email=polyphony@local",
+                    "commit",
+                    "--allow-empty",
+                    "-m", "polyphony-temp-checkpoint",
+                ],
+                cwd=str(git_root),
+                capture_output=True,
+                text=True,
+            )
+            return res.returncode == 0
+    except Exception as e:
+        logger.warning(f"Failed to create workspace checkpoint in {cwd}: {e}")
+    return False
+
+
 def rollback_workspace(cwd: str):
     """Roll back uncommitted workspace changes after a failed execution in a git repository."""
     try:
-        git_dir = Path(cwd) / ".git"
-        if git_dir.exists():
+        git_root = _get_git_root(cwd)
+        if git_root:
             import subprocess
-            subprocess.run(
-                ["git", "stash", "push", "--include-untracked", "-m", "polyphony-checkpoint"],
-                cwd=cwd,
-                capture_output=True,
-            )
+            if _is_temp_checkpoint(str(git_root)):
+                # Revert any changes made since checkpoint
+                subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(git_root), capture_output=True)
+                # Remove untracked files created by the failed executor
+                subprocess.run(["git", "clean", "-fd"], cwd=str(git_root), capture_output=True)
+                # Soft reset to restore previous uncommitted changes cleanly
+                subprocess.run(["git", "reset", "--soft", "HEAD~1"], cwd=str(git_root), capture_output=True)
+            else:
+                logger.warning("No temporary checkpoint commit found at HEAD. Skipping soft reset.")
     except Exception as e:
         logger.warning(f"Failed to rollback workspace in {cwd}: {e}")
+
+
+def release_workspace_checkpoint(cwd: str):
+    """Clean up temporary checkpoint commit while keeping all modifications."""
+    try:
+        git_root = _get_git_root(cwd)
+        if git_root:
+            import subprocess
+            if _is_temp_checkpoint(str(git_root)):
+                subprocess.run(["git", "reset", "--soft", "HEAD~1"], cwd=str(git_root), capture_output=True)
+            else:
+                logger.warning("No temporary checkpoint commit found at HEAD. Skipping soft reset.")
+    except Exception as e:
+        logger.warning(f"Failed to release workspace checkpoint in {cwd}: {e}")
+
 
 
 class ExecutorRouter:
@@ -136,16 +220,27 @@ class ExecutorRouter:
                         if exec_profile.thinking_level:
                             candidate_kwargs["thinking_level"] = exec_profile.thinking_level
 
-            result = candidate.execute(
-                instruction=instruction,
-                cwd=cwd,
-                read_only=read_only,
-                timeout_seconds=timeout_seconds,
-                **candidate_kwargs,
-            )
+            has_checkpoint = False
+            if not read_only:
+                has_checkpoint = create_workspace_checkpoint(cwd)
+
+            try:
+                result = candidate.execute(
+                    instruction=instruction,
+                    cwd=cwd,
+                    read_only=read_only,
+                    timeout_seconds=timeout_seconds,
+                    **candidate_kwargs,
+                )
+            except Exception as e:
+                if has_checkpoint:
+                    rollback_workspace(cwd)
+                raise
 
             # Check if this execution succeeded
             if result.success:
+                if has_checkpoint:
+                    release_workspace_checkpoint(cwd)
                 return result, candidate_name
 
             last_result = result
@@ -155,7 +250,7 @@ class ExecutorRouter:
                     f"Executor '{candidate_name}' failed with infrastructure error: {result.error}. "
                     f"Rolling back changes and attempting fallback..."
                 )
-                if not read_only:
+                if not read_only and has_checkpoint:
                     rollback_workspace(cwd)
                 continue
             else:
@@ -164,6 +259,8 @@ class ExecutorRouter:
                     f"Executor '{candidate_name}' failed with task-level error: {result.error}. "
                     f"Returning to orchestrator without fallback."
                 )
+                if has_checkpoint:
+                    release_workspace_checkpoint(cwd)
                 return result, candidate_name
 
         # If all candidates exhausted, return last result or failure record

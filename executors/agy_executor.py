@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from executors.base import BaseExecutor, ExecutorResult
-from executors.python_executor import _get_changed_files_via_git
+from typing import Any, Dict, List, Optional, Tuple
+from executors.base import (
+    BaseExecutor,
+    ExecutorResult,
+    _get_changed_files_via_git as _base_get_changed_files_via_git,
+    _snapshot_file_states as _base_snapshot_file_states,
+    detect_changed_files as _base_detect_changed_files,
+)
+
+
+def _get_changed_files_via_git(cwd: str) -> List[str]:
+    return _base_get_changed_files_via_git(cwd)
+
+
+def _snapshot_file_states(cwd: str) -> Dict[str, Tuple[float, int]]:
+    return _base_snapshot_file_states(cwd, get_changed_files_fn=_get_changed_files_via_git)
+
+
+def detect_changed_files(initial_snapshot: Dict[str, Tuple[float, int]], cwd: str) -> List[str]:
+    return _base_detect_changed_files(initial_snapshot, cwd, snapshot_fn=_snapshot_file_states)
 
 
 class AgyExecutor(BaseExecutor):
@@ -51,10 +70,11 @@ class AgyExecutor(BaseExecutor):
             )
 
         start_time = time.time()
-        initial_files = set(_get_changed_files_via_git(cwd))
+        initial_snapshot = _snapshot_file_states(cwd)
 
         cmd = [
             self.binary_path,
+            "-p",
             "--input-format",
             "text",
             "--dangerously-skip-permissions",
@@ -73,10 +93,18 @@ class AgyExecutor(BaseExecutor):
         if output_format in ("text", "json", "stream-json"):
             cmd.extend(["--output-format", output_format])
 
+        json_schema = kwargs.get("json_schema")
+        if json_schema:
+            cmd.extend(["--json-schema", str(json_schema)])
+
         if mode:
             cmd.extend(["--mode", mode])
         elif read_only:
             cmd.extend(["--mode", "plan"])
+
+        agent = kwargs.get("agent") or kwargs.get("subagent")
+        if agent:
+            cmd.extend(["--agent", str(agent)])
 
         if model:
             cmd.extend(["--model", str(model)])
@@ -99,16 +127,34 @@ class AgyExecutor(BaseExecutor):
                 timeout=timeout_seconds,
             )
             duration = time.time() - start_time
-            current_files = set(_get_changed_files_via_git(cwd))
-            newly_changed = sorted(list(current_files - initial_files))
+            newly_changed = detect_changed_files(initial_snapshot, cwd)
 
             output = res.stdout.strip()
             error = res.stderr.strip() if res.returncode != 0 else None
             full_out = (output + " " + (error or "")).lower()
 
-            metadata = {"cmd": " ".join(cmd)}
-            if session_id:
+            metadata: Dict[str, Any] = {"cmd": " ".join(cmd)}
+            extracted_session = None
+            try:
+                data = json.loads(output)
+                if isinstance(data, dict):
+                    if "session_id" in data:
+                        extracted_session = str(data["session_id"])
+                    elif "conversation_id" in data:
+                        extracted_session = str(data["conversation_id"])
+            except Exception:
+                pass
+
+            if not extracted_session:
+                session_match = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b", output + " " + (error or ""))
+                if session_match:
+                    extracted_session = session_match.group(1)
+
+            if extracted_session:
+                metadata["session_id"] = extracted_session
+            elif session_id:
                 metadata["session_id"] = session_id
+
             if "quota" in full_out or "rate limit" in full_out or "resource exhausted" in full_out:
                 metadata["quota_exceeded"] = True
 

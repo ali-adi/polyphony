@@ -9,9 +9,26 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from executors.base import BaseExecutor, ExecutorResult
-from executors.python_executor import _get_changed_files_via_git
+from typing import Any, Dict, List, Optional, Tuple
+from executors.base import (
+    BaseExecutor,
+    ExecutorResult,
+    _get_changed_files_via_git as _base_get_changed_files_via_git,
+    _snapshot_file_states as _base_snapshot_file_states,
+    detect_changed_files as _base_detect_changed_files,
+)
+
+
+def _get_changed_files_via_git(cwd: str) -> List[str]:
+    return _base_get_changed_files_via_git(cwd)
+
+
+def _snapshot_file_states(cwd: str) -> Dict[str, Tuple[float, int]]:
+    return _base_snapshot_file_states(cwd, get_changed_files_fn=_get_changed_files_via_git)
+
+
+def detect_changed_files(initial_snapshot: Dict[str, Tuple[float, int]], cwd: str) -> List[str]:
+    return _base_detect_changed_files(initial_snapshot, cwd, snapshot_fn=_snapshot_file_states)
 
 
 class ClaudeExecutor(BaseExecutor):
@@ -29,8 +46,8 @@ class ClaudeExecutor(BaseExecutor):
             return False
         return True
 
-    def check_quota_status(self) -> tuple[bool, str]:
-        """Check if Claude CLI is currently functional without making wasteful inference calls."""
+    def check_binary_health(self) -> tuple[bool, str]:
+        """Check if Claude CLI binary is present and functional."""
         if not self.is_available():
             return False, "Claude CLI binary not found."
         try:
@@ -48,6 +65,9 @@ class ClaudeExecutor(BaseExecutor):
             return False, output or f"Claude CLI returned non-zero exit code {res.returncode}"
         except Exception as e:
             return False, str(e)
+
+    # Backwards compatibility alias
+    check_quota_status = check_binary_health
 
     def execute(
         self,
@@ -72,7 +92,7 @@ class ClaudeExecutor(BaseExecutor):
             )
 
         start_time = time.time()
-        initial_files = set(_get_changed_files_via_git(cwd))
+        initial_snapshot = _snapshot_file_states(cwd)
 
         cmd = [
             self.binary_path,
@@ -107,7 +127,7 @@ class ClaudeExecutor(BaseExecutor):
             cmd.extend(["--output-format", output_format])
 
         if system_prompt:
-            cmd.extend(["--system-prompt", system_prompt])
+            cmd.extend(["--system-prompt", system_prompt, "--system-prompt-snapshot", "on"])
 
         if read_only:
             cmd.extend(["--tools", "Read,Bash"])
@@ -130,8 +150,7 @@ class ClaudeExecutor(BaseExecutor):
                 env=env,
             )
             duration = time.time() - start_time
-            current_files = set(_get_changed_files_via_git(cwd))
-            newly_changed = sorted(list(current_files - initial_files))
+            newly_changed = detect_changed_files(initial_snapshot, cwd)
 
             output = res.stdout.strip()
             error = res.stderr.strip() if res.returncode != 0 else None
@@ -150,17 +169,26 @@ class ClaudeExecutor(BaseExecutor):
                 )
 
             metadata: Dict[str, Any] = {"cmd": " ".join(cmd)}
-            session_match = re.search(r"session(?:\s+id)?[:=\s]+([0-9a-fA-F-]{36})", output + " " + (error or ""), re.IGNORECASE)
-            if session_match:
-                metadata["session_id"] = session_match.group(1)
-            elif session_id:
-                metadata["session_id"] = session_id
+            extracted_session = None
             try:
                 data = json.loads(output)
-                if isinstance(data, dict) and "session_id" in data:
-                    metadata["session_id"] = data["session_id"]
+                if isinstance(data, dict):
+                    if "session_id" in data:
+                        extracted_session = str(data["session_id"])
+                    elif "conversation_id" in data:
+                        extracted_session = str(data["conversation_id"])
             except Exception:
                 pass
+
+            if not extracted_session:
+                session_match = re.search(r"\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b", output + " " + (error or ""))
+                if session_match:
+                    extracted_session = session_match.group(1)
+
+            if extracted_session:
+                metadata["session_id"] = extracted_session
+            elif session_id:
+                metadata["session_id"] = session_id
 
             return ExecutorResult(
                 success=(res.returncode == 0),

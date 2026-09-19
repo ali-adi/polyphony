@@ -23,6 +23,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     ABORTED = "aborted"
+    NEEDS_HUMAN = "needs_human"
 
 
 class IterationRecord(BaseModel):
@@ -38,6 +39,7 @@ class IterationRecord(BaseModel):
     safety_passed: bool = True
     safety_message: Optional[str] = None
     files_changed: List[str] = Field(default_factory=list)
+    metrics: Dict[str, float] = Field(default_factory=dict)
 
 
 class TaskState(BaseModel):
@@ -55,6 +57,10 @@ class TaskState(BaseModel):
     all_files_changed: List[str] = Field(default_factory=list)
     final_summary: Optional[str] = None
     error: Optional[str] = None
+    lead_session_id: Optional[str] = None
+    executor_sessions: Dict[str, str] = Field(default_factory=dict)
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 class StateManager:

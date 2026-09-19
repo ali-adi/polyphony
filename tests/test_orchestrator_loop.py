@@ -223,3 +223,152 @@ def test_orchestrator_midtask_lead_failover(tmp_path):
 
     assert task_state.status == TaskStatus.COMPLETED
     assert "Completed via AGY failover" in task_state.final_summary
+
+
+def test_orchestrator_budget_limit_abort(tmp_path):
+    target_dir = _setup_mock_project(tmp_path)
+
+    # Configure very low budget: 0.0001 USD
+    proj_yaml = tmp_path / "projects" / "demo" / "project.yaml"
+    content = proj_yaml.read_text(encoding="utf-8")
+    content = content.replace("safety:\n", "safety:\n  max_cost_usd: 0.0001\n")
+    proj_yaml.write_text(content, encoding="utf-8")
+
+    responses = [
+        json.dumps({
+            "action": "DELEGATE",
+            "executor": "python",
+            "instruction": "echo 'work'",
+            "analysis": "Performing expensive task",
+        }),
+        json.dumps({
+            "action": "COMPLETE",
+            "analysis": "Done",
+        }),
+    ]
+    mock_lead = MockLeadExecutor(responses)
+
+    orch = Orchestrator(project_name="demo", root_dir=str(tmp_path), preferred_lead="claude")
+    orch.router.executors["claude"] = mock_lead
+
+    task_state = orch.run_task("Budget test")
+    assert task_state.status == TaskStatus.ABORTED
+    assert "exceeded maximum budget limit" in (task_state.error or "")
+
+
+def test_orchestrator_use_skill_action(tmp_path):
+    target_dir = _setup_mock_project(tmp_path)
+
+    # Create a mock skill directory
+    skill_dir = tmp_path / "projects" / "demo" / "skills" / "mock-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Mock Skill Guide\nFollow these steps to win.", encoding="utf-8")
+
+    responses = [
+        json.dumps({
+            "action": "USE_SKILL",
+            "skill": "mock-skill",
+            "analysis": "Need skill docs",
+        }),
+        json.dumps({
+            "action": "COMPLETE",
+            "analysis": "Used skill successfully",
+        }),
+    ]
+    mock_lead = MockLeadExecutor(responses)
+
+    orch = Orchestrator(project_name="demo", root_dir=str(tmp_path), preferred_lead="claude")
+    orch.router.executors["claude"] = mock_lead
+
+    task_state = orch.run_task("Skill test")
+    assert task_state.status == TaskStatus.COMPLETED
+    assert len(task_state.iterations) == 2
+    assert task_state.iterations[0].lead_decision["action"] == "USE_SKILL"
+    assert "Mock Skill Guide" in (task_state.iterations[0].execution_result.output or "")
+
+
+def test_orchestrator_session_persistence(tmp_path):
+    target_dir = _setup_mock_project(tmp_path)
+
+    class SessionTrackingLead(BaseExecutor):
+        def __init__(self):
+            self.sessions_seen = []
+            self.call_count = 0
+
+        @property
+        def name(self) -> str:
+            return "claude"
+
+        def is_available(self) -> bool:
+            return True
+
+        def check_quota_status(self) -> tuple[bool, str]:
+            return True, "Available"
+
+        def execute(self, instruction: str, cwd: str, **kwargs) -> ExecutorResult:
+            self.call_count += 1
+            sess = kwargs.get("session_id")
+            self.sessions_seen.append(sess)
+            if self.call_count == 1:
+                return ExecutorResult(
+                    success=True,
+                    executor_name=self.name,
+                    output=json.dumps({
+                        "action": "DELEGATE",
+                        "executor": "python",
+                        "instruction": "echo 'hi'",
+                        "analysis": "First step",
+                    }),
+                    exit_code=0,
+                    metadata={"session_id": "session-12345"},
+                )
+            return ExecutorResult(
+                success=True,
+                executor_name=self.name,
+                output=json.dumps({
+                    "action": "COMPLETE",
+                    "analysis": "Done",
+                }),
+                exit_code=0,
+                metadata={"session_id": "session-12345"},
+            )
+
+    lead = SessionTrackingLead()
+    orch = Orchestrator(project_name="demo", root_dir=str(tmp_path), preferred_lead="claude")
+    orch.router.executors["claude"] = lead
+
+    task_state = orch.run_task("Session persistence test")
+    assert task_state.status == TaskStatus.COMPLETED
+    assert task_state.lead_session_id == "session-12345"
+    assert lead.sessions_seen == [None, "session-12345"]
+
+
+def test_orchestrator_final_synthesis_and_extend(tmp_path):
+    target_dir = _setup_mock_project(tmp_path)
+
+    responses = [
+        json.dumps({
+            "action": "DELEGATE",
+            "executor": "python",
+            "instruction": "echo 'step 1'",
+            "analysis": "Running initial step",
+        }),
+        json.dumps({
+            "action": "EXTEND",
+            "extension_iterations": 1,
+            "analysis": "Need 1 more iteration to verify",
+        }),
+        json.dumps({
+            "action": "COMPLETE",
+            "analysis": "Completed after extension",
+        }),
+    ]
+    mock_lead = MockLeadExecutor(responses)
+
+    orch = Orchestrator(project_name="demo", root_dir=str(tmp_path), preferred_lead="claude", max_iterations=1)
+    orch.router.executors["claude"] = mock_lead
+
+    task_state = orch.run_task("Extension test")
+    assert task_state.status == TaskStatus.COMPLETED
+    assert task_state.current_iteration >= 2
+    assert "Completed after extension" in task_state.final_summary

@@ -19,12 +19,12 @@ models:
       thinking_level: "high"
       fallback_model: "claude-3-5-sonnet-20241022"
     agy:
-      model: "gemini-3.1-pro-high"
+      model: "gemini-2.5-pro"
       thinking_level: "high"
-      fallback_model: "gemini-3.8-flash-high"
+      fallback_model: "gemini-2.0-flash"
   executors:
     agy:
-      model: "gemini-3.8-flash-high"
+      model: "gemini-2.0-flash"
       thinking_level: "medium"
     cursor:
       model: "claude-3.7-sonnet"
@@ -33,7 +33,7 @@ models:
       model: "claude-3-5-haiku-20241022"
       thinking_level: "low"
   subagents:
-    default_model: "gemini-3.8-flash-medium"
+    default_model: "gemini-2.0-flash"
     default_thinking_level: "low"
     roles:
       reviewer:
@@ -41,11 +41,11 @@ models:
         thinking_level: "high"
         description: "Reviews code changes, checks edge cases and security"
       tester:
-        model: "gemini-3.8-flash-low"
+        model: "gemini-2.0-flash-lite"
         thinking_level: "low"
         description: "Executes and diagnoses unit and regression tests"
       researcher:
-        model: "gemini-3.1-pro-high"
+        model: "gemini-2.5-pro"
         thinking_level: "medium"
         description: "Researches repository patterns and external documentation"
 

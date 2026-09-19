@@ -7,18 +7,32 @@ from typing import Optional
 from orchestrator.state import TaskState
 
 
-def estimate_iteration_tokens(rec) -> int:
-    """Approximate tokens consumed during an iteration (chars // 4)."""
+def estimate_iteration_tokens(rec, base_context_tokens: int = 1500) -> int:
+    """Accurately approximate tokens consumed during an iteration including prompt context and thinking."""
     chars = len(rec.instruction or "") + len(rec.lead_decision.get("analysis", "") or "")
     if rec.execution_result:
         chars += len(rec.execution_result.output or "") + len(rec.execution_result.error or "")
-    return max(1, chars // 4)
+    text_tokens = max(1, chars // 4)
+
+    thinking_tokens = 0
+    t_level = rec.lead_decision.get("thinking_level")
+    if t_level:
+        from orchestrator.models_config import map_thinking_to_tokens
+        thinking_tokens = map_thinking_to_tokens(t_level) or 0
+
+    return text_tokens + base_context_tokens + thinking_tokens
+
+
+def estimate_token_cost_usd(tokens: int, blended_rate_per_k: float = 0.006) -> float:
+    """Estimate USD cost from token count (~$6 per million tokens blended average)."""
+    return round((tokens / 1000.0) * blended_rate_per_k, 4)
 
 
 def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None) -> str:
     """Produce a structured Markdown report from a TaskState."""
 
     total_est_tokens = sum(estimate_iteration_tokens(rec) for rec in task_state.iterations)
+    total_cost_usd = estimate_token_cost_usd(total_est_tokens)
 
     lines = [
         f"# Task Report: {task_state.goal}",
@@ -32,7 +46,7 @@ def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None
         f"- **Started**: {task_state.start_time}",
         f"- **Completed**: {task_state.end_time or 'In Progress'}",
         f"- **Iterations Completed**: {len(task_state.iterations)} / {task_state.max_iterations}",
-        f"- **Estimated Token Usage**: ~{total_est_tokens:,} tokens",
+        f"- **Estimated Token Usage**: ~{total_est_tokens:,} tokens (~${total_cost_usd:.4f} USD)",
         "",
         "## Summary",
         "",
@@ -61,8 +75,11 @@ def generate_task_report(task_state: TaskState, dest_path: Optional[Path] = None
             f"- **Safety Checks**: {'✅ Passed' if rec.safety_passed else f'❌ Blocked ({rec.safety_message})'}",
             f"- **Verification Tests**: {'✅ Passed' if rec.tests_passed is True else ('❌ Failed' if rec.tests_passed is False else 'N/A')}",
             f"- **Files Modified**: {', '.join(f'`{f}`' for f in rec.files_changed) if rec.files_changed else 'None'}",
-            "",
         ])
+        if rec.metrics:
+            m_strs = [f"{k}={v}" for k, v in sorted(rec.metrics.items())]
+            lines.append(f"- **Metrics**: {', '.join(m_strs)}")
+        lines.append("")
 
     lines.extend([
         "## Files Changed",

@@ -133,3 +133,57 @@ def test_resolve_safety_config_merging():
     assert "configs/smoke.yml" in resolved.protected_paths
     # Project-level override for require_tests_before_stop
     assert resolved.require_tests_before_stop is False
+
+
+def test_rm_flag_exact_matching():
+    engine = SafetyEngine()
+
+    # rm with non-recursive flags should not be blocked
+    ok, _ = engine.validate_command("rm --preserve-root file.txt")
+    assert ok is True
+
+    ok, _ = engine.validate_command("rm -v -i myfile.txt")
+    assert ok is True
+
+    # rm with recursive flag on root should be blocked
+    ok, reason = engine.validate_command("rm --recursive /")
+    assert ok is False
+    assert "Blocked by safety policy" in reason
+
+    ok, reason = engine.validate_command("rm -r /")
+    assert ok is False
+    assert "Blocked by safety policy" in reason
+
+
+def test_context_aware_validation_prose_vs_shell():
+    engine = SafetyEngine(SafetyConfig(read_only=True))
+
+    # Natural language prompt containing words like "touch" or "rm" in prose
+    prose = "Please review the code and check where we touch the database or if we need to rm legacy helpers"
+    # When is_shell=False (delegated AI prompt), this should pass
+    ok, _ = engine.validate_command(prose, is_shell=False)
+    assert ok is True
+
+    # When is_shell=True (shell command in read-only), this must be blocked
+    ok, reason = engine.validate_command("rm -rf temp.txt", is_shell=True)
+    assert ok is False
+    assert "read-only mode" in reason
+
+
+def test_python_executor_interactive_mode(monkeypatch, tmp_path):
+    from executors.python_executor import PythonExecutor
+
+    # Test rejection
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    ex = PythonExecutor(interactive=True)
+    res = ex.execute("echo 'hello'", cwd=str(tmp_path))
+    assert res.success is False
+    assert res.exit_code == 130
+    assert "rejected" in res.error
+
+    # Test approval
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    res_ok = ex.execute("echo 'approved'", cwd=str(tmp_path))
+    assert res_ok.success is True
+    assert "approved" in res_ok.output
+

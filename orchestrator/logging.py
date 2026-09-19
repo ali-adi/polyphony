@@ -59,12 +59,15 @@ class TaskLogger:
 
     def _write_log(self, level: str, message: str):
         if self._logger:
-            if level == "INFO":
-                self._logger.info(message)
-            elif level == "WARNING":
+            lvl = level.upper()
+            if lvl in ("WARN", "WARNING"):
                 self._logger.warning(message)
-            elif level == "ERROR":
+            elif lvl in ("ERROR", "ERR", "CRITICAL"):
                 self._logger.error(message)
+            elif lvl == "DEBUG":
+                self._logger.debug(message)
+            else:
+                self._logger.info(message)
 
     def header(self, title: str):
         click.secho(f"\n{'=' * 60}", fg="cyan")
