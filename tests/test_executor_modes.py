@@ -26,3 +26,27 @@ def test_defaults_to_code():
 def test_unknown_mode_raises():
     with pytest.raises(ValueError):
         resolve_mode("yolo")
+
+
+from executors.claude_executor import ClaudeExecutor
+
+
+def test_claude_review_mode_is_plan_and_never_bypasses():
+    argv = ClaudeExecutor(binary_path="/bin/echo").build_argv(Mode.REVIEW)
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--permission-prompts" in argv
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_claude_code_mode_accepts_edits_and_never_bypasses():
+    argv = ClaudeExecutor(binary_path="/bin/echo").build_argv(Mode.CODE)
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_claude_argv_includes_print_flag_and_model():
+    argv = ClaudeExecutor(binary_path="/bin/echo").build_argv(Mode.CODE, model="claude-sonnet-5")
+    assert "-p" in argv
+    assert argv[argv.index("--model") + 1] == "claude-sonnet-5"

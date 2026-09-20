@@ -388,15 +388,32 @@ from executors.base import (
 Then in `execute`, replace everything from `cmd = [` through the `if read_only:` branch (currently lines 112–151) with:
 
 ```python
+        session_id = kwargs.get("session_id")
         cmd = self.build_argv(
             instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
             model=model,
-            session_id=kwargs.get("session_id"),
+            session_id=session_id,
             output_format=output_format,
             system_prompt=system_prompt,
             subagents=subagents,
         )
 ```
+
+**The separate `session_id = kwargs.get("session_id")` line is load-bearing
+— do not inline it into the `build_argv` call.** Further down in `execute()`,
+outside the region you are replacing, the metadata block reads the bare name:
+
+```python
+            if extracted_session:
+                metadata["session_id"] = extracted_session
+            elif session_id:                    # <- needs the local binding
+                metadata["session_id"] = session_id
+```
+
+Inlining it would leave `session_id` unbound in `execute()`'s scope, raising
+`NameError` on every invocation whose output does not itself contain a session
+id. The broad `except Exception` in `execute()` would swallow that into a
+silent `success=False` result rather than crashing, making it hard to spot.
 
 Leave the `env` / `MAX_THINKING_TOKENS` block and the `subprocess.run` call below it exactly as they are.
 

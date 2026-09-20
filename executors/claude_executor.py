@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from executors.base import (
     BaseExecutor,
     ExecutorResult,
+    Mode,
+    resolve_mode,
     _get_changed_files_via_git as _base_get_changed_files_via_git,
     _snapshot_file_states as _base_snapshot_file_states,
     detect_changed_files as _base_detect_changed_files,
@@ -87,6 +89,55 @@ class ClaudeExecutor(BaseExecutor):
     # Backwards compatibility alias
     check_quota_status = check_binary_health
 
+    _MODE_FLAGS = {
+        Mode.REVIEW: "plan",
+        Mode.CODE: "acceptEdits",
+    }
+
+    def build_argv(
+        self,
+        instruction_mode: Mode,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        output_format: str = "text",
+        system_prompt: Optional[str] = None,
+        subagents: Optional[Any] = None,
+    ) -> List[str]:
+        """Construct the full claude argv for one invocation.
+
+        Permissions are enforced by the CLI itself via --permission-mode.
+        --permission-prompts=none makes anything that would prompt fail
+        closed instead of hanging a non-interactive run forever.
+        """
+        cmd = [
+            self.binary_path,
+            "-p",
+            "--permission-mode", self._MODE_FLAGS[instruction_mode],
+            "--permission-prompts", "none",
+        ]
+
+        if session_id:
+            cmd.extend(["--resume", str(session_id)])
+        if model:
+            cmd.extend(["--model", str(model)])
+        if output_format and output_format != "text":
+            cmd.extend(["--output-format", output_format])
+        if system_prompt:
+            cmd.extend(["--system-prompt", system_prompt, "--system-prompt-snapshot", "on"])
+
+        if subagents:
+            agents_json = None
+            if hasattr(subagents, "to_claude_agents_json"):
+                agents_json = subagents.to_claude_agents_json()
+            elif isinstance(subagents, dict):
+                agents_json = json.dumps(subagents)
+            elif isinstance(subagents, str):
+                agents_json = subagents
+            if agents_json:
+                cmd.extend(["--agents", agents_json])
+
+        return cmd
+
     def execute(
         self,
         instruction: str,
@@ -112,43 +163,14 @@ class ClaudeExecutor(BaseExecutor):
         start_time = time.time()
         initial_snapshot = _snapshot_file_states(cwd)
 
-        cmd = [
-            self.binary_path,
-            "-p",
-            "--dangerously-skip-permissions",
-        ]
-
-        # Session continuation
-        session_id = kwargs.get("session_id")
-        continue_session = kwargs.get("continue_session", False)
-        if session_id:
-            cmd.extend(["--resume", str(session_id)])
-        elif continue_session:
-            cmd.append("--continue")
-
-        if model:
-            cmd.extend(["--model", str(model)])
-
-        # Handle subagents specification (--agents <json>)
-        if subagents:
-            agents_json = None
-            if hasattr(subagents, "to_claude_agents_json"):
-                agents_json = subagents.to_claude_agents_json()
-            elif isinstance(subagents, dict):
-                agents_json = json.dumps(subagents)
-            elif isinstance(subagents, str):
-                agents_json = subagents
-            if agents_json:
-                cmd.extend(["--agents", agents_json])
-
-        if output_format in ("json", "stream-json"):
-            cmd.extend(["--output-format", output_format])
-
-        if system_prompt:
-            cmd.extend(["--system-prompt", system_prompt, "--system-prompt-snapshot", "on"])
-
-        if read_only:
-            cmd.extend(["--tools", "Read,Bash"])
+        cmd = self.build_argv(
+            instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
+            model=model,
+            session_id=kwargs.get("session_id"),
+            output_format=output_format,
+            system_prompt=system_prompt,
+            subagents=subagents,
+        )
 
         env = os.environ.copy()
         if thinking_level is not None:
