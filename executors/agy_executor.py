@@ -218,7 +218,7 @@ class AgyExecutor(BaseExecutor):
                 duration_seconds=duration,
                 metadata={"timeout": True},
             )
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             duration = time.time() - start_time
             return ExecutorResult(
                 success=False,

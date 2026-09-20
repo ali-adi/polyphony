@@ -86,7 +86,7 @@ class CursorExecutor(BaseExecutor):
                 CursorExecutor._class_is_agent_ready = False
             else:
                 CursorExecutor._class_is_agent_ready = (res.returncode == 0)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             CursorExecutor._class_is_agent_ready = False
 
         return CursorExecutor._class_is_agent_ready
@@ -232,7 +232,7 @@ class CursorExecutor(BaseExecutor):
                 duration_seconds=duration,
                 metadata={"timeout": True},
             )
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             duration = time.time() - start_time
             return ExecutorResult(
                 success=False,
