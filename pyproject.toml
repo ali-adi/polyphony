@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polyphony"
-version = "0.1.0"
+version = "0.3.0.dev0"
 description = "Local-first, CLI-driven multi-agent orchestrator powered by Claude Code, AGY, and Cursor"
 readme = "README.md"
 license = { text = "MIT" }
