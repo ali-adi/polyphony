@@ -926,7 +926,7 @@ For `claude`, the current family is Claude 5: `claude-opus-5`, `claude-sonnet-5`
 
 - [ ] **Step 2: Update the config**
 
-In `projects/medicoder/project.yaml`, replace the `models:` block with the values confirmed in Step 1. Using the expected defaults:
+In `projects/medicoder/project.yaml`, replace the `models:` block with:
 
 ```yaml
 models:
@@ -936,11 +936,27 @@ models:
       thinking_level: "high"
   executors:
     agy:
-      model: "gemini-3.1-pro-high"
-      thinking_level: "high"
+      model: "gemini-3.8-flash-high"
+      thinking_level: "medium"
+    cursor:
+      model: "composer-2.5"
 ```
 
-Keep `gemini-3.1-pro-high` only if Step 1 confirmed `agy` still lists it; otherwise substitute what it reported.
+The choices follow the spec's quota-arbitrage design (§ "Operating model"):
+Claude Max is the scarce resource, so Claude does the reasoning at high
+thinking, and the cheap subscriptions do mechanical edits.
+
+- **agy → `gemini-3.8-flash-high`.** The config previously pinned
+  `gemini-3.1-pro-high`, the most expensive model agy offers, for *executor*
+  work — mechanical edits against a file list the lead already scoped. Flash is
+  the right tier for that. (If you want an open-weight option instead,
+  `gpt-oss-120b-medium` is also in agy's list.)
+- **cursor → `composer-2.5` is required, not a preference.** This account is out
+  of usage on cursor's default model. `--model auto` also fails, despite the
+  quota error text recommending it. `composer-2.5` is verified working.
+
+If Step 1's real output does not list one of these ids, substitute what it
+actually reported and say so in your report.
 
 - [ ] **Step 3: Verify the config still loads**
 
