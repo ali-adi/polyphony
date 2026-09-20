@@ -993,9 +993,36 @@ agy -p="Reply with exactly: POLYPHONY_OK" --mode plan --sandbox --add-dir <cwd>
 `--input-format text` is dropped entirely — it only governs stdin-driven
 invocations, and agy no longer reads stdin.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Update the three existing agy tests, then append the new ones**
 
-Append to `tests/test_executor_modes.py`:
+Changing `build_argv`'s signature breaks the three agy tests Task 4 wrote,
+which call it with `instruction_mode` first. **Update them first** — this step
+is not append-only.
+
+In `tests/test_executor_modes.py`, change these three existing call sites to
+pass a dummy instruction as the new first positional argument:
+
+```python
+def test_agy_review_mode_is_plan_and_sandboxed():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv("task", Mode.REVIEW, cwd="/tmp")
+```
+
+```python
+def test_agy_code_mode_accepts_edits_and_sandboxed():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv("task", Mode.CODE, cwd="/tmp")
+```
+
+```python
+def test_agy_passes_workspace_and_effort():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        "task", Mode.CODE, cwd="/tmp/work", effort="high"
+    )
+```
+
+Change only those three call lines. Leave each test's assertions untouched —
+they still test what they tested before.
+
+Then append the new tests:
 
 ```python
 def test_agy_attaches_prompt_to_p_flag():
@@ -1149,9 +1176,29 @@ cursor-agent -p --mode plan --trust --model composer-2.5 "Reply with exactly: PO
 -> stdout: POLYPHONY_OK    exit: 0
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Update the four existing cursor tests, then append the new ones**
 
-Append to `tests/test_executor_modes.py`:
+Changing `build_argv`'s signature breaks the four cursor tests Task 5 wrote,
+which call it with `instruction_mode` first. **Update them first** — this step
+is not append-only.
+
+In `tests/test_executor_modes.py`, change these four existing call sites to
+pass a dummy instruction as the new first positional argument:
+
+```python
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv("task", Mode.CODE)   # test_cursor_agent_binary_invokes_without_subcommand
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor").build_argv("task", Mode.CODE)         # test_legacy_cursor_binary_keeps_agent_subcommand
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv("task", Mode.REVIEW) # test_cursor_review_mode_is_plan_and_never_forces
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv("task", Mode.CODE)   # test_cursor_code_mode_forces_inside_sandbox
+```
+
+Change only those four call lines; leave each test's assertions untouched.
+
+One assertion deserves a check as you go: `test_cursor_agent_binary_invokes_without_subcommand`
+asserts `"agent" not in argv`. That still holds — `argv` is a list and the
+dummy instruction is `"task"`, so no element equals `"agent"`.
+
+Then append the new tests:
 
 ```python
 def test_cursor_review_mode_trusts_workspace():
