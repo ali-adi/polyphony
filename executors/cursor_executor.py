@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from executors.base import (
     BaseExecutor,
     ExecutorResult,
+    Mode,
+    resolve_mode,
     _get_changed_files_via_git as _base_get_changed_files_via_git,
     _snapshot_file_states as _base_snapshot_file_states,
     detect_changed_files as _base_detect_changed_files,
@@ -37,8 +39,12 @@ class CursorExecutor(BaseExecutor):
     _CACHE_TTL_SECONDS: float = 300.0
 
     def __init__(self, binary_path: Optional[str] = None):
+        if binary_path:
+            self.binary_path = binary_path
+            return
         candidate_paths = [
-            binary_path,
+            shutil.which("cursor-agent"),
+            os.path.expanduser("~/.local/bin/cursor-agent"),
             shutil.which("cursor"),
             "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
             os.path.expanduser("~/.local/bin/cursor"),
@@ -70,12 +76,11 @@ class CursorExecutor(BaseExecutor):
         # Test if cursor agent subcommand is installed and available
         try:
             CursorExecutor._class_last_checked = now
-            res = subprocess.run(
-                [self.binary_path, "agent", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            probe = [self.binary_path]
+            if self._uses_agent_subcommand():
+                probe.append("agent")
+            probe.append("--help")
+            res = subprocess.run(probe, capture_output=True, text=True, timeout=10)
             # If it prompts to install from web, agent binary is not locally ready
             if "cursor-agent not found" in res.stdout or "cursor-agent not found" in res.stderr:
                 CursorExecutor._class_is_agent_ready = False
@@ -102,6 +107,37 @@ class CursorExecutor(BaseExecutor):
             "details": "Cursor agent ready" if avail else "Cursor CLI or agent subcommand not ready",
         }
 
+    def _uses_agent_subcommand(self) -> bool:
+        """The legacy `cursor` binary needs an `agent` subcommand; `cursor-agent` does not."""
+        return Path(self.binary_path).name != "cursor-agent"
+
+    def build_argv(
+        self,
+        instruction_mode: Mode,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        output_format: str = "text",
+    ) -> List[str]:
+        """Construct the full cursor-agent argv for one invocation."""
+        cmd = [self.binary_path]
+        if self._uses_agent_subcommand():
+            cmd.append("agent")
+        cmd.append("-p")
+
+        if instruction_mode is Mode.REVIEW:
+            cmd.extend(["--mode", "plan"])
+        else:
+            cmd.extend(["-f", "--sandbox", "enabled"])
+
+        if session_id:
+            cmd.extend(["--resume", str(session_id)])
+        if model:
+            cmd.extend(["--model", str(model)])
+        if output_format and output_format != "text":
+            cmd.extend(["--output-format", output_format])
+
+        return cmd
+
     def execute(
         self,
         instruction: str,
@@ -126,9 +162,12 @@ class CursorExecutor(BaseExecutor):
         start_time = time.time()
         initial_snapshot = _snapshot_file_states(cwd)
 
-        cmd = [self.binary_path, "agent", "-p"]
-        if model:
-            cmd.extend(["--model", str(model)])
+        cmd = self.build_argv(
+            instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
+            model=model,
+            session_id=kwargs.get("session_id"),
+            output_format=kwargs.get("output_format", "text"),
+        )
 
         try:
             res = subprocess.run(

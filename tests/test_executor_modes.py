@@ -75,3 +75,33 @@ def test_agy_passes_workspace_and_effort():
     )
     assert argv[argv.index("--add-dir") + 1] == "/tmp/work"
     assert argv[argv.index("--effort") + 1] == "high"
+
+
+from executors.cursor_executor import CursorExecutor
+
+
+def test_cursor_agent_binary_invokes_without_subcommand():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(Mode.CODE)
+    assert argv[0] == "/usr/local/bin/cursor-agent"
+    assert argv[1] == "-p"
+    assert "agent" not in argv
+
+
+def test_legacy_cursor_binary_keeps_agent_subcommand():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor").build_argv(Mode.CODE)
+    assert argv[1] == "agent"
+    assert argv[2] == "-p"
+
+
+def test_cursor_review_mode_is_plan_and_never_forces():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(Mode.REVIEW)
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "-f" not in argv
+    assert "--yolo" not in argv
+
+
+def test_cursor_code_mode_forces_inside_sandbox():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(Mode.CODE)
+    assert "-f" in argv
+    assert argv[argv.index("--sandbox") + 1] == "enabled"
+    assert "--yolo" not in argv
