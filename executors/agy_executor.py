@@ -73,6 +73,7 @@ class AgyExecutor(BaseExecutor):
 
     def build_argv(
         self,
+        instruction: str,
         instruction_mode: Mode,
         cwd: str,
         model: Optional[str] = None,
@@ -89,8 +90,7 @@ class AgyExecutor(BaseExecutor):
         """
         cmd = [
             self.binary_path,
-            "-p",
-            "--input-format", "text",
+            f"-p={instruction}",
             "--mode", self._MODE_FLAGS[instruction_mode],
             "--sandbox",
             "--add-dir", cwd,
@@ -145,6 +145,7 @@ class AgyExecutor(BaseExecutor):
         session_id = kwargs.get("session_id") or kwargs.get("conversation_id")
 
         cmd = self.build_argv(
+            instruction,
             instruction_mode=resolve_mode(mode, read_only),
             cwd=cwd,
             model=model,
@@ -158,7 +159,7 @@ class AgyExecutor(BaseExecutor):
         try:
             res = subprocess.run(
                 cmd,
-                input=instruction,
+                input="",
                 cwd=cwd,
                 capture_output=True,
                 text=True,

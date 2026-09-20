@@ -259,8 +259,11 @@ def test_agy_executor_includes_print_flag(tmp_path, monkeypatch):
     agy_cmds = [c for c in captured_cmds if any("agy" in str(arg) for arg in c)]
     assert len(agy_cmds) >= 1
     agy_cmd = agy_cmds[0]
-    # Check that non-interactive -p / --print flag is present
-    assert "-p" in agy_cmd or "--print" in agy_cmd
+    # agy's -p is value-taking: the prompt must be attached as -p=<prompt>,
+    # or the next argv token is consumed as the prompt instead.
+    assert any(a.startswith("-p=") for a in agy_cmd), (
+        f"expected an attached -p=<prompt> token, got: {agy_cmd}"
+    )
     # Check session extraction
     assert res.metadata.get("session_id") == "conv-123"
 

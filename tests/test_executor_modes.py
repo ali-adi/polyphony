@@ -56,14 +56,14 @@ from executors.agy_executor import AgyExecutor
 
 
 def test_agy_review_mode_is_plan_and_sandboxed():
-    argv = AgyExecutor(binary_path="/bin/echo").build_argv(Mode.REVIEW, cwd="/tmp")
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv("task", Mode.REVIEW, cwd="/tmp")
     assert argv[argv.index("--mode") + 1] == "plan"
     assert "--sandbox" in argv
     assert "--dangerously-skip-permissions" not in argv
 
 
 def test_agy_code_mode_accepts_edits_and_sandboxed():
-    argv = AgyExecutor(binary_path="/bin/echo").build_argv(Mode.CODE, cwd="/tmp")
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv("task", Mode.CODE, cwd="/tmp")
     assert argv[argv.index("--mode") + 1] == "accept-edits"
     assert "--sandbox" in argv
     assert "--dangerously-skip-permissions" not in argv
@@ -71,7 +71,7 @@ def test_agy_code_mode_accepts_edits_and_sandboxed():
 
 def test_agy_passes_workspace_and_effort():
     argv = AgyExecutor(binary_path="/bin/echo").build_argv(
-        Mode.CODE, cwd="/tmp/work", effort="high"
+        "task", Mode.CODE, cwd="/tmp/work", effort="high"
     )
     assert argv[argv.index("--add-dir") + 1] == "/tmp/work"
     assert argv[argv.index("--effort") + 1] == "high"
@@ -105,3 +105,24 @@ def test_cursor_code_mode_forces_inside_sandbox():
     assert "-f" in argv
     assert argv[argv.index("--sandbox") + 1] == "enabled"
     assert "--yolo" not in argv
+
+
+def test_agy_attaches_prompt_to_p_flag():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        "do the thing", Mode.CODE, cwd="/tmp"
+    )
+    assert "-p=do the thing" in argv
+    assert "-p" not in argv, "bare -p would swallow the next flag as the prompt"
+
+
+def test_agy_drops_input_format_flag():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        "do the thing", Mode.CODE, cwd="/tmp"
+    )
+    assert "--input-format" not in argv
+
+
+def test_agy_prompt_survives_special_characters():
+    tricky = 'fix "auth.py" --now; echo $HOME'
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(tricky, Mode.CODE, cwd="/tmp")
+    assert f"-p={tricky}" in argv
