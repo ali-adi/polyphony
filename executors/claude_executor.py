@@ -163,10 +163,11 @@ class ClaudeExecutor(BaseExecutor):
         start_time = time.time()
         initial_snapshot = _snapshot_file_states(cwd)
 
+        session_id = kwargs.get("session_id")
         cmd = self.build_argv(
             instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
             model=model,
-            session_id=kwargs.get("session_id"),
+            session_id=session_id,
             output_format=output_format,
             system_prompt=system_prompt,
             subagents=subagents,
