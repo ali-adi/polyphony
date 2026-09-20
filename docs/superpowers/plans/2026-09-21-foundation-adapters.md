@@ -542,19 +542,51 @@ Then in `execute`, replace the `cmd = [...]` construction through the end of the
             from orchestrator.models_config import map_thinking_to_effort
             resolved_effort = map_thinking_to_effort(thinking_level)
 
+        session_id = kwargs.get("session_id") or kwargs.get("conversation_id")
+
         cmd = self.build_argv(
-            instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
+            instruction_mode=resolve_mode(mode, read_only),
             cwd=cwd,
             model=model,
             effort=resolved_effort,
-            session_id=kwargs.get("session_id") or kwargs.get("conversation_id"),
+            session_id=session_id,
             output_format=output_format,
             json_schema=kwargs.get("json_schema"),
             agent=kwargs.get("agent") or kwargs.get("subagent"),
         )
 ```
 
-Delete the now-duplicated effort-resolution code further down in `execute` if present, so effort is computed exactly once.
+Two details in that block are load-bearing:
+
+**`session_id` must be a separate local — do not inline it.** Further down in
+`execute()`, outside the region you are replacing, the metadata block reads the
+bare name:
+
+```python
+            if extracted_session:
+                metadata["session_id"] = extracted_session
+            elif session_id:                    # <- needs the local binding
+                metadata["session_id"] = session_id
+```
+
+Inlining it leaves `session_id` unbound in `execute()`'s scope, raising
+`NameError` on every invocation whose output does not contain a session id.
+`execute()`'s broad `except Exception` swallows that into a silent
+`success=False` result rather than crashing, which makes it hard to spot.
+
+**Use `resolve_mode(mode, read_only)` — the named parameter, not
+`kwargs.get("mode")`.** `AgyExecutor.execute()` already declares
+`mode: Optional[str] = None` in its signature, so a `mode=` argument binds to
+that parameter and never reaches `**kwargs`; `kwargs.get("mode")` would always
+be `None`. No caller in the codebase currently passes `mode=` to any executor,
+so binding the new `Mode` enum onto that existing parameter is safe. If someone
+later passes agy's raw `--mode` string (`"plan"` / `"accept-edits"`),
+`resolve_mode` raises a clear `ValueError` rather than silently doing the wrong
+thing.
+
+Delete the now-duplicated effort-resolution code further down in `execute` if present, so effort is computed exactly once. Also delete the old
+`if mode: cmd.extend(["--mode", mode])` / `elif read_only:` branch — mode is now
+handled entirely inside `build_argv`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
