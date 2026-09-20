@@ -165,3 +165,12 @@ class Workspace:
             f"  keep      git -C {self.repo} merge --squash {self.branch} && git -C {self.repo} commit\n"
             f"  discard   polyphony workspace clean {self.task_id}\n"
         )
+
+
+def prune(repo: str | Path) -> None:
+    """Clear worktree records whose directories are gone.
+
+    An interrupted run leaves a registration behind, and git then refuses
+    to reuse that path. Pruning at startup keeps repeat runs working.
+    """
+    run_git(["worktree", "prune"], cwd=str(Path(repo).resolve()))

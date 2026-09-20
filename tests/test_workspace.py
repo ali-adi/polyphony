@@ -1,5 +1,6 @@
 """Worktree lifecycle for task isolation."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -146,3 +147,24 @@ def test_handoff_does_not_modify_the_target_repo(repo, tmp_path):
         ["git", "log", "--oneline", "-1"], cwd=repo, capture_output=True, text=True
     )
     assert "agent work" not in log.stdout, "handoff must not land anything"
+
+
+from orchestrator.workspace import prune
+
+
+def test_prune_clears_orphaned_worktree_records(repo, tmp_path):
+    ws = Workspace.create("proj", "task-orphan", repo, root=tmp_path / "poly")
+    shutil.rmtree(ws.path)  # simulate an interrupted run
+
+    prune(repo)
+
+    listed = subprocess.run(
+        ["git", "worktree", "list"], cwd=repo, capture_output=True, text=True
+    )
+    assert "task-orphan" not in listed.stdout
+
+
+def test_prune_leaves_live_worktrees_alone(repo, tmp_path):
+    ws = Workspace.create("proj", "task-live", repo, root=tmp_path / "poly")
+    prune(repo)
+    assert ws.path.exists()
