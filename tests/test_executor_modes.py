@@ -50,3 +50,28 @@ def test_claude_argv_includes_print_flag_and_model():
     argv = ClaudeExecutor(binary_path="/bin/echo").build_argv(Mode.CODE, model="claude-sonnet-5")
     assert "-p" in argv
     assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
+
+
+from executors.agy_executor import AgyExecutor
+
+
+def test_agy_review_mode_is_plan_and_sandboxed():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(Mode.REVIEW, cwd="/tmp")
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--sandbox" in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_agy_code_mode_accepts_edits_and_sandboxed():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(Mode.CODE, cwd="/tmp")
+    assert argv[argv.index("--mode") + 1] == "accept-edits"
+    assert "--sandbox" in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_agy_passes_workspace_and_effort():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        Mode.CODE, cwd="/tmp/work", effort="high"
+    )
+    assert argv[argv.index("--add-dir") + 1] == "/tmp/work"
+    assert argv[argv.index("--effort") + 1] == "high"

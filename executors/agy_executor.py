@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from executors.base import (
     BaseExecutor,
     ExecutorResult,
+    Mode,
+    resolve_mode,
     _get_changed_files_via_git as _base_get_changed_files_via_git,
     _snapshot_file_states as _base_snapshot_file_states,
     detect_changed_files as _base_detect_changed_files,
@@ -64,6 +66,51 @@ class AgyExecutor(BaseExecutor):
             "details": "Ready" if avail else "Antigravity CLI (agy) binary not found",
         }
 
+    _MODE_FLAGS = {
+        Mode.REVIEW: "plan",
+        Mode.CODE: "accept-edits",
+    }
+
+    def build_argv(
+        self,
+        instruction_mode: Mode,
+        cwd: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        session_id: Optional[str] = None,
+        output_format: str = "text",
+        json_schema: Optional[str] = None,
+        agent: Optional[str] = None,
+    ) -> List[str]:
+        """Construct the full agy argv for one invocation.
+
+        --sandbox enables terminal restrictions; agy enforces the edit
+        policy itself via --mode, so no permission bypass is needed.
+        """
+        cmd = [
+            self.binary_path,
+            "-p",
+            "--input-format", "text",
+            "--mode", self._MODE_FLAGS[instruction_mode],
+            "--sandbox",
+            "--add-dir", cwd,
+        ]
+
+        if session_id:
+            cmd.extend(["--conversation", str(session_id)])
+        if output_format in ("text", "json", "stream-json"):
+            cmd.extend(["--output-format", output_format])
+        if json_schema:
+            cmd.extend(["--json-schema", str(json_schema)])
+        if agent:
+            cmd.extend(["--agent", str(agent)])
+        if model:
+            cmd.extend(["--model", str(model)])
+        if effort:
+            cmd.extend(["--effort", str(effort)])
+
+        return cmd
+
     def execute(
         self,
         instruction: str,
@@ -90,50 +137,23 @@ class AgyExecutor(BaseExecutor):
         start_time = time.time()
         initial_snapshot = _snapshot_file_states(cwd)
 
-        cmd = [
-            self.binary_path,
-            "-p",
-            "--input-format",
-            "text",
-            "--dangerously-skip-permissions",
-            "--add-dir",
-            cwd,
-        ]
-
-        # Session continuation
-        session_id = kwargs.get("session_id") or kwargs.get("conversation_id")
-        continue_session = kwargs.get("continue_session", False)
-        if session_id:
-            cmd.extend(["--conversation", str(session_id)])
-        elif continue_session:
-            cmd.append("--continue")
-
-        if output_format in ("text", "json", "stream-json"):
-            cmd.extend(["--output-format", output_format])
-
-        json_schema = kwargs.get("json_schema")
-        if json_schema:
-            cmd.extend(["--json-schema", str(json_schema)])
-
-        if mode:
-            cmd.extend(["--mode", mode])
-        elif read_only:
-            cmd.extend(["--mode", "plan"])
-
-        agent = kwargs.get("agent") or kwargs.get("subagent")
-        if agent:
-            cmd.extend(["--agent", str(agent)])
-
-        if model:
-            cmd.extend(["--model", str(model)])
-
         resolved_effort = effort
         if not resolved_effort and thinking_level is not None:
             from orchestrator.models_config import map_thinking_to_effort
             resolved_effort = map_thinking_to_effort(thinking_level)
 
-        if resolved_effort:
-            cmd.extend(["--effort", str(resolved_effort)])
+        session_id = kwargs.get("session_id") or kwargs.get("conversation_id")
+
+        cmd = self.build_argv(
+            instruction_mode=resolve_mode(mode, read_only),
+            cwd=cwd,
+            model=model,
+            effort=resolved_effort,
+            session_id=session_id,
+            output_format=output_format,
+            json_schema=kwargs.get("json_schema"),
+            agent=kwargs.get("agent") or kwargs.get("subagent"),
+        )
 
         try:
             res = subprocess.run(
