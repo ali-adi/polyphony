@@ -27,3 +27,16 @@ from orchestrator.state import StateManager
 )
 def test_annotations_resolve(func):
     typing.get_type_hints(func)
+
+
+def test_cli_version_matches_package_metadata():
+    """The CLI must not hardcode a version that can drift from pyproject."""
+    from importlib.metadata import version as pkg_version
+
+    from click.testing import CliRunner
+
+    from orchestrator.cli import cli
+
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert pkg_version("polyphony") in result.output

@@ -11,10 +11,11 @@ import yaml
 from migrate.scanner import scan_project
 from migrate.classifier import classify_items, ClassificationScope
 from migrate.translator import translate_project
+from orchestrator import __version__
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 def cli():
     """Polyphony: Local-first, multi-agent engineering orchestrator."""
     pass

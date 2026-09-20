@@ -14,7 +14,9 @@ def test_cli_version_and_help():
 
     result_v = runner.invoke(cli, ["--version"])
     assert result_v.exit_code == 0
-    assert "0.1.0" in result_v.output
+    from orchestrator import __version__
+
+    assert __version__ in result_v.output
 
 
 def test_project_list_empty(tmp_path):
