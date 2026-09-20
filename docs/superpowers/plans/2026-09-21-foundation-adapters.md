@@ -961,13 +961,469 @@ git commit -m "chore: refresh stale model identifiers in medicoder config"
 
 ---
 
+## Task 8: agy — attach the prompt to `-p`
+
+**Files:**
+- Modify: `executors/agy_executor.py` (`build_argv` signature and body; the `subprocess.run` call in `execute`)
+- Test: `tests/test_executor_modes.py` (append)
+
+**Interfaces:**
+- Consumes: `executors.base.Mode`.
+- Produces: `AgyExecutor.build_argv(instruction: str, instruction_mode: Mode, cwd: str, model=None, effort=None, session_id=None, output_format="text", json_schema=None, agent=None) -> list[str]`. **Note `instruction` is now the first parameter.**
+
+**Context — why this is needed.** Task 6's smoke test proved agy has never
+worked. Its `-p` flag is **value-taking, not boolean**: it consumes the next
+argv token as the prompt. The invocation `agy -p --input-format text ...`
+therefore made `--input-format` the prompt and ignored the real instruction
+piped on stdin. agy reports this explicitly:
+
+```
+Error: -p took "--input-format" as its prompt, so the intended prompt was
+left as an argument and ignored. Attach the prompt to the flag
+(-p='your prompt') and move --input-format elsewhere on the command line.
+```
+
+Verified working form:
+
+```
+agy -p="Reply with exactly: POLYPHONY_OK" --mode plan --sandbox --add-dir <cwd>
+-> stdout: POLYPHONY_OK    exit: 0
+```
+
+`--input-format text` is dropped entirely — it only governs stdin-driven
+invocations, and agy no longer reads stdin.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_executor_modes.py`:
+
+```python
+def test_agy_attaches_prompt_to_p_flag():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        "do the thing", Mode.CODE, cwd="/tmp"
+    )
+    assert "-p=do the thing" in argv
+    assert "-p" not in argv, "bare -p would swallow the next flag as the prompt"
+
+
+def test_agy_drops_input_format_flag():
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(
+        "do the thing", Mode.CODE, cwd="/tmp"
+    )
+    assert "--input-format" not in argv
+
+
+def test_agy_prompt_survives_special_characters():
+    tricky = 'fix "auth.py" --now; echo $HOME'
+    argv = AgyExecutor(binary_path="/bin/echo").build_argv(tricky, Mode.CODE, cwd="/tmp")
+    assert f"-p={tricky}" in argv
+```
+
+The third test matters because the prompt is now embedded in an argv token.
+It is still passed through `subprocess.run` as a list (never a shell string),
+so no quoting or escaping is needed — this test locks that in.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: 3 failures — `TypeError` about argument count, or `-p=...` not found.
+
+- [ ] **Step 3: Change build_argv**
+
+In `executors/agy_executor.py`, change the `build_argv` signature so
+`instruction` is the first parameter:
+
+```python
+    def build_argv(
+        self,
+        instruction: str,
+        instruction_mode: Mode,
+        cwd: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        session_id: Optional[str] = None,
+        output_format: str = "text",
+        json_schema: Optional[str] = None,
+        agent: Optional[str] = None,
+    ) -> List[str]:
+```
+
+and replace the opening `cmd = [...]` literal with:
+
+```python
+        cmd = [
+            self.binary_path,
+            f"-p={instruction}",
+            "--mode", self._MODE_FLAGS[instruction_mode],
+            "--sandbox",
+            "--add-dir", cwd,
+        ]
+```
+
+Leave everything below it (session, output_format, json_schema, agent, model,
+effort) unchanged.
+
+- [ ] **Step 4: Stop piping the instruction on stdin**
+
+In `execute`, pass the instruction to `build_argv` instead:
+
+```python
+        cmd = self.build_argv(
+            instruction,
+            instruction_mode=resolve_mode(mode, read_only),
+            cwd=cwd,
+            model=model,
+            effort=resolved_effort,
+            session_id=session_id,
+            output_format=output_format,
+            json_schema=kwargs.get("json_schema"),
+            agent=kwargs.get("agent") or kwargs.get("subagent"),
+        )
+```
+
+Then find the `subprocess.run(...)` call in `execute` and change
+`input=instruction` to `input=""`. Do not simply delete the argument —
+without it the subprocess inherits this process's stdin and can hang waiting
+for input that never arrives.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: `18 passed`
+
+- [ ] **Step 6: Verify nothing regressed**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: `237 passed, 3 deselected`
+
+- [ ] **Step 7: Prove it against the real binary**
+
+Run: `.venv/bin/python -m pytest tests/smoke -m smoke -v -k agy`
+Expected: **`1 passed`** — `test_agy_adapter_responds` now succeeds.
+
+This is the acceptance criterion. If it still fails, stop and report the exact
+stderr; do not adjust the test.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git commit -m "fix: attach prompt to agy -p flag instead of piping stdin
+
+agy's -p is value-taking, so the previous invocation made --input-format
+the prompt and silently ignored the real instruction. AgyExecutor has
+never successfully executed anything. Verified against the real binary." -- executors/agy_executor.py tests/test_executor_modes.py
+```
+
+---
+
+## Task 9: cursor — workspace trust and positional prompt
+
+**Files:**
+- Modify: `executors/cursor_executor.py` (`build_argv` signature and body; the `subprocess.run` call in `execute`)
+- Modify: `tests/smoke/test_adapter_smoke.py` (pin a model for the cursor test)
+- Test: `tests/test_executor_modes.py` (append)
+
+**Interfaces:**
+- Consumes: `executors.base.Mode`.
+- Produces: `CursorExecutor.build_argv(instruction: str, instruction_mode: Mode, model=None, session_id=None, output_format="text") -> list[str]`. **Note `instruction` is now the first parameter, and it is appended last in the returned argv.**
+
+**Context — three separate findings from Task 6, all verified.**
+
+1. **Workspace trust.** `--mode plan` alone hits a trust gate on a directory
+   cursor has not seen, and exits before reading any input:
+   `⚠ Workspace Trust Required ... Pass --trust, --yolo, or -f if you trust this
+   directory`. `--trust` ("Trust the current workspace without prompting") is
+   correct for REVIEW; `-f`/`--yolo` would also clear it but additionally
+   force-allow command execution, contradicting read-only intent. CODE mode
+   already passes `-f`, so it needs no change.
+2. **The prompt is positional.** Usage is `agent [options] [command]
+   [prompt...]`. Stdin is not read. This answers Open Question 1 in the spec.
+3. **The default model is out of quota on this account.** The smoke test must
+   pin `composer-2.5`, which is verified working. `--model auto` does **not**
+   work despite the quota error recommending it.
+
+Verified working form:
+
+```
+cursor-agent -p --mode plan --trust --model composer-2.5 "Reply with exactly: POLYPHONY_OK"
+-> stdout: POLYPHONY_OK    exit: 0
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_executor_modes.py`:
+
+```python
+def test_cursor_review_mode_trusts_workspace():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(
+        "analyze this", Mode.REVIEW
+    )
+    assert "--trust" in argv
+    assert "-f" not in argv, "--trust must not imply command execution"
+
+
+def test_cursor_code_mode_uses_force_not_trust():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(
+        "edit this", Mode.CODE
+    )
+    assert "-f" in argv, "-f already clears the workspace trust gate"
+
+
+def test_cursor_prompt_is_positional_and_last():
+    argv = CursorExecutor(binary_path="/usr/local/bin/cursor-agent").build_argv(
+        "do the thing", Mode.REVIEW
+    )
+    assert argv[-1] == "do the thing"
+```
+
+The last assertion is load-bearing: cursor parses `[options] [prompt...]`, so
+the instruction must come after every flag or it will be read as a flag value.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: 3 failures — `TypeError` about argument count, or `--trust` missing.
+
+- [ ] **Step 3: Change build_argv**
+
+In `executors/cursor_executor.py`, replace the whole `build_argv` method with:
+
+```python
+    def build_argv(
+        self,
+        instruction: str,
+        instruction_mode: Mode,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        output_format: str = "text",
+    ) -> List[str]:
+        """Construct the full cursor-agent argv for one invocation.
+
+        The prompt is positional and must be appended last: cursor parses
+        `agent [options] [prompt...]`, so an instruction placed earlier would
+        be consumed as a flag's value.
+        """
+        cmd = [self.binary_path]
+        if self._uses_agent_subcommand():
+            cmd.append("agent")
+        cmd.append("-p")
+
+        if instruction_mode is Mode.REVIEW:
+            cmd.extend(["--mode", "plan", "--trust"])
+        else:
+            cmd.extend(["-f", "--sandbox", "enabled"])
+
+        if session_id:
+            cmd.extend(["--resume", str(session_id)])
+        if model:
+            cmd.extend(["--model", str(model)])
+        if output_format and output_format != "text":
+            cmd.extend(["--output-format", output_format])
+
+        cmd.append(instruction)
+        return cmd
+```
+
+- [ ] **Step 4: Stop piping the instruction on stdin**
+
+In `execute`, pass the instruction to `build_argv`:
+
+```python
+        cmd = self.build_argv(
+            instruction,
+            instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
+            model=model,
+            session_id=kwargs.get("session_id"),
+            output_format=kwargs.get("output_format", "text"),
+        )
+```
+
+Then change `input=instruction` to `input=""` in the `subprocess.run(...)`
+call. Do not delete the argument — without it the subprocess inherits stdin
+and can hang.
+
+- [ ] **Step 5: Pin a working model in the cursor smoke test**
+
+In `tests/smoke/test_adapter_smoke.py`, add this constant below `PROMPT`:
+
+```python
+# This account is out of usage on cursor's default model, and --model auto
+# returns the same quota error despite the error text recommending it.
+# composer-2.5 is verified working.
+CURSOR_MODEL = "composer-2.5"
+```
+
+and add `model=CURSOR_MODEL,` to the `ex.execute(...)` call inside
+`test_cursor_adapter_responds`. Change nothing else in that file.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: `21 passed`
+
+- [ ] **Step 7: Verify nothing regressed**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: `240 passed, 3 deselected`
+
+- [ ] **Step 8: Prove it against the real binary**
+
+Run: `.venv/bin/python -m pytest tests/smoke -m smoke -v`
+Expected: **`3 passed`** — all three adapters now work.
+
+This is the acceptance criterion for the whole plan. If cursor still fails,
+stop and report the exact stdout/stderr; do not adjust the test.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git commit -m "fix: pass cursor prompt positionally and trust the workspace
+
+cursor-agent reads the prompt as a positional argument, not stdin, and
+gates unseen directories behind a workspace-trust prompt that exits
+before reading input. Review mode now passes --trust; code mode already
+passed -f, which clears the same gate. Smoke test pins composer-2.5
+because the default model is out of quota on this account." -- executors/cursor_executor.py tests/test_executor_modes.py tests/smoke/test_adapter_smoke.py
+```
+
+---
+
+## Task 10: stop reporting quota failures as successes
+
+**Files:**
+- Modify: `executors/cursor_executor.py` (the `ExecutorResult` construction in `execute`)
+- Test: `tests/test_executor_modes.py` (append)
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `CursorExecutor._detect_soft_failure(output: str) -> str | None` — returns a human-readable reason when the CLI reported a failure in its output despite a zero exit code, else `None`.
+
+**Context — a silent-corruption bug.** Task 6 established that `cursor-agent`
+**exits 0 when it is out of quota**, emitting the failure on stdout:
+
+```
+ActionRequiredError: Increase limits for faster responses You're out of usage.
+Switch to Auto or Composer 2.5, or ask your admin to increase your limit to continue.
+exit: 0
+```
+
+Every adapter derives `ExecutorResult.success` from `returncode == 0`. So a
+quota-exhausted cursor run is currently recorded as a **successful iteration
+that changed nothing** — and the lead reasoner would then reason from an empty
+result as though the work had been done. That is worse than a loud failure.
+
+This is scoped to cursor because it is the only CLI observed to do it. The
+general quota-signal design belongs to Plan 3; this task only stops the adapter
+from actively lying.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_executor_modes.py`:
+
+```python
+def test_cursor_detects_quota_failure_despite_zero_exit():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    out = (
+        "ActionRequiredError: Increase limits for faster responses You're out "
+        "of usage. Switch to Auto or Composer 2.5, or ask your admin to "
+        "increase your limit to continue."
+    )
+    assert ex._detect_soft_failure(out) is not None
+
+
+def test_cursor_does_not_flag_normal_output():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    assert ex._detect_soft_failure("POLYPHONY_OK") is None
+    assert ex._detect_soft_failure("") is None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: 2 failures — `AttributeError: ... has no attribute '_detect_soft_failure'`
+
+- [ ] **Step 3: Implement the detector**
+
+In `executors/cursor_executor.py`, add this method directly above `execute`:
+
+```python
+    # cursor-agent exits 0 even when it refuses to do the work, reporting the
+    # reason on stdout. These are the markers observed in real runs; add to
+    # this list only from evidence, never from guesswork.
+    _SOFT_FAILURE_MARKERS = (
+        "ActionRequiredError",
+        "out of usage",
+        "Workspace Trust Required",
+    )
+
+    def _detect_soft_failure(self, output: str) -> Optional[str]:
+        """Detect a failure the CLI reported in its output despite exit code 0."""
+        if not output:
+            return None
+        for marker in self._SOFT_FAILURE_MARKERS:
+            if marker in output:
+                return f"cursor-agent reported a failure in its output: {marker}"
+        return None
+```
+
+- [ ] **Step 4: Apply it when building the result**
+
+In `execute`, find where `ExecutorResult` is constructed after a successful
+`subprocess.run`. Immediately before that construction, insert:
+
+```python
+            soft_failure = self._detect_soft_failure(output)
+```
+
+Then change the `success=` argument from `(res.returncode == 0)` to
+`(res.returncode == 0 and soft_failure is None)`, and change the `error=`
+argument so a soft failure surfaces:
+
+```python
+                error=error or soft_failure,
+```
+
+Leave every other field unchanged.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
+Expected: `23 passed`
+
+- [ ] **Step 6: Verify nothing regressed**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: `242 passed, 3 deselected`
+
+- [ ] **Step 7: Confirm the real smoke test still passes**
+
+Run: `.venv/bin/python -m pytest tests/smoke -m smoke -v`
+Expected: `3 passed` — the detector must not produce false positives on real
+successful output.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git commit -m "fix: stop cursor adapter reporting quota failures as successes
+
+cursor-agent exits 0 when out of usage, emitting ActionRequiredError on
+stdout. Deriving success from the exit code alone recorded these as
+successful iterations that changed nothing, which the lead reasoner
+would then reason from. Markers are taken from observed runs only." -- executors/cursor_executor.py tests/test_executor_modes.py
+```
+
+---
+
 ## Done criteria
 
-- [ ] `.venv/bin/python -m pytest -q` → 234 passed, zero smoke tests selected
-- [ ] `.venv/bin/python -m pytest tests/smoke -m smoke -v` → executed, results recorded verbatim in `2026-09-21-smoke-results.md`
+- [ ] `.venv/bin/python -m pytest -q` → 242 passed, 3 deselected
+- [ ] **`.venv/bin/python -m pytest tests/smoke -m smoke -v` → 3 passed.** All
+      three adapters demonstrably invoke their real CLI binaries. This is the
+      plan's reason for existing; it is not met by assertion.
 - [ ] No occurrence of `--dangerously-skip-permissions` anywhere: `grep -rn "dangerously-skip" executors/` returns nothing
 - [ ] `CursorExecutor().is_available()` → `True` on a machine with `cursor-agent` installed
-- [ ] Seven commits on `redesign-spec`, none containing AI attribution
+- [ ] No adapter reports `success=True` on a run the CLI itself said failed
+- [ ] All commits on `redesign-spec`, none containing AI attribution
 
 ## What this plan deliberately does not do
 
