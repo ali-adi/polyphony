@@ -60,3 +60,44 @@ def test_remove_leaves_no_trace(repo, tmp_path):
         cwd=repo, capture_output=True, text=True,
     )
     assert branches.stdout.strip() == "", "branch should be deleted on removal"
+
+
+from orchestrator.workspace import ProvisionError
+
+
+def test_clone_mode_materializes_a_gitignored_path(repo, tmp_path):
+    ws = Workspace.create("proj", "task-p1", repo, root=tmp_path / "poly")
+    ws.provision([{"path": "env/", "mode": "clone"}])
+    assert (ws.path / "env" / "bin" / "marker").exists()
+
+
+def test_clone_is_a_copy_not_a_link(repo, tmp_path):
+    ws = Workspace.create("proj", "task-p2", repo, root=tmp_path / "poly")
+    ws.provision([{"path": "env/", "mode": "clone"}])
+    marker = ws.path / "env" / "bin" / "marker"
+    assert not marker.is_symlink()
+    marker.write_text("changed in worktree\n", encoding="utf-8")
+    original = repo / "env" / "bin" / "marker"
+    assert original.read_text(encoding="utf-8") == "venv\n", (
+        "a clone must not write through to the source"
+    )
+
+
+def test_link_mode_creates_a_symlink(repo, tmp_path):
+    ws = Workspace.create("proj", "task-p3", repo, root=tmp_path / "poly")
+    ws.provision([{"path": "env/", "mode": "link"}])
+    assert (ws.path / "env").is_symlink()
+
+
+def test_missing_source_path_is_fatal(repo, tmp_path):
+    ws = Workspace.create("proj", "task-p4", repo, root=tmp_path / "poly")
+    with pytest.raises(ProvisionError) as exc:
+        ws.provision([{"path": "does_not_exist/", "mode": "clone"}])
+    assert "does_not_exist" in str(exc.value)
+
+
+def test_escaping_paths_are_refused(repo, tmp_path):
+    ws = Workspace.create("proj", "task-p5", repo, root=tmp_path / "poly")
+    for bad in ("../outside", "/etc"):
+        with pytest.raises(ProvisionError):
+            ws.provision([{"path": bad, "mode": "clone"}])
