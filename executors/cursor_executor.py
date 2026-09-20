@@ -145,6 +145,24 @@ class CursorExecutor(BaseExecutor):
         cmd.append(instruction)
         return cmd
 
+    # cursor-agent exits 0 even when it refuses to do the work, reporting the
+    # reason on stdout. These are the markers observed in real runs; add to
+    # this list only from evidence, never from guesswork.
+    _SOFT_FAILURE_MARKERS = (
+        "ActionRequiredError",
+        "out of usage",
+        "Workspace Trust Required",
+    )
+
+    def _detect_soft_failure(self, output: str) -> Optional[str]:
+        """Detect a failure the CLI reported in its output despite exit code 0."""
+        if not output:
+            return None
+        for marker in self._SOFT_FAILURE_MARKERS:
+            if marker in output:
+                return f"cursor-agent reported a failure in its output: {marker}"
+        return None
+
     def execute(
         self,
         instruction: str,
@@ -192,11 +210,12 @@ class CursorExecutor(BaseExecutor):
             output = res.stdout.strip()
             error = res.stderr.strip() if res.returncode != 0 else None
 
+            soft_failure = self._detect_soft_failure(output)
             return ExecutorResult(
-                success=(res.returncode == 0),
+                success=(res.returncode == 0 and soft_failure is None),
                 executor_name=self.name,
                 output=output,
-                error=error,
+                error=error or soft_failure,
                 exit_code=res.returncode,
                 duration_seconds=duration,
                 files_changed=newly_changed,

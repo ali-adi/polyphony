@@ -148,3 +148,19 @@ def test_cursor_prompt_is_positional_and_last():
         "do the thing", Mode.REVIEW
     )
     assert argv[-1] == "do the thing"
+
+
+def test_cursor_detects_quota_failure_despite_zero_exit():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    out = (
+        "ActionRequiredError: Increase limits for faster responses You're out "
+        "of usage. Switch to Auto or Composer 2.5, or ask your admin to "
+        "increase your limit to continue."
+    )
+    assert ex._detect_soft_failure(out) is not None
+
+
+def test_cursor_does_not_flag_normal_output():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    assert ex._detect_soft_failure("POLYPHONY_OK") is None
+    assert ex._detect_soft_failure("") is None
