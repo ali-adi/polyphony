@@ -38,6 +38,7 @@ Repository = "https://github.com/ali-adi/polyphony"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.6.0",
 ]
 
 [project.scripts]
@@ -56,3 +57,13 @@ markers = [
     "smoke: spawns real CLI binaries and consumes subscription quota (deselected by default; run with -m smoke)",
 ]
 addopts = "-m 'not smoke'"
+
+[tool.ruff]
+target-version = "py311"
+exclude = [".venv", "env", "medicoder", "migration"]
+
+[tool.ruff.lint]
+# Bug-class rules only for now. F401 (unused imports, 149 findings) and F841
+# (unused locals, 16 findings) are deliberately deferred: most live in the
+# orphan modules a later plan deletes, so fixing them now is wasted work.
+select = ["F821", "F811"]
