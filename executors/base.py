@@ -91,6 +91,36 @@ class ExecutorStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class Mode(str, Enum):
+    """How much authority an executor is granted for a single invocation.
+
+    REVIEW maps onto each CLI's native read-only/plan mode: the agent may
+    read and reason but may not edit. CODE maps onto each CLI's
+    accept-edits mode: edits proceed without an interactive prompt.
+    """
+    REVIEW = "review"
+    CODE = "code"
+
+
+def resolve_mode(mode: "Mode | str | None" = None, read_only: bool = False) -> Mode:
+    """Resolve an explicit mode, falling back to the legacy read_only flag.
+
+    Callers not yet migrated off `read_only=` keep working: read_only=True
+    becomes REVIEW. An explicit `mode` always wins.
+    """
+    if mode is not None:
+        if isinstance(mode, Mode):
+            return mode
+        try:
+            return Mode(str(mode).strip().lower())
+        except ValueError:
+            raise ValueError(
+                f"Unknown executor mode {mode!r}; expected one of: "
+                f"{', '.join(m.value for m in Mode)}"
+            ) from None
+    return Mode.REVIEW if read_only else Mode.CODE
+
+
 class ExecutorResult(BaseModel):
     """Normalized result returned by any executor engine conforming to Section 6 schema."""
     success: bool = True
