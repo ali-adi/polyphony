@@ -6,7 +6,7 @@
 
 **Architecture:** Replace the `read_only: bool` knob with an explicit `Mode` enum (`REVIEW` / `CODE`) defined once in `executors/base.py`. Each adapter maps that mode onto its own CLI's native permission flags, so the CLI enforces permissions instead of Polyphony bypassing them with `--dangerously-skip-permissions` and re-implementing a weaker check in Python. Add a `smoke` pytest marker for tests that spawn the real binaries; these are excluded from the default run because they consume subscription quota.
 
-**Tech Stack:** Python 3.11+, pytest 8, pydantic 2, `subprocess`. External binaries: `claude`, `agy`, `cursor-agent`.
+**Tech Stack:** Python 3.11+, pytest 9.1.1 (venv), pydantic 2, `subprocess`. External binaries: `claude`, `agy`, `cursor-agent`.
 
 **Spec:** `docs/superpowers/specs/2026-09-21-polyphony-redesign-design.md` (§3 "Executors & the quota ledger")
 
@@ -117,22 +117,38 @@ addopts = "-m 'not smoke'"
 
 - [ ] **Step 4: Verify the fixture works and smoke is deselected**
 
-Create a temporary throwaway check — add this to the bottom of `tests/smoke/conftest.py`, run it, then delete it:
+The self-check must live in a real test file. pytest only collects test
+functions from files matching `test_*.py` / `*_test.py`; it loads
+`conftest.py` for fixtures but never scans it for tests, so a marked
+function placed there would silently never run.
+
+Create a temporary file `tests/smoke/test_selfcheck.py`:
 
 ```python
+import pytest
+
+
 @pytest.mark.smoke
-def test_fixture_selfcheck(scratch_repo):
+def test_scratch_repo_is_a_real_git_repo(scratch_repo):
     assert (scratch_repo / "hello.py").exists()
     assert (scratch_repo / ".git").exists()
 ```
 
 Run: `.venv/bin/python -m pytest tests/smoke -q`
-Expected: `no tests ran` (or all deselected) — proving `addopts` excludes smoke.
+Expected: `1 deselected` — proving `addopts = -m 'not smoke'` excludes it.
 
 Run: `.venv/bin/python -m pytest tests/smoke -q -m smoke`
-Expected: `1 passed` — proving the fixture builds a real repo.
+Expected: `1 passed` — proving the fixture builds a real repo **and** that a
+command-line `-m` overrides the one in `addopts`.
 
-Now delete `test_fixture_selfcheck` from `conftest.py` (tests do not belong in conftest).
+Now delete the file:
+
+```bash
+rm tests/smoke/test_selfcheck.py
+```
+
+It has served its purpose; Task 6 adds the permanent smoke tests that use
+this fixture.
 
 - [ ] **Step 5: Verify the existing suite still passes**
 
