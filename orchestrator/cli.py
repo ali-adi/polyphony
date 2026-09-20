@@ -242,6 +242,64 @@ def project_inspect(name: str, orch_root: str):
 
 
 
+@cli.group()
+def workspace():
+    """Create, list, and clean isolated task workspaces."""
+
+
+@workspace.command("create")
+@click.argument("project")
+@click.argument("task_id")
+@click.option("--repo", required=True, help="Path to the target repository.")
+@click.option("--root", default=None, help="Where workspaces live (default: ~/.polyphony).")
+def workspace_create(project, task_id, repo, root):
+    """Create a provisioned worktree for a task."""
+    from pathlib import Path as _Path
+    from orchestrator.workspace import Workspace, prune
+
+    prune(repo)
+    ws = Workspace.create(project, task_id, repo, root=_Path(root) if root else None)
+    click.echo(f"workspace {task_id}")
+    click.echo(f"  path    {ws.path}")
+    click.echo(f"  branch  {ws.branch}")
+
+
+@workspace.command("list")
+@click.option("--repo", required=True, help="Path to the target repository.")
+def workspace_list(repo):
+    """List worktrees registered for a repository."""
+    from orchestrator.guard import run_git
+
+    res = run_git(["worktree", "list"], cwd=repo)
+    click.echo(res.stdout.rstrip() or "No worktrees.")
+
+
+@workspace.command("clean")
+@click.argument("task_id")
+@click.option("--repo", required=True, help="Path to the target repository.")
+@click.option("--root", default=None, help="Where workspaces live (default: ~/.polyphony).")
+def workspace_clean(task_id, repo, root):
+    """Remove a task's worktree and its branch."""
+    from pathlib import Path as _Path
+    from orchestrator.workspace import DEFAULT_ROOT, Workspace
+
+    base = _Path(root) if root else DEFAULT_ROOT
+    repo_path = _Path(repo).resolve()
+    # Reconstruct the handle; project name is not needed to remove by path.
+    matches = list((base / "worktrees").glob(f"*/{task_id}"))
+    if not matches:
+        raise click.ClickException(f"No workspace found for task {task_id}.")
+    ws = Workspace(
+        task_id=task_id,
+        project=matches[0].parent.name,
+        repo=repo_path,
+        path=matches[0],
+        branch=f"polyphony/{task_id}",
+    )
+    ws.remove()
+    click.echo(f"Removed workspace {task_id} and branch {ws.branch}.")
+
+
 @cli.command("start")
 @click.argument("project_name")
 @click.option("--goal", "-g", required=True, help="Task objective or goal description")
