@@ -101,3 +101,48 @@ def test_escaping_paths_are_refused(repo, tmp_path):
     for bad in ("../outside", "/etc"):
         with pytest.raises(ProvisionError):
             ws.provision([{"path": bad, "mode": "clone"}])
+
+
+def _commit_in(ws, name: str, body: str):
+    (ws.path / name).write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=ws.path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "-m", "agent work"],
+        cwd=ws.path, check=True,
+    )
+
+
+def test_changed_files_lists_agent_edits(repo, tmp_path):
+    ws = Workspace.create("proj", "task-h1", repo, root=tmp_path / "poly")
+    _commit_in(ws, "new.py", "y = 2\n")
+    assert "new.py" in ws.changed_files()
+
+
+def test_handoff_offers_squash_not_plain_merge(repo, tmp_path):
+    ws = Workspace.create("proj", "task-h2", repo, root=tmp_path / "poly")
+    _commit_in(ws, "new.py", "y = 2\n")
+    text = ws.handoff()
+    assert "merge --squash polyphony/task-h2" in text
+    assert "git merge polyphony" not in text, "a plain merge would leak the branch name"
+
+
+def test_handoff_names_review_and_discard(repo, tmp_path):
+    ws = Workspace.create("proj", "task-h3", repo, root=tmp_path / "poly")
+    _commit_in(ws, "new.py", "y = 2\n")
+    text = ws.handoff()
+    assert str(ws.path) in text
+    assert "clean" in text
+
+
+def test_handoff_does_not_modify_the_target_repo(repo, tmp_path):
+    ws = Workspace.create("proj", "task-h4", repo, root=tmp_path / "poly")
+    _commit_in(ws, "new.py", "y = 2\n")
+    ws.handoff()
+    res = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True
+    )
+    assert res.stdout.strip() == ""
+    log = subprocess.run(
+        ["git", "log", "--oneline", "-1"], cwd=repo, capture_output=True, text=True
+    )
+    assert "agent work" not in log.stdout, "handoff must not land anything"

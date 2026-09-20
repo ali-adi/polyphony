@@ -127,3 +127,41 @@ class Workspace:
 
             provisioned.append(rel)
         return provisioned
+
+    def _base_ref(self) -> str:
+        """The commit this worktree branched from."""
+        res = run_git(["merge-base", "HEAD", self.branch], cwd=str(self.repo))
+        return res.stdout.strip() or "HEAD"
+
+    def changed_files(self) -> list[str]:
+        """Files the agent changed, relative to the branch point."""
+        res = run_git(
+            ["diff", "--name-only", f"{self._base_ref()}..{self.branch}"],
+            cwd=str(self.repo),
+        )
+        return [line for line in res.stdout.splitlines() if line.strip()]
+
+    def diff_stat(self) -> str:
+        res = run_git(
+            ["diff", "--stat", f"{self._base_ref()}..{self.branch}"],
+            cwd=str(self.repo),
+        )
+        return res.stdout.rstrip()
+
+    def handoff(self) -> str:
+        """The operator-facing block. Polyphony never lands work itself.
+
+        Squash is offered rather than a plain merge: a merge commit would
+        record the branch name, and agent-authored commit messages inside
+        the branch would enter public history.
+        """
+        files = self.changed_files()
+        summary = ", ".join(files[:4]) + ("…" if len(files) > 4 else "") if files else "none"
+        return (
+            f"  changed   {summary}\n"
+            f"\n"
+            f"  review    git -C {self.repo} diff {self._base_ref()}..{self.branch}\n"
+            f"  worktree  {self.path}\n"
+            f"  keep      git -C {self.repo} merge --squash {self.branch} && git -C {self.repo} commit\n"
+            f"  discard   polyphony workspace clean {self.task_id}\n"
+        )
