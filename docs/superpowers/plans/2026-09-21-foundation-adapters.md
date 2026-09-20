@@ -965,7 +965,8 @@ git commit -m "chore: refresh stale model identifiers in medicoder config"
 
 **Files:**
 - Modify: `executors/agy_executor.py` (`build_argv` signature and body; the `subprocess.run` call in `execute`)
-- Test: `tests/test_executor_modes.py` (append)
+- Modify: `tests/test_executor_modes.py` (update 3 existing agy tests, append 3 new)
+- Modify: `tests/test_phase2_features.py:263` (one assertion that encoded the broken `-p` form)
 
 **Interfaces:**
 - Consumes: `executors.base.Mode`.
@@ -1118,12 +1119,39 @@ for input that never arrives.
 Run: `.venv/bin/python -m pytest tests/test_executor_modes.py -q`
 Expected: `18 passed`
 
-- [ ] **Step 6: Verify nothing regressed**
+- [ ] **Step 6: Update the pre-existing test that asserted the broken form**
+
+`tests/test_phase2_features.py::test_agy_executor_includes_print_flag` asserts
+a bare `"-p"` token is present in the argv. That is now structurally
+impossible, and *was itself asserting the bug* — a bare `-p` is precisely what
+swallows the following flag as the prompt.
+
+At `tests/test_phase2_features.py:263`, replace:
+
+```python
+    # Check that non-interactive -p / --print flag is present
+    assert "-p" in agy_cmd or "--print" in agy_cmd
+```
+
+with:
+
+```python
+    # agy's -p is value-taking: the prompt must be attached as -p=<prompt>,
+    # or the next argv token is consumed as the prompt instead.
+    assert any(a.startswith("-p=") for a in agy_cmd), (
+        f"expected an attached -p=<prompt> token, got: {agy_cmd}"
+    )
+```
+
+Change nothing else in that file. The surrounding assertions (session
+extraction, `res.success`) still hold and must keep passing.
+
+- [ ] **Step 7: Verify nothing regressed**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: `237 passed, 3 deselected`
 
-- [ ] **Step 7: Prove it against the real binary**
+- [ ] **Step 8: Prove it against the real binary**
 
 Run: `.venv/bin/python -m pytest tests/smoke -m smoke -v -k agy`
 Expected: **`1 passed`** — `test_agy_adapter_responds` now succeeds.
@@ -1131,14 +1159,14 @@ Expected: **`1 passed`** — `test_agy_adapter_responds` now succeeds.
 This is the acceptance criterion. If it still fails, stop and report the exact
 stderr; do not adjust the test.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git commit -m "fix: attach prompt to agy -p flag instead of piping stdin
 
 agy's -p is value-taking, so the previous invocation made --input-format
 the prompt and silently ignored the real instruction. AgyExecutor has
-never successfully executed anything. Verified against the real binary." -- executors/agy_executor.py tests/test_executor_modes.py
+never successfully executed anything. Verified against the real binary." -- executors/agy_executor.py tests/test_executor_modes.py tests/test_phase2_features.py
 ```
 
 ---
