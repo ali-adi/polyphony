@@ -661,20 +661,38 @@ Expected: FAIL — `AttributeError: 'CursorExecutor' object has no attribute 'bu
 
 - [ ] **Step 3: Fix binary discovery**
 
-In `executors/cursor_executor.py`, replace the `candidate_paths` list in `__init__` (lines 40–45) with:
+In `executors/cursor_executor.py`, replace the **entire body** of `__init__`
+with:
 
 ```python
+    def __init__(self, binary_path: Optional[str] = None):
+        if binary_path:
+            self.binary_path = binary_path
+            return
         candidate_paths = [
-            binary_path,
             shutil.which("cursor-agent"),
             os.path.expanduser("~/.local/bin/cursor-agent"),
             shutil.which("cursor"),
             "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
             os.path.expanduser("~/.local/bin/cursor"),
         ]
+        self.binary_path = next((p for p in candidate_paths if p and Path(p).exists()), None)
 ```
 
-`cursor-agent` is tried first so the modern binary wins when both exist.
+Two changes here, both necessary:
+
+**`cursor-agent` is tried first** so the modern binary wins when both exist.
+
+**An explicitly-passed `binary_path` is honored unconditionally.** The original
+put `binary_path` inside the list and filtered the whole list through
+`Path(p).exists()`, so an explicit path that does not exist on disk was
+silently discarded and replaced by whatever binary discovery happened to find.
+That is wrong on its own terms — configuring an explicit path and silently
+running a *different* binary is very hard to debug — and it is inconsistent
+with the other two adapters, which both do `binary_path or shutil.which(...)`
+and honor an injection unconditionally. It also makes this task's own tests
+unpassable, since they inject fake paths and assert those paths appear in the
+argv.
 
 - [ ] **Step 4: Implement build_argv**
 
@@ -728,7 +746,9 @@ In `execute`, replace `cmd = [self.binary_path, "agent", "-p"]` and the two `if 
 
 - [ ] **Step 6: Fix the health check for the new binary**
 
-In `check_binary_health`, replace the `[self.binary_path, "agent", "--help"]` subprocess call with:
+`CursorExecutor` has no `check_binary_health` method — unlike the claude and
+agy adapters, its probe logic lives inline inside `is_available()`. Make this
+change there. Replace the `[self.binary_path, "agent", "--help"]` subprocess call with:
 
 ```python
             probe = [self.binary_path]
