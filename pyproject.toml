@@ -52,3 +52,7 @@ include = ["orchestrator*", "executors*", "migrate*"]
 pythonpath = ["."]
 testpaths = ["tests"]
 norecursedirs = ["medicoder", "migration", ".venv", "env"]
+markers = [
+    "smoke: spawns real CLI binaries and consumes subscription quota (deselected by default; run with -m smoke)",
+]
+addopts = "-m 'not smoke'"
