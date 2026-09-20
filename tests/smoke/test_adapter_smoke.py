@@ -15,6 +15,11 @@ from executors.cursor_executor import CursorExecutor
 SENTINEL = "POLYPHONY_OK"
 PROMPT = f"Reply with exactly this one word and nothing else: {SENTINEL}"
 
+# This account is out of usage on cursor's default model, and --model auto
+# returns the same quota error despite the error text recommending it.
+# composer-2.5 is verified working.
+CURSOR_MODEL = "composer-2.5"
+
 
 def _assert_responded(res, executor_name: str):
     assert res.exit_code == 0, (
@@ -64,6 +69,7 @@ def test_cursor_adapter_responds(scratch_repo):
         instruction=PROMPT,
         cwd=str(scratch_repo),
         mode=Mode.REVIEW,
+        model=CURSOR_MODEL,
         timeout_seconds=180,
     )
     _assert_responded(res, "cursor")

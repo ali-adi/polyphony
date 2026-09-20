@@ -113,19 +113,25 @@ class CursorExecutor(BaseExecutor):
 
     def build_argv(
         self,
+        instruction: str,
         instruction_mode: Mode,
         model: Optional[str] = None,
         session_id: Optional[str] = None,
         output_format: str = "text",
     ) -> List[str]:
-        """Construct the full cursor-agent argv for one invocation."""
+        """Construct the full cursor-agent argv for one invocation.
+
+        The prompt is positional and must be appended last: cursor parses
+        `agent [options] [prompt...]`, so an instruction placed earlier would
+        be consumed as a flag's value.
+        """
         cmd = [self.binary_path]
         if self._uses_agent_subcommand():
             cmd.append("agent")
         cmd.append("-p")
 
         if instruction_mode is Mode.REVIEW:
-            cmd.extend(["--mode", "plan"])
+            cmd.extend(["--mode", "plan", "--trust"])
         else:
             cmd.extend(["-f", "--sandbox", "enabled"])
 
@@ -136,6 +142,7 @@ class CursorExecutor(BaseExecutor):
         if output_format and output_format != "text":
             cmd.extend(["--output-format", output_format])
 
+        cmd.append(instruction)
         return cmd
 
     def execute(
@@ -163,6 +170,7 @@ class CursorExecutor(BaseExecutor):
         initial_snapshot = _snapshot_file_states(cwd)
 
         cmd = self.build_argv(
+            instruction,
             instruction_mode=resolve_mode(kwargs.get("mode"), read_only),
             model=model,
             session_id=kwargs.get("session_id"),
@@ -172,7 +180,7 @@ class CursorExecutor(BaseExecutor):
         try:
             res = subprocess.run(
                 cmd,
-                input=instruction,
+                input="",
                 cwd=cwd,
                 capture_output=True,
                 text=True,
