@@ -46,6 +46,24 @@ class ClaudeExecutor(BaseExecutor):
             return False
         return True
 
+    def capabilities(self) -> List[str]:
+        return [
+            "high_reasoning",
+            "code_editing",
+            "repository_navigation",
+            "structured_output",
+            "large_context",
+        ]
+
+    def health(self) -> Dict[str, Any]:
+        avail, details = self.check_binary_health()
+        return {
+            "status": "OK" if avail else "ERROR",
+            "available": avail,
+            "binary_path": self.binary_path,
+            "details": details,
+        }
+
     def check_binary_health(self) -> tuple[bool, str]:
         """Check if Claude CLI binary is present and functional."""
         if not self.is_available():

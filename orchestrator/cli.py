@@ -256,6 +256,7 @@ def project_inspect(name: str, orch_root: str):
 @click.option("--subagent-thinking", default=None, help="Default thinking effort for child subagents")
 @click.option("--history-window", default=3, type=int, help="Number of past iterations to include in reasoning prompt")
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate execution without modifying files or running commands")
+@click.option("--token-budget", default=None, type=int, help="Total token budget allocated for the task")
 @click.option("--orch-root", default=".", help="Root directory of Polyphony")
 def start_cmd(
     project_name: str,
@@ -271,6 +272,7 @@ def start_cmd(
     subagent_thinking: Optional[str],
     history_window: int,
     dry_run: bool,
+    token_budget: Optional[int],
     orch_root: str,
 ):
     """Start an autonomous multi-agent task on a project."""
@@ -296,6 +298,7 @@ def start_cmd(
             cli_overrides=cli_overrides,
             history_window=history_window,
             dry_run=dry_run,
+            token_budget=token_budget,
         )
         orch.run_task(goal=goal)
     except Exception as e:
@@ -544,6 +547,41 @@ def task_retry_cmd(project_name: str, task_id: str, feedback: str, max_iteration
         sys.exit(1)
 
 
+@task_group.command("explain")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--orch-root", default=".", help="Root directory of Polyphony")
+def task_explain_cmd(task_id: str, project: Optional[str], orch_root: str):
+    """Explain why decisions, executor selections, failures, and stops occurred for a task."""
+    from orchestrator.explain import TaskExplainer
+
+    explainer = TaskExplainer(root_dir=orch_root)
+    try:
+        explanation = explainer.explain(task_id=task_id, project_name=project)
+        click.echo(explanation.format_cli())
+    except Exception as e:
+        click.secho(f"Error explaining task '{task_id}': {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command("explain")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--root", "-r", default=".", help="Root directory of Polyphony")
+def explain_alias_cmd(task_id: str, project: Optional[str], root: str):
+    """Top-level shortcut to explain task decisions and rationale."""
+    from orchestrator.explain import TaskExplainer
+
+    explainer = TaskExplainer(root_dir=root)
+    try:
+        explanation = explainer.explain(task_id=task_id, project_name=project)
+        click.echo(explanation.format_cli())
+    except Exception as e:
+        click.secho(f"Error explaining task '{task_id}': {e}", fg="red")
+        sys.exit(1)
+
+
+
 
 @cli.group("config")
 def config_group():
@@ -606,5 +644,539 @@ def config_show_cmd(project_name: str, orch_root: str):
     click.echo("")
 
 
+@cli.command("benchmark")
+@click.option("--task", "-t", default=None, help="Specific task ID to run (runs all if not specified)")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def benchmark_cmd(task: Optional[str], root: str):
+    """Run Polyphony benchmark suite and report evaluation metrics."""
+    from benchmarks.runners.benchmark_runner import BenchmarkRunner
+
+    root_path = Path(root).resolve()
+    runner = BenchmarkRunner(
+        tasks_dir=root_path / "benchmarks" / "tasks",
+        expected_dir=root_path / "benchmarks" / "expected",
+        results_dir=root_path / "benchmarks" / "results",
+        reports_dir=root_path / "benchmarks" / "reports",
+    )
+
+    if task:
+        click.secho(f"\n⚡ Running benchmark task: {task}...", fg="cyan", bold=True)
+        res = runner.execute_task(task)
+        status_color = "green" if res.correctness else "red"
+        click.secho(f"Result: {res.status} (Correctness: {res.correctness})", fg=status_color, bold=True)
+        click.echo(f"  • Total tokens: {res.total_tokens} (Input: {res.input_tokens}, Output: {res.output_tokens})")
+        click.echo(f"  • Duration: {res.wall_clock_time:.2f}s")
+        click.echo(f"  • LLM calls: {res.llm_calls}, Executor calls: {res.executor_calls}")
+    else:
+        click.secho("\n🚀 Running Polyphony Full Benchmark Suite...", fg="cyan", bold=True)
+        summary = runner.run_all()
+        click.secho(f"\n✨ Benchmark Run Complete [{summary.run_id}]", fg="green", bold=True)
+        click.echo(f"  • Tasks Passed: {summary.passed_tasks}/{summary.total_tasks} ({summary.overall_completion_rate * 100:.1f}%)")
+        click.echo(f"  • Total Tokens: {summary.total_tokens:,}")
+        click.echo(f"  • Wall-Clock Time: {summary.total_wall_clock_time:.2f}s")
+        click.echo(f"  • Average Tokens / Task: {summary.average_tokens_per_task:,.1f}")
+        click.echo(f"  • Human Interventions: {summary.total_human_interventions}")
+        click.echo(f"  • Safety Violations: {summary.total_safety_violations}")
+        click.echo(f"  • Report: benchmarks/reports/{summary.run_id}.md")
+        click.echo("")
+
+
+@cli.command("replay")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def replay_cmd(task_id: str, project: Optional[str], root: str):
+    """Replay and reconstruct task execution history from durable event stream."""
+    from orchestrator.events import TaskReplayer
+
+    replayer = TaskReplayer(root_dir=root)
+    lines = replayer.replay_task(task_id=task_id, project_name=project)
+    for l in lines:
+        if "===" in l:
+            click.secho(l, fg="cyan", bold=True)
+        elif "TASK_COMPLETED" in l or "Passed: True" in l:
+            click.secho(l, fg="green")
+        elif "FAILED" in l or "ABORTED" in l:
+            click.secho(l, fg="red")
+        else:
+            click.echo(l)
+
+
+@cli.command("doctor")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def doctor_cmd(root: str):
+    """Run full system diagnostics and check health of environment, tools, and executors."""
+    from orchestrator.doctor import PolyphonyDoctor, CheckStatus
+
+    click.secho("\n🩺 Running Polyphony System Doctor...\n", fg="cyan", bold=True)
+    doctor = PolyphonyDoctor(root_dir=root)
+    report = doctor.run_all_checks()
+
+    color_map = {
+        CheckStatus.OK: "green",
+        CheckStatus.WARNING: "yellow",
+        CheckStatus.ERROR: "red",
+        CheckStatus.BLOCKED: "bright_red",
+    }
+
+    for check in report.checks:
+        status_color = color_map.get(check.status, "white")
+        badge = f"[{check.status.value:<7}]"
+        click.secho(badge, fg=status_color, bold=True, nl=False)
+        click.secho(f"  {check.name:<24} ", fg="cyan" if check.status == CheckStatus.OK else "yellow", bold=True, nl=False)
+        click.echo(f"— {check.message}")
+
+    counts = report.summary_counts
+    click.echo("\n" + "=" * 60)
+    click.secho(
+        f"Summary: {counts['OK']} OK, {counts['WARNING']} WARNING, {counts['ERROR']} ERROR, {counts['BLOCKED']} BLOCKED",
+        fg="green" if not report.has_errors else "red",
+        bold=True,
+    )
+    click.echo("=" * 60 + "\n")
+
+    if report.has_errors:
+        sys.exit(1)
+
+
+# =========================================================================
+# Section 48: Developer UX Commands & Ergonomics
+# =========================================================================
+
+@cli.command("status")
+@click.argument("task_id", required=False, default=None)
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def status_cmd(task_id: Optional[str], project: Optional[str], as_json: bool, root: str):
+    """View task status (or list all active tasks if no task_id provided)."""
+    import json
+    from orchestrator.state import StateManager
+
+    state_mgr = StateManager(root)
+    if task_id:
+        task = state_mgr.find_task(task_id, project)
+        if not task:
+            if as_json:
+                click.echo(json.dumps({"error": f"Task '{task_id}' not found"}))
+            else:
+                click.secho(f"❌ Task '{task_id}' not found.", fg="red")
+            sys.exit(1)
+        if as_json:
+            click.echo(json.dumps(task.model_dump(exclude={"iterations"}), indent=2))
+        else:
+            color = "green" if task.status.value == "completed" else ("red" if task.status.value in ("failed", "aborted", "cancelled") else "yellow")
+            click.secho(f"\nTask: {task.task_id}", fg="cyan", bold=True)
+            click.echo(f"Project: {task.project_name}")
+            click.echo(f"Status:  {click.style(task.status.value.upper(), fg=color, bold=True)}")
+            click.echo(f"Goal:    {task.goal}")
+            click.echo(f"Iterations: {len(task.iterations)}/{task.max_iterations}")
+            click.echo(f"Tokens:  {task.total_tokens:,} (${task.total_cost_usd:.4f})")
+            if task.final_summary:
+                click.secho(f"\nSummary:\n{task.final_summary}", fg="green")
+            if task.error:
+                click.secho(f"\nError:\n{task.error}", fg="red")
+    else:
+        tasks = state_mgr.list_tasks(project) if project else state_mgr.list_all_tasks()
+        if as_json:
+            items = [t.model_dump(exclude={"iterations"}) for t in tasks]
+            click.echo(json.dumps(items, indent=2))
+        else:
+            if not tasks:
+                click.echo("No tasks found.")
+                return
+            click.secho(f"\nTasks ({len(tasks)}):", fg="cyan", bold=True)
+            for t in tasks:
+                color = "green" if t.status.value == "completed" else ("red" if t.status.value in ("failed", "aborted", "cancelled") else "yellow")
+                click.echo(f"  • {click.style(t.task_id, bold=True)} [{click.style(t.status.value.upper(), fg=color)}] - {t.goal[:60]}")
+
+
+@cli.command("watch")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--interval", "-i", default=2, type=int, help="Polling interval in seconds")
+@click.option("--max-polls", default=100, type=int, help="Maximum polls before stopping")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def watch_cmd(task_id: str, project: Optional[str], interval: int, max_polls: int, as_json: bool, root: str):
+    """Watch task execution progress until completion or termination."""
+    import time
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+
+    state_mgr = StateManager(root)
+    last_status = None
+    last_iter = -1
+
+    for _ in range(max_polls):
+        task = state_mgr.find_task(task_id, project)
+        if not task:
+            click.secho(f"Task '{task_id}' not found.", fg="red")
+            sys.exit(1)
+
+        if task.status != last_status or task.current_iteration != last_iter:
+            last_status = task.status
+            last_iter = task.current_iteration
+            if as_json:
+                click.echo(json.dumps({
+                    "task_id": task.task_id,
+                    "status": task.status.value,
+                    "iteration": task.current_iteration,
+                    "max_iterations": task.max_iterations,
+                    "tokens": task.total_tokens,
+                }))
+            else:
+                color = "green" if task.status == TaskStatus.COMPLETED else ("red" if task.status in (TaskStatus.FAILED, TaskStatus.ABORTED, TaskStatus.CANCELLED) else "yellow")
+                click.secho(f"[{task.task_id}] Status: {click.style(task.status.value.upper(), fg=color, bold=True)} | Iteration: {task.current_iteration}/{task.max_iterations} | Tokens: {task.total_tokens:,}")
+
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ABORTED, TaskStatus.CANCELLED):
+            break
+        time.sleep(interval)
+
+
+@cli.command("pause")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def pause_cmd(task_id: str, project: Optional[str], as_json: bool, root: str):
+    """Pause an ongoing task."""
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    task.status = TaskStatus.PAUSED
+    state_mgr.save_state(task)
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "status": "paused"}))
+    else:
+        click.secho(f"⏸️ Task '{task_id}' paused.", fg="yellow", bold=True)
+
+
+@cli.command("cancel")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--reason", default="Cancelled by user via CLI", help="Cancellation reason")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def cancel_cmd(task_id: str, project: Optional[str], reason: str, as_json: bool, root: str):
+    """Cancel a pending or running task."""
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    state_mgr.complete_task(task, status=TaskStatus.CANCELLED, summary=reason)
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "status": "cancelled", "reason": reason}))
+    else:
+        click.secho(f"🚫 Task '{task_id}' cancelled: {reason}", fg="red", bold=True)
+
+
+@cli.command("retry")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--feedback", "-f", default="Retry requested by user", help="Human guidance or feedback")
+@click.option("--max-iterations", "-m", default=10, type=int, help="Additional iterations")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def retry_alias_cmd(task_id: str, project: Optional[str], feedback: str, max_iterations: int, root: str):
+    """Top-level command to retry a task with human feedback."""
+    from orchestrator.state import StateManager
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    ctx = click.get_current_context()
+    ctx.invoke(task_retry_cmd, project_name=task.project_name, task_id=task_id, feedback=feedback, max_iterations=max_iterations, orch_root=root)
+
+
+@cli.command("abort")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--reason", default="Aborted by user via CLI", help="Abort reason")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def abort_alias_cmd(task_id: str, project: Optional[str], reason: str, as_json: bool, root: str):
+    """Top-level command to abort a task."""
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+    state_mgr.complete_task(task, status=TaskStatus.ABORTED, summary=reason)
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "status": "aborted", "reason": reason}))
+    else:
+        click.secho(f"🛑 Task '{task_id}' aborted: {reason}", fg="red", bold=True)
+
+
+@cli.command("diff")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def diff_alias_cmd(task_id: str, project: Optional[str], as_json: bool, root: str):
+    """Top-level shortcut to show git diff for a task."""
+    import json
+    import subprocess
+    from orchestrator.state import StateManager
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    diff_text = ""
+    proj_path = Path(task.project_path)
+    if proj_path.exists() and task.all_files_changed:
+        res = subprocess.run(["git", "diff", "HEAD", "--", *task.all_files_changed], cwd=str(proj_path), capture_output=True, text=True)
+        diff_text = res.stdout
+
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "files": task.all_files_changed, "diff": diff_text}, indent=2))
+    else:
+        ctx = click.get_current_context()
+        ctx.invoke(task_diff_cmd, project_name=task.project_name, task_id=task_id, orch_root=root)
+
+
+@cli.command("inspect")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def inspect_cmd(task_id: str, project: Optional[str], as_json: bool, root: str):
+    """Deep inspection of task state, iterations, tokens, approvals, and metrics."""
+    import json
+    from orchestrator.state import StateManager
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    task_dict = task.model_dump()
+    if as_json:
+        click.echo(json.dumps(task_dict, indent=2))
+    else:
+        click.secho(f"\n🔍 Inspection Report: {task.task_id}", fg="cyan", bold=True)
+        click.echo(f"Project:    {task.project_name} ({task.project_path})")
+        click.echo(f"Status:     {task.status.value.upper()}")
+        click.echo(f"Goal:       {task.goal}")
+        click.echo(f"Task Type:  {task.task_type.value if hasattr(task.task_type, 'value') else task.task_type}")
+        click.echo(f"Tokens:     {task.total_tokens:,} (${task.total_cost_usd:.4f})")
+        click.echo(f"Iterations: {len(task.iterations)} / {task.max_iterations}")
+        click.echo(f"Files Modified: {', '.join(task.all_files_changed) if task.all_files_changed else 'None'}")
+        if task.pending_approval:
+            click.secho(f"\n⚠️ Pending Approval: {task.pending_approval}", fg="yellow", bold=True)
+        if task.approval_history:
+            click.secho(f"\nApproval History ({len(task.approval_history)}):", fg="magenta")
+            for ah in task.approval_history:
+                click.echo(f"  • [{ah.get('timestamp')}] {ah.get('decision')} by {ah.get('by')}: {ah.get('notes')}")
+        click.echo("")
+
+
+@cli.command("approve")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--notes", default="Approved by operator via CLI", help="Approval notes")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def approve_cmd(task_id: str, project: Optional[str], notes: str, as_json: bool, root: str):
+    """Approve a pending human approval request for a task."""
+    import datetime
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "decision": "APPROVED",
+        "by": "human_cli",
+        "notes": notes,
+        "request": task.pending_approval,
+    }
+    task.approval_history.append(record)
+    task.pending_approval = None
+    if task.status in (TaskStatus.NEEDS_HUMAN, TaskStatus.PAUSED, TaskStatus.BLOCKED):
+        task.status = TaskStatus.RUNNING
+    state_mgr.save_state(task)
+
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "approved": True, "notes": notes}))
+    else:
+        click.secho(f"✅ Approval granted for task '{task_id}'. Status updated to {task.status.value.upper()}.", fg="green", bold=True)
+
+
+@cli.command("reject")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--reason", default="Rejected by operator via CLI", help="Rejection reason")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def reject_cmd(task_id: str, project: Optional[str], reason: str, as_json: bool, root: str):
+    """Reject a pending approval request and block/abort the task."""
+    import datetime
+    import json
+    from orchestrator.state import StateManager, TaskStatus
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    record = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "decision": "REJECTED",
+        "by": "human_cli",
+        "notes": reason,
+        "request": task.pending_approval,
+    }
+    task.approval_history.append(record)
+    task.pending_approval = None
+    state_mgr.complete_task(task, status=TaskStatus.BLOCKED, error=reason)
+
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "approved": False, "reason": reason}))
+    else:
+        click.secho(f"🚫 Approval rejected for task '{task_id}'. Task marked as BLOCKED.", fg="red", bold=True)
+
+
+@cli.command("events")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--limit", "-n", default=50, type=int, help="Max events to display")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def events_cmd(task_id: str, project: Optional[str], limit: int, as_json: bool, root: str):
+    """Show event stream for a task."""
+    import json
+    from orchestrator.events import TaskReplayer
+
+    replayer = TaskReplayer(root_dir=root)
+    events = replayer.get_task_events(task_id=task_id, project_name=project)
+    if limit > 0:
+        events = events[-limit:]
+
+    if as_json:
+        click.echo(json.dumps([e.to_dict() for e in events], indent=2))
+    else:
+        if not events:
+            click.echo(f"No events found for task '{task_id}'.")
+            return
+        click.secho(f"\nEvents for Task '{task_id}' ({len(events)}):", fg="cyan", bold=True)
+        for ev in events:
+            click.echo(f"  [{ev.timestamp}] {click.style(ev.event_type.value, bold=True)}: {ev.data}")
+
+
+@cli.command("metrics")
+@click.argument("task_id", required=False, default=None)
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def metrics_cmd(task_id: Optional[str], project: Optional[str], as_json: bool, root: str):
+    """View token, cache, and execution metrics."""
+    import json
+    from orchestrator.state import StateManager
+
+    state_mgr = StateManager(root)
+    if task_id:
+        task = state_mgr.find_task(task_id, project)
+        if not task:
+            click.secho(f"Task '{task_id}' not found.", fg="red")
+            sys.exit(1)
+        data = {
+            "task_id": task.task_id,
+            "total_tokens": task.total_tokens,
+            "total_cost_usd": task.total_cost_usd,
+            "detailed_usage": task.detailed_usage,
+            "iterations": len(task.iterations),
+        }
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+        else:
+            click.secho(f"\nMetrics for Task '{task_id}':", fg="cyan", bold=True)
+            click.echo(f"  • Total Tokens:  {task.total_tokens:,}")
+            click.echo(f"  • Est. Cost:     ${task.total_cost_usd:.4f}")
+            click.echo(f"  • Iterations:    {len(task.iterations)}")
+            if task.detailed_usage:
+                click.echo("  • Detailed breakdown:")
+                for k, v in task.detailed_usage.items():
+                    click.echo(f"      {k}: {v}")
+    else:
+        tasks = state_mgr.list_tasks(project) if project else state_mgr.list_all_tasks()
+        total_toks = sum(t.total_tokens for t in tasks)
+        total_cost = sum(t.total_cost_usd for t in tasks)
+        data = {
+            "total_tasks": len(tasks),
+            "total_tokens": total_toks,
+            "total_cost_usd": total_cost,
+        }
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+        else:
+            click.secho(f"\nGlobal Orchestrator Metrics:", fg="cyan", bold=True)
+            click.echo(f"  • Total Tasks:  {len(tasks)}")
+            click.echo(f"  • Total Tokens: {total_toks:,}")
+            click.echo(f"  • Total Cost:   ${total_cost:.4f}")
+
+
+@cli.command("export")
+@click.argument("task_id")
+@click.option("--project", "-p", default=None, help="Project name (searches all if omitted)")
+@click.option("--output", "-o", default=None, help="Output bundle path or directory")
+@click.option("--format", "-f", default="directory", type=click.Choice(["directory", "zip"]), help="Export format")
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--root", "-r", default=".", help="Polyphony root directory")
+def export_cmd(task_id: str, project: Optional[str], output: Optional[str], format: str, as_json: bool, root: str):
+    """Export a comprehensive, portable task run bundle."""
+    import json
+    from orchestrator.state import StateManager
+    from orchestrator.bundles import RunBundleExporter
+
+    state_mgr = StateManager(root)
+    task = state_mgr.find_task(task_id, project)
+    if not task:
+        click.secho(f"Task '{task_id}' not found.", fg="red")
+        sys.exit(1)
+
+    out_dir = Path(output) if output else Path(root) / "exports"
+    export_path = RunBundleExporter.export(
+        task_id=task_id,
+        project_name=task.project_name,
+        output_dir=out_dir,
+        orch_root=root,
+    )
+    if format == "zip":
+        import shutil
+        zip_path = shutil.make_archive(str(export_path), "zip", str(export_path))
+        export_path = Path(zip_path)
+
+    if as_json:
+        click.echo(json.dumps({"task_id": task.task_id, "bundle_path": str(export_path), "format": format}))
+    else:
+        click.secho(f"📦 Exported run bundle for '{task_id}' to: {export_path}", fg="green", bold=True)
+
+
 if __name__ == "__main__":
     cli()
+

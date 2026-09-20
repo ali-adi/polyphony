@@ -1,0 +1,10 @@
+task_id: task_10_iterative_bugfix_multiple_attempts
+expected_status: COMPLETED
+files_changed:
+  - parser.py
+verification_cmd: "pytest test_parser.py"
+allow_zero_changes: false
+min_iterations: 2
+max_iterations: 5
+deterministic_sufficient: false
+requires_human: false

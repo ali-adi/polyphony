@@ -1,0 +1,8 @@
+task_id: task_15_deterministic_tooling_sufficient
+expected_status: COMPLETED
+llm_calls_expected: 0
+deterministic_sufficient: true
+verification_cmd: "pytest test_calc.py"
+allow_zero_changes: true
+max_tokens_allowed: 0
+requires_human: false

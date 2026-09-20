@@ -78,6 +78,7 @@ class Orchestrator:
         cli_overrides: Optional[Dict[str, Any]] = None,
         history_window: int = 3,
         dry_run: bool = False,
+        token_budget: Optional[int] = None,
     ):
         self.root_dir = Path(root_dir).resolve()
         self.project_name = project_name
@@ -87,6 +88,7 @@ class Orchestrator:
         self.cli_overrides = cli_overrides or {}
         self.history_window = history_window
         self.dry_run = dry_run
+        self.token_budget_override = token_budget
 
         # 1. Load project definition & global config
         self.knowledge = load_project_knowledge(project_name, self.root_dir)
@@ -126,6 +128,25 @@ class Orchestrator:
         test_cfg = self.project_cfg.get("testing", {})
         python_bin = test_cfg.get("interpreter", "python3")
         self.router = ExecutorRouter(python_bin=python_bin)
+
+        # 4. Token Budget & Adaptive Allocation (Sections 21 & 22)
+        from orchestrator.budgets import AdaptiveBudgetAllocator, TokenBudget
+        from orchestrator.task_types import TaskType
+        budget_cfg = self.project_cfg.get("budget", {})
+        total_tokens = self.token_budget_override or budget_cfg.get("total_tokens", 50000)
+        if budget_cfg and not self.token_budget_override and "lead" in budget_cfg:
+            self.budget = TokenBudget(
+                total_tokens=total_tokens,
+                lead=budget_cfg.get("lead", 15000),
+                execution=budget_cfg.get("execution", 25000),
+                verification=budget_cfg.get("verification", 5000),
+                reserve=budget_cfg.get("reserve", 5000),
+            )
+        else:
+            self.budget = AdaptiveBudgetAllocator.allocate_by_task(
+                task_type=TaskType.FEATURE,
+                total_tokens=total_tokens,
+            )
 
     def _select_lead_reasoner(self) -> str:
         """Select primary reasoning engine, falling back to agy if Claude is rate-limited."""

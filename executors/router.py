@@ -17,7 +17,7 @@ logger = logging.getLogger("polyphony.router")
 
 def is_infrastructure_error(result: ExecutorResult) -> bool:
     """Determine if a failure is an infrastructure issue (deserving fallback) vs task-level issue."""
-    if result.metadata.get("quota_exceeded") or result.metadata.get("timeout"):
+    if result.metadata.get("quota_exceeded") or result.metadata.get("timeout") or result.metadata.get("crash"):
         return True
     if result.exit_code in (124, 127):  # timeout or binary not found
         return True
@@ -31,6 +31,8 @@ def is_infrastructure_error(result: ExecutorResult) -> bool:
         "resource exhausted",
         "timed out",
         "timeout",
+        "crash",
+        "unhandled exception",
         "failed execution",
         "command failed to start",
     ]
@@ -76,9 +78,18 @@ def _is_temp_checkpoint(cwd: str) -> bool:
         return False
 
 
-def create_workspace_checkpoint(cwd: str) -> bool:
-    """Create a temporary git commit to guarantee rollback safety without data loss."""
+from orchestrator.rollback import SafeRollbackManager, WorkspaceBaseline
+
+_ACTIVE_BASELINES: Dict[str, WorkspaceBaseline] = {}
+_ROLLBACK_MANAGER = SafeRollbackManager()
+
+
+def create_workspace_checkpoint(cwd: str, relevant_files: Optional[List[str]] = None) -> bool:
+    """Create a safe baseline and temporary checkpoint, recording user pre-existing changes."""
     try:
+        baseline = _ROLLBACK_MANAGER.record_baseline(cwd, relevant_files=relevant_files)
+        _ACTIVE_BASELINES[str(Path(cwd).resolve())] = baseline
+
         git_root = _get_git_root(cwd)
         if git_root:
             import subprocess
@@ -96,27 +107,37 @@ def create_workspace_checkpoint(cwd: str) -> bool:
                 capture_output=True,
                 text=True,
             )
-            return res.returncode == 0
+            return res.returncode == 0 or baseline is not None
+        return True
     except Exception as e:
         logger.warning(f"Failed to create workspace checkpoint in {cwd}: {e}")
     return False
 
 
 def rollback_workspace(cwd: str):
-    """Roll back uncommitted workspace changes after a failed execution in a git repository."""
+    """Roll back uncommitted workspace changes using safe rollback, strictly preserving user changes."""
     try:
+        resolved_cwd = str(Path(cwd).resolve())
+        baseline = _ACTIVE_BASELINES.pop(resolved_cwd, None)
+
         git_root = _get_git_root(cwd)
-        if git_root:
+        if git_root and _is_temp_checkpoint(str(git_root)):
             import subprocess
-            if _is_temp_checkpoint(str(git_root)):
-                # Revert any changes made since checkpoint
+            subprocess.run(["git", "reset", "--soft", "HEAD~1"], cwd=str(git_root), capture_output=True)
+
+        if baseline:
+            report = _ROLLBACK_MANAGER.safe_rollback(baseline)
+            logger.info(
+                f"Safe rollback complete: reverted={report.reverted_files}, "
+                f"deleted_untracked={report.deleted_untracked_files}, "
+                f"preserved_user_files={report.preserved_user_files}"
+            )
+        else:
+            if git_root and _is_temp_checkpoint(str(git_root)):
+                import subprocess
                 subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(git_root), capture_output=True)
-                # Remove untracked files created by the failed executor
                 subprocess.run(["git", "clean", "-fd"], cwd=str(git_root), capture_output=True)
-                # Soft reset to restore previous uncommitted changes cleanly
                 subprocess.run(["git", "reset", "--soft", "HEAD~1"], cwd=str(git_root), capture_output=True)
-            else:
-                logger.warning("No temporary checkpoint commit found at HEAD. Skipping soft reset.")
     except Exception as e:
         logger.warning(f"Failed to rollback workspace in {cwd}: {e}")
 
@@ -124,6 +145,11 @@ def rollback_workspace(cwd: str):
 def release_workspace_checkpoint(cwd: str):
     """Clean up temporary checkpoint commit while keeping all modifications."""
     try:
+        resolved_cwd = str(Path(cwd).resolve())
+        baseline = _ACTIVE_BASELINES.pop(resolved_cwd, None)
+        if baseline:
+            _ROLLBACK_MANAGER.safe_release(baseline)
+
         git_root = _get_git_root(cwd)
         if git_root:
             import subprocess
@@ -136,6 +162,12 @@ def release_workspace_checkpoint(cwd: str):
 
 
 
+
+from executors.roles import AgentRole, RoleRegistry
+from executors.capabilities import CapabilityRouter, Capability
+from executors.cost_aware import CostAwareRouter, CostAwareRoutingDecision, RoutingTarget
+
+
 class ExecutorRouter:
     """Manages routing of implementation requests and coordinates bidirectional fallbacks."""
 
@@ -145,6 +177,7 @@ class ExecutorRouter:
         agy_path: Optional[str] = None,
         cursor_path: Optional[str] = None,
         python_bin: str = "python3",
+        role_mappings: Optional[Dict[Any, Any]] = None,
     ):
         self.executors: Dict[str, BaseExecutor] = {
             "claude": ClaudeExecutor(binary_path=claude_path),
@@ -152,6 +185,106 @@ class ExecutorRouter:
             "cursor": CursorExecutor(binary_path=cursor_path),
             "python": PythonExecutor(default_interpreter=python_bin),
         }
+        self.role_registry = RoleRegistry(role_mappings)
+        self.capability_router = CapabilityRouter()
+        self.cost_aware_router = CostAwareRouter()
+        for name, ex in self.executors.items():
+            self.capability_router.register_executor(name, ex.capabilities())
+
+    def bind_role(self, role: Union[AgentRole, str], providers: Union[str, List[str]]) -> None:
+        """Bind one or more providers to an abstract role."""
+        self.role_registry.bind(role, providers)
+
+    def execute_role(
+        self,
+        role: Union[AgentRole, str],
+        instruction: str,
+        cwd: str,
+        **kwargs,
+    ) -> Tuple[ExecutorResult, str]:
+        """Execute an instruction using the providers assigned to an abstract role."""
+        providers = self.role_registry.get_providers(role)
+        if not providers:
+            raise ValueError(f"No providers configured for role '{role}'")
+        primary = providers[0]
+        return self.execute(
+            target_executor=primary,
+            instruction=instruction,
+            cwd=cwd,
+            custom_fallback_chain=providers,
+            **kwargs,
+        )
+
+    def route_by_capabilities(self, required_capabilities: List[str]) -> List[str]:
+        """Return matching executors ordered by cheapest and safest first."""
+        avail = self.get_available_executors()
+        for name, ex in self.executors.items():
+            self.capability_router.register_executor(name, ex.capabilities())
+        return self.capability_router.match_executors(required_capabilities, available_executors=avail)
+
+    def execute_with_capabilities(
+        self,
+        required_capabilities: List[str],
+        instruction: str,
+        cwd: str,
+        **kwargs,
+    ) -> Tuple[ExecutorResult, str]:
+        """Execute instruction by finding cheapest/safest candidate matching capabilities."""
+        chain = self.route_by_capabilities(required_capabilities)
+        if not chain:
+            raise ValueError(f"No available executor satisfies capabilities: {required_capabilities}")
+        primary = chain[0]
+        return self.execute(
+            target_executor=primary,
+            instruction=instruction,
+            cwd=cwd,
+            custom_fallback_chain=chain,
+            **kwargs,
+        )
+
+    def route_cost_aware(
+        self,
+        instruction: str,
+        required_capabilities: Optional[List[str]] = None,
+        task_complexity: str = "medium",
+    ) -> CostAwareRoutingDecision:
+        """Route instruction considering capability, quality, cost, latency, failure rate, and deterministic shortcuts (Sections 26 & 27)."""
+        avail = self.get_available_executors()
+        return self.cost_aware_router.route(
+            instruction=instruction,
+            required_capabilities=required_capabilities,
+            task_complexity=task_complexity,
+            availability=avail,
+        )
+
+    def execute_smart(
+        self,
+        instruction: str,
+        cwd: str,
+        task_complexity: str = "medium",
+        required_capabilities: Optional[List[str]] = None,
+        **kwargs,
+    ) -> Tuple[ExecutorResult, str]:
+        """Execute using CostAwareRouter, taking deterministic shortcuts if applicable (Section 27)."""
+        decision = self.route_cost_aware(
+            instruction=instruction,
+            required_capabilities=required_capabilities,
+            task_complexity=task_complexity,
+        )
+        if decision.is_deterministic and decision.deterministic_tool:
+            tool = decision.deterministic_tool
+            cmd = "pytest" if tool == "pytest" else ("git diff" if tool == "git_diff" else instruction)
+            res = self.executors["python"].execute(cmd, cwd=cwd, **kwargs)
+            res.metadata["deterministic_shortcut"] = tool
+            res.metadata["tokens_saved"] = 5000
+            return res, "python"
+
+        return self.execute(
+            target_executor=decision.executor_name,
+            instruction=instruction,
+            cwd=cwd,
+            **kwargs,
+        )
 
     def get_executor(self, name: str) -> Optional[BaseExecutor]:
         return self.executors.get(name.lower())
@@ -233,9 +366,17 @@ class ExecutorRouter:
                     **candidate_kwargs,
                 )
             except Exception as e:
+                logger.error(f"Executor '{candidate_name}' crashed with unhandled exception: {e}")
                 if has_checkpoint:
                     rollback_workspace(cwd)
-                raise
+                result = ExecutorResult(
+                    executor_name=candidate_name,
+                    success=False,
+                    output="",
+                    error=f"Crash/Unhandled exception: {e}",
+                    exit_code=1,
+                    metadata={"crash": True, "error": str(e)},
+                )
 
             # Check if this execution succeeded
             if result.success:

@@ -37,6 +37,23 @@ class PythonExecutor(BaseExecutor):
     def is_available(self) -> bool:
         return True
 
+    def capabilities(self) -> List[str]:
+        return [
+            "deterministic_computation",
+            "test_execution",
+            "shell_execution",
+            "offline_execution",
+            "cheap_execution",
+        ]
+
+    def health(self) -> Dict[str, Any]:
+        return {
+            "status": "OK",
+            "available": True,
+            "default_interpreter": self.default_interpreter,
+            "details": "Python & Shell deterministic runtime ready",
+        }
+
     def execute(
         self,
         instruction: str,

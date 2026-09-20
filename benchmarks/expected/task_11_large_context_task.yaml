@@ -1,0 +1,9 @@
+task_id: task_11_large_context_task
+expected_status: COMPLETED
+files_changed:
+  - large_config.json
+allow_zero_changes: false
+max_iterations: 3
+deterministic_sufficient: false
+requires_human: false
+max_context_budget: 32000

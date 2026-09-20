@@ -1,8 +1,9 @@
-"""Base abstract class and result models for execution adapters."""
+"""Base abstract class, formal executor protocol, and normalized result models."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,22 +81,80 @@ def detect_changed_files(initial_snapshot: Dict[str, Tuple[float, int]], cwd: st
     return sorted(newly_changed)
 
 
+class ExecutorStatus(str, Enum):
+    """Normalized execution status schema."""
+    SUCCESS = "SUCCESS"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    TIMEOUT = "TIMEOUT"
+    CANCELLED = "CANCELLED"
+
+
 class ExecutorResult(BaseModel):
-    """Normalized result returned by any executor engine."""
-    success: bool
+    """Normalized result returned by any executor engine conforming to Section 6 schema."""
+    success: bool = True
     executor_name: str
+    status: ExecutorStatus = ExecutorStatus.SUCCESS
+    summary: str = ""
     output: str = ""
     error: Optional[str] = None
     exit_code: int = 0
     duration_seconds: float = 0.0
     files_changed: List[str] = Field(default_factory=list)
+    tests: Dict[str, Any] = Field(default_factory=dict)
     metrics: Dict[str, float] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    artifacts: List[str] = Field(default_factory=list)
+    remaining_risks: List[str] = Field(default_factory=list)
+    next_action: Optional[str] = None
+    confidence: float = 1.0
     raw_response: Optional[Any] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    def model_post_init(self, __context: Any) -> None:
+        if not self.summary and self.output:
+            lines = [l.strip() for l in self.output.splitlines() if l.strip()]
+            self.summary = lines[0] if lines else ""
+        if self.error and self.error not in self.errors:
+            self.errors.append(self.error)
+        if not self.success and self.status == ExecutorStatus.SUCCESS:
+            self.status = ExecutorStatus.TIMEOUT if self.exit_code == 124 else ExecutorStatus.FAILED
+        elif self.success and self.status in (ExecutorStatus.FAILED, ExecutorStatus.TIMEOUT):
+            self.status = ExecutorStatus.SUCCESS
+
+    def to_concise_contract(self) -> Dict[str, Any]:
+        """Returns concise executor contract complying with Section 23."""
+        return {
+            "status": self.status.value if isinstance(self.status, ExecutorStatus) else str(self.status),
+            "summary": self.summary,
+            "files_changed": self.files_changed,
+            "tests": self.tests,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "artifacts": self.artifacts,
+            "remaining_risks": self.remaining_risks,
+            "next_action": self.next_action,
+        }
+
+    def format_concise_contract(self) -> str:
+        """Formats concise YAML representation for downstream agents."""
+        import yaml
+        return yaml.dump(self.to_concise_contract(), sort_keys=False).strip()
+
 
 class BaseExecutor(ABC):
-    """Abstract interface for all agent executors."""
+    """Formalized abstract interface for all Polyphony agent and tool executors."""
+
+    def __init__(self):
+        self._active_handles: Dict[str, Any] = {}
+
+    @property
+    def _handles(self) -> Dict[str, Any]:
+        if not hasattr(self, "_active_handles"):
+            self._active_handles = {}
+        return self._active_handles
 
     @property
     @abstractmethod
@@ -107,6 +166,69 @@ class BaseExecutor(ABC):
     def is_available(self) -> bool:
         """Check if the underlying CLI binary or runtime is installed and accessible."""
         pass
+
+    def capabilities(self) -> List[str]:
+        """Return declared capabilities of this executor (e.g. code_editing, high_reasoning)."""
+        return ["general_execution"]
+
+    def health(self) -> Dict[str, Any]:
+        """Check and report health status, version, and connectivity of the executor."""
+        avail = self.is_available()
+        return {
+            "status": "OK" if avail else "UNAVAILABLE",
+            "available": avail,
+            "details": "Ready" if avail else f"Executor {self.name} is unavailable",
+        }
+
+    def start(self, instruction: str, cwd: str, **kwargs) -> str:
+        """Initiate execution asynchronously, returning a trackable handle."""
+        import uuid
+        handle = f"{self.name}-{uuid.uuid4().hex[:8]}"
+        res = self.execute(instruction=instruction, cwd=cwd, **kwargs)
+        self._handles[handle] = {
+            "status": "COMPLETED",
+            "result": res,
+            "instruction": instruction,
+            "cwd": cwd,
+        }
+        return handle
+
+    def send(self, handle: str, message: str) -> None:
+        """Send follow-up instructions or messages to an active execution handle."""
+        if handle in self._handles:
+            self._handles[handle]["last_message"] = message
+
+    def poll(self, handle: str) -> Dict[str, Any]:
+        """Poll lifecycle state of an execution handle."""
+        if handle in self._handles:
+            item = self._handles[handle]
+            return {
+                "handle": handle,
+                "completed": item.get("status") in ("COMPLETED", "CANCELLED", "FAILED"),
+                "status": item.get("status", "RUNNING"),
+            }
+        return {"handle": handle, "completed": True, "status": "UNKNOWN"}
+
+    def cancel(self, handle: str) -> bool:
+        """Cancel an in-flight execution."""
+        if handle in self._handles:
+            self._handles[handle]["status"] = "CANCELLED"
+            return True
+        return False
+
+    def collect(self, handle: str) -> ExecutorResult:
+        """Collect normalized execution result and free the handle."""
+        if handle in self._handles:
+            item = self._handles.pop(handle)
+            res = item.get("result")
+            if res:
+                return res
+        return ExecutorResult(
+            executor_name=self.name,
+            success=False,
+            status=ExecutorStatus.FAILED,
+            error=f"No execution found for handle '{handle}'",
+        )
 
     @abstractmethod
     def execute(

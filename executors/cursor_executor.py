@@ -86,6 +86,22 @@ class CursorExecutor(BaseExecutor):
 
         return CursorExecutor._class_is_agent_ready
 
+    def capabilities(self) -> List[str]:
+        return [
+            "code_editing",
+            "fast_reasoning",
+            "diff_analysis",
+        ]
+
+    def health(self) -> Dict[str, Any]:
+        avail = self.is_available()
+        return {
+            "status": "OK" if avail else "UNAVAILABLE",
+            "available": avail,
+            "binary_path": self.binary_path,
+            "details": "Cursor agent ready" if avail else "Cursor CLI or agent subcommand not ready",
+        }
+
     def execute(
         self,
         instruction: str,

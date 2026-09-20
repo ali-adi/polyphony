@@ -1,0 +1,7 @@
+task_id: task_14_human_clarification
+expected_status: PAUSED
+human_interventions_expected: 1
+action_expected: ASK_HUMAN
+allow_zero_changes: true
+deterministic_sufficient: false
+requires_human: true

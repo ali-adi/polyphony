@@ -46,6 +46,24 @@ class AgyExecutor(BaseExecutor):
             return False
         return True
 
+    def capabilities(self) -> List[str]:
+        return [
+            "high_reasoning",
+            "fast_reasoning",
+            "code_editing",
+            "web_research",
+            "browser_interaction",
+        ]
+
+    def health(self) -> Dict[str, Any]:
+        avail = self.is_available()
+        return {
+            "status": "OK" if avail else "UNAVAILABLE",
+            "available": avail,
+            "binary_path": self.binary_path,
+            "details": "Ready" if avail else "Antigravity CLI (agy) binary not found",
+        }
+
     def execute(
         self,
         instruction: str,

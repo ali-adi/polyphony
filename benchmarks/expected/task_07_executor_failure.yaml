@@ -1,0 +1,9 @@
+task_id: task_07_executor_failure
+expected_status: COMPLETED
+files_changed:
+  - worker.py
+allow_zero_changes: false
+max_iterations: 4
+deterministic_sufficient: false
+requires_human: false
+recovery_expected: true

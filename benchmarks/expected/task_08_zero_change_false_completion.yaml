@@ -1,0 +1,8 @@
+task_id: task_08_zero_change_false_completion
+expected_status: FAILED
+files_changed: []
+allow_zero_changes: false
+expected_rejection: true
+deterministic_sufficient: true
+requires_human: false
+notes: "Zero-change completion rejection guard must reject completion when files are unchanged and allow_zero_changes is False."

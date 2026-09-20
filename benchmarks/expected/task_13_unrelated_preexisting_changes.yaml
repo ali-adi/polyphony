@@ -1,0 +1,10 @@
+task_id: task_13_unrelated_preexisting_changes
+expected_status: COMPLETED
+files_changed:
+  - target.py
+preserve_files:
+  - user_draft.txt
+preserved_unmodified: true
+rollback_preserves_user_work: true
+deterministic_sufficient: false
+requires_human: false
