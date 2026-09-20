@@ -20,7 +20,7 @@ existing subscriptions do the work.
 
 - Three executor adapters (`claude`, `agy`, `cursor-agent`) with `review`
   (read-only) and `code` (accept-edits) modes, each mapped onto the CLI's own
-  access-control flags. Verified by `pytest tests/smoke -m smoke`.
+  permission flags. Verified by `pytest tests/smoke -m smoke`.
 - Isolated task workspaces: a git worktree outside the target repo,
   provisioning of gitignored paths via copy-on-write, and a squash-merge
   hand-back. `polyphony workspace create|list|clean`.
