@@ -284,3 +284,19 @@ def test_task_diff(tmp_path):
     assert "file1.py" in diff_res2.output
 
 
+
+
+def test_migrate_requires_explicit_output(tmp_path):
+    """`migrate` must not scatter output into whatever directory it is run from.
+
+    The old default was `--output .`, so a bare `polyphony migrate <repo>`
+    wrote `migration/` and `projects/` into the operator's current directory.
+    """
+    runner = CliRunner()
+    source = tmp_path / "some-repo"
+    source.mkdir()
+
+    res = runner.invoke(cli, ["migrate", str(source)])
+
+    assert res.exit_code != 0
+    assert "--output" in res.output

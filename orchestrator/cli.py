@@ -24,7 +24,14 @@ def cli():
 @cli.command("migrate")
 @click.argument("project_path", type=click.Path(exists=True, file_okay=False, resolve_path=True))
 @click.option("--name", "-n", default=None, help="Name of project (defaults to directory name)")
-@click.option("--output", "-o", default=".", help="Root directory of Polyphony")
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(file_okay=False, resolve_path=True),
+    help="Polyphony root to write migration/ and projects/ into. Required: "
+    "there is no safe default, since migrating writes whole directory trees.",
+)
 def migrate_cmd(project_path: str, name: Optional[str], output: str):
     """Scan existing repo AI config and migrate to Polyphony format."""
     p_path = Path(project_path).resolve()
