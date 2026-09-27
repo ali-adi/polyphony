@@ -33,7 +33,9 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | `report(job_id, offset?, limit?)` | A finished `report`-mode job's report, `limit` (default 20000) characters from `offset`, with `total_chars` and `more` for paging |
 
 `mode` is `code` (the agent may edit) or `review` (read-only). Each maps onto the
-CLI's own permission mode. Nothing runs with permission checks bypassed.
+CLI's own permission mode. No executor is run with its sandbox turned off, but
+not every `code` mode asks before running commands: cursor's is `-f --sandbox
+enabled`, which allows any command inside cursor's own sandbox without asking.
 
 `mode="report"` is an audit whose findings are a file: the agent is told to write
 them as Markdown to `REPORT.md` at the copy's root and change nothing else. It
@@ -58,8 +60,12 @@ shows the tail. In `code` mode, once the agent succeeds, the check command (the
 project's `check`, or `delegate`'s) runs in the job's copy, and `status` reports
 whether it passed. A failing check does not fail the job; you decide. The check
 runs sandboxed (`sandbox-exec` on macOS, `bwrap` on Linux): it can write only in
-the copy and a private `$TMPDIR`, with no network beyond loopback. Without a
-sandbox it does not run.
+the copy and a private `$TMPDIR`, with no network beyond loopback. On Linux that
+network rule does not cover Unix sockets, so `/run`, `/var/run`, `/tmp` and
+`/var/tmp` are hidden from it (Docker, D-Bus, ssh-agent, tmux and X11 sockets
+live there), and it gets its own PID namespace, so it cannot see or signal your
+processes. A Unix socket elsewhere, such as under your home directory, is
+still reachable. Without a sandbox it does not run.
 
 A long brief can be cut short when passed inline, so `delegate` and
 `delegate_many` also take `brief_path`: a UTF-8 file of at most 100 KB (relative
@@ -91,7 +97,9 @@ edit-capable agent allows every tool, shell included, without asking.
   git objects. The clone has no remote, so the agent has no route to GitHub.
 - The clone's git directory sits beside the copy, not in it, and Polyphony's own
   git commands there ignore anything the agent planted: hooks, config, and
-  `.git` or `commondir` pointers to other repositories.
+  `.git` or `commondir` pointers to other repositories. A symlink anywhere in
+  that git directory (an `index` or `objects` pointing into your repository,
+  say) fails the job rather than letting git write through it.
 - Nothing lands until you call `apply`, and `apply` only stages. You commit.
   It applies a patch, so the job's internal commit never enters your history.
 - Secret-looking files the copy would otherwise take from your working tree

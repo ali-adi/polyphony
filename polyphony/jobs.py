@@ -576,8 +576,10 @@ def run_check(store: JobStore, job: Job) -> None:
 
     The check runs code the executor may have written (a test, a conftest, a
     Makefile), so it runs in an OS sandbox: it can write only in its copy
-    (not the copy's .git) and in a private temp dir, and it has no network
-    beyond loopback. Without a sandbox it does not run at all. See
+    (not the copy's .git) and in a private temp dir, it has no network
+    beyond loopback, and on Linux it cannot reach the host's Unix sockets in
+    /run or /tmp or see the host's processes. Without a sandbox it does not
+    run at all. See
     _sandbox_argv. Its environment is the server's minus credential-looking
     variables (CHECK_SCRUB) and the project's env_scrub.
 
@@ -696,6 +698,19 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
     Paths are resolved, because the sandboxes match real paths (/tmp is
     /private/tmp on macOS), and a link-mode symlink in the copy resolves to
     the user's own files, which stay read-only.
+
+    On Linux a fresh network namespace blocks IP, but a Unix socket with a
+    path is a file, and a read-only mount does not stop connect(): through
+    the Docker socket, the session bus (`systemd-run --user`), tmux or X11,
+    the check could start a process outside the sandbox. So empty tmpfs
+    mounts hide the dirs where such sockets live (/run, /var/run, /tmp,
+    /var/tmp), and the job dir and link-mode targets are bound back
+    read-only over them. A socket elsewhere (under $HOME, say) is still
+    reachable. The check also gets its own PID namespace, so it can neither
+    signal the user's processes nor read their environment through /proc,
+    and its own IPC, UTS and session, so it cannot push keystrokes into a
+    terminal. When the check's shell exits, or bwrap is killed, the kernel
+    kills everything else in that PID namespace.
     """
     work = Path(os.path.realpath(job.workdir))
     tmp = Path(os.path.realpath(tmp))
@@ -712,9 +727,20 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
         exe = shutil.which("bwrap")
         if exe is None:
             return None
+        # A symlinked /var/run points into /run, which is already hidden; a
+        # tmpfs cannot be mounted on a symlink.
+        hidden = [d for d in ("/run", "/var/run", "/tmp", "/var/tmp")
+                  if os.path.isdir(d) and not os.path.islink(d)]
+        # Read back from the user's repo, not the copy, whose symlinks the
+        # executor controls and could point at a socket dir.
+        linked = [os.path.realpath(Path(job.repo) / p) for p in job.link_paths]
         return [exe, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+                *(arg for d in hidden for arg in ("--tmpfs", d)),
+                *(arg for p in (str(work.parent), *linked) if os.path.exists(p)
+                  for arg in ("--ro-bind", p, p)),
                 "--bind", str(work), str(work), "--ro-bind", str(gitdir), str(gitdir),
-                "--bind", str(tmp), str(tmp), "--unshare-net", "--die-with-parent", "--"]
+                "--bind", str(tmp), str(tmp),
+                "--unshare-all", "--new-session", "--die-with-parent", "--"]
     return None
 
 

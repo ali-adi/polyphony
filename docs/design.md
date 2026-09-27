@@ -124,7 +124,12 @@ Polyphony runs there goes through `copy_git`, which first puts back the config
 saved when the copy was made, removes `commondir` and object alternates,
 rewrites the copy's `.git` pointer, and passes the git dir and work tree
 explicitly with hooks and fsmonitor off. Files are unlinked before being
-rewritten, since the agent may have made them symlinks. What the executor
+rewritten, since the agent may have made them symlinks. Git writes through
+symlinks of its own: its lockfile code resolves a symlinked `index` and
+renames the new one over the target, and a symlinked `objects` or `refs/heads`
+takes new objects and refs wherever it points. Both were reproduced writing
+into the user's repository. Git never makes a symlink in a git dir, so
+`copy_git` refuses to run when it finds one anywhere there, and the job fails. What the executor
 itself runs is still bounded only by its CLI's own sandbox: an agent with an
 unrestricted shell can write wherever the user can, including a global
 `core.hooksPath` directory.
@@ -143,7 +148,17 @@ The check runs code the executor may have written (a test, a `conftest.py`, a
 the host. It runs under `sandbox-exec` on macOS or `bwrap` on Linux: writes only
 in the copy (not its `.git`) and a private `$TMPDIR` under the job, no network
 beyond loopback, and on macOS no LaunchServices or Apple events, either of which
-could start a process outside the sandbox. A link-mode path resolves to the
+could start a process outside the sandbox. On Linux, `--unshare-net` stops IP
+but not a Unix socket with a path, which is a file that a read-only mount does
+not protect from connect(); a check was shown reaching a host socket that way,
+and the Docker socket or the session bus (`systemd-run --user`) would start a
+process outside the sandbox. So bwrap mounts empty tmpfs over `/run`,
+`/var/run`, `/tmp` and `/var/tmp` and binds the job dir and link-mode targets
+back read-only, and uses `--unshare-all` and `--new-session`: its own PID
+namespace keeps it from reading the server's `/proc/<pid>/environ` (credentials
+included) or signalling the user's processes, and its own session keeps it from
+pushing keystrokes into a terminal. A socket outside those dirs (under `$HOME`,
+say) is still reachable; hiding `$HOME` would break most toolchains. A link-mode path resolves to the
 user's own files, so it is read-only to the check. With no sandbox available
 the check does not run, and `check.txt` says why. Running it after the snapshot,
 then resetting the copy to that snapshot, keeps what it writes (caches, coverage
