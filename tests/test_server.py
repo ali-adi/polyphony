@@ -14,6 +14,7 @@ from polyphony.server import INSTRUCTIONS, build_server
 TOOLS = {
     "executors", "delegate", "delegate_many", "status", "diff", "apply", "discard", "cancel",
     "jobs", "usage", "stats", "revise",
+    "apply_many",
 }
 
 

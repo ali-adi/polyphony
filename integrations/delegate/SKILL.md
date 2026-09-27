@@ -54,6 +54,17 @@ On `succeeded` in code mode:
    ones and fix the rest yourself. Then `discard(job_id)`. Tell the user what is
    staged; committing is theirs.
 
+After a fan-out of separate tasks to one repository, review each diff as above,
+then land the good ones together with `apply_many(job_ids=[...])` rather than
+one `apply` at a time: it checks every patch on top of the ones before it and
+applies all or none, so two jobs that conflict are found before either lands.
+Run it with `dry_run=true` first to see `overlaps` (files more than one job
+touched: read those hunks together) and `unstaged` (jobs that will land unstaged
+over the user's own edits). On `error`, nothing changed: it names the job that
+does not fit. Call `apply_many` again without it, then apply that one's work by
+hand or delegate it again on top (its copy never sees the other jobs, so
+`revise` cannot fix a conflict with them). Not for `delegate_many` results, which are alternatives: apply one.
+
 Done when every hunk is read, the check passed (by you or as `check_passed`),
 and the job is applied or discarded.
 

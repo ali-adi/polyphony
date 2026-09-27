@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -586,10 +587,7 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
         raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
     files, pathspecs = _select(job, paths)
 
-    patch = store.path(job.id) / "changes.patch"
-    # Literal pathspecs, so a file named like a glob exports only itself.
-    _jgit(job, ["--literal-pathspecs", "diff", "--binary", f"--output={patch}",
-                f"{job.base_commit}..HEAD", "--", *pathspecs])
+    patch = _export(store, job, pathspecs)
     res = run_git(["apply", "--index", str(patch)], cwd=job.repo)
     unstaged = False
     if res.returncode != 0 and run_git(["apply", "--check", str(patch)], cwd=job.repo).returncode == 0:
@@ -608,6 +606,162 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     if job.outcome is None:
         _record(store, job, "applied")
     return files
+
+
+def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
+    """Write the job's changes to its changes.patch, only `pathspecs` if any, and return it.
+
+    Binary, so an image or other non-text file survives the trip. Literal
+    pathspecs, so a file named like a glob exports only itself.
+    """
+    patch = store.path(job.id) / "changes.patch"
+    _jgit(job, ["--literal-pathspecs", "diff", "--binary", f"--output={patch}",
+                f"{job.base_commit}..HEAD", "--", *pathspecs])
+    return patch
+
+
+def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> dict:
+    """Apply several succeeded jobs to one repository in order, or none of them.
+
+    Applying a fan-out one job at a time finds a conflict between two jobs
+    only when the second is reached, with the first already in the
+    repository. Here every patch is first applied, in order, to throwaway
+    copies of the repository's index and of its working tree's state (see
+    _precheck), so the second job is checked on top of the first before
+    anything changes. Then each goes through apply, so the ledger,
+    applied_paths and applied_unstaged stay exactly as one apply leaves them.
+
+    Only whole jobs: a job partly applied already is refused (use apply for
+    the rest of it). Refusals raise, changing nothing. What the pre-check
+    or the apply itself finds is returned instead, next to the report:
+    applied and not_applied (job ids), overlaps (each file more than one job
+    touches, with those jobs), unstaged (jobs that land, or would land,
+    unstaged because they touch files with unstaged edits), dry_run, and
+    error (None, or which job did not apply and why).
+    """
+    if not job_ids:
+        raise ValueError("Name at least one job.")
+    repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
+    if repeated:
+        raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
+    batch = [store.load(i) for i in job_ids]
+    for job in batch:
+        if job.state != "succeeded":
+            raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
+        if not job.files_changed:
+            raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
+        if job.applied and all(f in job.applied_paths for f in job.files_changed):
+            raise JobError(f"Job {job.id} is already applied; leave it out.")
+        if job.applied:
+            raise JobError(
+                f"Job {job.id} is already partly applied ({', '.join(job.applied_paths)}); "
+                "apply_many takes only whole jobs. Use apply for the rest of it."
+            )
+    repos = sorted({job.repo for job in batch})
+    if len(repos) > 1:
+        raise JobError(f"The jobs are for different repositories ({', '.join(repos)}); "
+                       "apply_many applies to one.")
+
+    touched = {job.id: _touched(job) for job in batch}
+    by_path: dict[str, list[str]] = {}
+    for job in batch:
+        for path in touched[job.id]:
+            by_path.setdefault(path, []).append(job.id)
+    result = {
+        "applied": [],
+        "not_applied": list(job_ids),
+        "overlaps": {p: ids for p, ids in sorted(by_path.items()) if len(ids) > 1},
+        "unstaged": [],
+        "dry_run": dry_run,
+        "error": None,
+    }
+    patches = {job.id: _export(store, job, []) for job in batch}
+    result["unstaged"], result["error"] = _precheck(store, repos[0], batch, patches, touched)
+    if result["error"] or dry_run:
+        return result
+
+    result["unstaged"] = []  # from here on, what apply actually did
+    for job in batch:
+        try:
+            apply(store, job.id)
+        except JobError as e:
+            result["error"] = (
+                f"Stopped at job {job.id}: the pre-check passed, so the repository changed "
+                f"while the jobs were being applied. {e}"
+            )
+            break
+        result["applied"].append(job.id)
+        result["not_applied"].remove(job.id)
+        if store.load(job.id).applied_unstaged:
+            result["unstaged"].append(job.id)
+    return result
+
+
+def _touched(job: Job) -> list[str]:
+    """Every path the job's diff touches, both sides of a rename included."""
+    names = _jgit(job, ["diff", "--name-only", "--no-renames", "-z",
+                        f"{job.base_commit}..HEAD"]).stdout
+    return [name for name in names.split("\0") if name]
+
+
+def _precheck(
+    store: JobStore, repo: str, batch: list[Job], patches: dict[str, Path],
+    touched: dict[str, list[str]],
+) -> tuple[list[str], str | None]:
+    """Apply each patch in turn to scratch copies of the repository's state,
+    as apply would: the jobs that would land unstaged, and the first failure.
+
+    Two temporary index files stand in for the repository. One is a copy of
+    its index; the other starts as that copy and takes the working tree's
+    current content of every file a job touches, so it stands for the
+    working tree. apply's `git apply --index` needs a file's index and
+    working-tree content to agree, and the patch to fit: then the patch goes
+    on both. Otherwise apply falls back to the working tree alone, leaving
+    the change unstaged, which here means the second index alone.
+
+    `git apply --cached` and `update-index` write blobs, so git is pointed
+    at a scratch object directory that borrows the repository's objects as
+    an alternate: the repository's index, objects and files are only read.
+    """
+    store.root.mkdir(parents=True, exist_ok=True)
+    located = _check(run_git(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects", "--git-path", "index"],
+        cwd=repo,
+    )).stdout.splitlines()
+    objects, index = located[0], Path(located[1])
+    with tempfile.TemporaryDirectory(prefix="apply-many-", dir=store.root) as tmp:
+        staged, tree = Path(tmp) / "index", Path(tmp) / "worktree-index"
+        if index.exists():
+            shutil.copyfile(index, staged)
+            shutil.copyfile(index, tree)
+        base_env = dict(os.environ, GIT_OBJECT_DIRECTORY=str(Path(tmp) / "objects"),
+                        GIT_ALTERNATE_OBJECT_DIRECTORIES=objects)
+        (Path(tmp) / "objects").mkdir()
+
+        def git(index_file: Path, args: list[str]) -> subprocess.CompletedProcess:
+            return run_git(args, cwd=repo, env=dict(base_env, GIT_INDEX_FILE=str(index_file)))
+
+        every = sorted({p for paths in touched.values() for p in paths})
+        res = git(tree, ["update-index", "--add", "--remove", "--", *every])
+        if res.returncode != 0:
+            return [], f"Could not read the working tree's state: {res.stderr.strip()}"
+        unstaged: list[str] = []
+        for n, job in enumerate(batch):
+            patch = str(patches[job.id])
+            listing = ["--literal-pathspecs", "ls-files", "-s", "-z", "--", *touched[job.id]]
+            agree = git(staged, listing).stdout == git(tree, listing).stdout
+            fits_index = agree and git(staged, ["apply", "--cached", patch]).returncode == 0
+            res = git(tree, ["apply", "--cached", patch])
+            if res.returncode != 0:
+                onto = (f"on top of job(s) {', '.join(j.id for j in batch[:n])}" if n
+                        else "to the repository as it is now")
+                return unstaged, (
+                    f"Job {job.id} does not apply cleanly {onto}; nothing was changed:\n"
+                    f"{res.stderr.strip()}"
+                )
+            if not fits_index:
+                unstaged.append(job.id)
+        return unstaged, None
 
 
 def _select(job: Job, paths: list[str] | None) -> tuple[list[str], list[str]]:
