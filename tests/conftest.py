@@ -15,6 +15,17 @@ def _git(*args, cwd):
     ).stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def isolated_git(tmp_path_factory, monkeypatch):
+    """No test sees the user's own git config. A global core.hooksPath would run
+    their hooks in every test repo, and a test that plants hooks the way an
+    agent might (`git rev-parse --git-path hooks`) would write into it."""
+    config = tmp_path_factory.mktemp("gitconfig") / "config"
+    config.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
 @pytest.fixture
 def repo(tmp_path):
     r = tmp_path / "repo"

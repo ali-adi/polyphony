@@ -49,16 +49,22 @@ class ProvisionError(WorkspaceError):
 class Workspace:
     source: Path
     path: Path
+    git_dir: Path | None = None
     skipped: list[str] = field(default_factory=list)
 
     @classmethod
     def create(
-        cls, source: str | Path, path: str | Path, exclude: tuple[str, ...] = ()
+        cls, source: str | Path, path: str | Path, exclude: tuple[str, ...] = (),
+        git_dir: str | Path | None = None,
     ) -> "Workspace":
         """Clone `source` at its current HEAD into `path`, then overlay its working tree.
 
         `exclude` holds repo-relative paths the overlay leaves alone, such as
         the ones `provision` will materialize itself.
+
+        `git_dir` puts the clone's git directory there instead of in `path`,
+        out of the executor's workspace; see copy_git. Its config as set up
+        here is saved as the trusted one.
 
         `--no-hardlinks` copies git's object files rather than sharing them.
         Shared (hard-linked) objects would let the copy write into the user's
@@ -68,15 +74,17 @@ class Workspace:
         source_path = Path(source).resolve()
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        separate = ["--separate-git-dir", str(git_dir)] if git_dir is not None else []
         res = run_git(
-            ["clone", "--no-hardlinks", "--quiet", str(source_path), str(dest)],
+            ["clone", "--no-hardlinks", "--quiet", *separate, str(source_path), str(dest)],
             cwd=str(source_path.parent),
             timeout=300,
         )
+        ws = cls(source=source_path, path=dest,
+                 git_dir=Path(git_dir) if git_dir is not None else None)
         if res.returncode != 0:
-            shutil.rmtree(dest, ignore_errors=True)
+            ws.remove()
             raise WorkspaceError(f"Could not copy {source_path}: {res.stderr.strip()}")
-        ws = cls(source=source_path, path=dest)
         if run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=str(dest)).returncode != 0:
             ws.remove()
             raise WorkspaceError(f"{source_path} has no commits to work from.")
@@ -86,6 +94,8 @@ class Workspace:
         except (WorkspaceError, OSError) as exc:
             ws.remove()
             raise WorkspaceError(str(exc)) from exc
+        if ws.git_dir is not None:
+            shutil.copyfile(ws.git_dir / "config", trusted_config(ws.git_dir))
         return ws
 
     def _overlay(self, exclude: tuple[str, ...]) -> None:
@@ -167,6 +177,9 @@ class Workspace:
 
     def remove(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)
+        if self.git_dir is not None:
+            shutil.rmtree(self.git_dir, ignore_errors=True)
+            trusted_config(self.git_dir).unlink(missing_ok=True)
 
     def provision(self, entries: list[dict]) -> list[str]:
         """Materialize gitignored paths the project declares it needs.
@@ -224,3 +237,55 @@ class Workspace:
 
             provisioned.append(rel)
         return provisioned
+
+
+def trusted_config(git_dir: str | Path) -> Path:
+    """Where the config Polyphony set up for a job's git dir is kept."""
+    return Path(f"{git_dir}.trusted-config")
+
+
+def copy_git(
+    args: list[str], git_dir: str | Path, work_tree: str | Path, timeout: int = 30
+) -> subprocess.CompletedProcess:
+    """Run git on a job's copy using only what Polyphony set up there.
+
+    The executor can write anything in its copy, and possibly the git dir
+    beside it. Git runs code named in its config (fsmonitor, filters,
+    include.path, hooksPath) and in hooks, and follows a `.git` file or a
+    `commondir` file to another repository, where a commit would write into
+    the user's own objects. So before every command: the trusted config is
+    put back, commondir and alternates are removed, the copy's `.git`
+    pointer is rewritten, and git gets the git dir and work tree explicitly,
+    with hooks and fsmonitor off. Replaced files are unlinked rather than
+    written through, since the executor may have made them symlinks.
+
+    A job from before separate git dirs has its git dir inside the copy;
+    it gets the flags, but has no trusted config to restore.
+    """
+    gd, wt = Path(git_dir), Path(work_tree)
+    if gd.is_symlink():
+        raise WorkspaceError(f"{gd} has been replaced by a symlink; refusing to run git there.")
+    trusted = trusted_config(gd)
+    if trusted.is_file() and not trusted.is_symlink():
+        _unlink(gd / "config")
+        shutil.copyfile(trusted, gd / "config")
+    _unlink(gd / "commondir")
+    _unlink(gd / "objects" / "info" / "alternates")
+    if not gd.is_relative_to(wt):
+        pointer = wt / ".git"
+        wanted = f"gitdir: {gd}\n"
+        if pointer.is_symlink() or not pointer.is_file() or pointer.read_bytes() != wanted.encode():
+            _unlink(pointer)
+            pointer.write_text(wanted)
+    return run_git(
+        ["--git-dir", str(gd), "--work-tree", str(wt),
+         "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args],
+        cwd=str(wt), timeout=timeout,
+    )
+
+
+def _unlink(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)

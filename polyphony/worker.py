@@ -12,34 +12,45 @@ import traceback
 from pathlib import Path
 
 from polyphony.executors import EXECUTORS, BaseExecutor, Mode
-from polyphony.jobs import JobStore, snapshot
+from polyphony.jobs import JobStore, claim, prompt, run_check, snapshot
 
 
-def run(job_dir: Path, executors: dict[str, type[BaseExecutor]] = EXECUTORS) -> None:
+def run(
+    job_dir: Path,
+    executors: dict[str, type[BaseExecutor]] = EXECUTORS,
+    attempt: int | None = None,
+) -> None:
+    """Run the job's `attempt`. None means its current one (tests, or a launch from
+    before attempts were passed)."""
     job_dir = Path(job_dir)
     store = JobStore(job_dir.parent.parent)
-    job = store.load(job_dir.name)
-    if job.state != "queued":
-        return  # cancelled before it started
+    if attempt is None:
+        attempt = store.load(job_dir.name).attempt
+    job = claim(store, job_dir.name, attempt)
+    if job is None:
+        return  # cancelled before it started, or revised and owned by a newer worker
 
-    job.state = "running"
-    job.pid = os.getpid()
-    job.pgid = os.getpgid(0)
-    job.started_at = time.time()
-    store.save(job)
+    def started(pgid: int) -> None:
+        job.executor_pgid = pgid
+        store.save(job)
 
     output = store.output_path(job.id)
     try:
         result = executors[job.executor]().execute(
-            job.instruction, job.workdir, Mode(job.mode), job.model, job.timeout_seconds
+            prompt(job), job.workdir, Mode(job.mode), job.model, job.timeout_seconds,
+            output_path=output, on_start=started,
         )
-        text = result.output
+        # Its group is gone; a recorded id could be reused by the OS and hit by cancel.
+        job.executor_pgid = None
+        store.save(job)
         if result.error:
-            text += f"\n\n--- error ---\n{result.error}"
-        output.write_text(text)
+            with output.open("a") as f:
+                f.write(f"\n\n--- error ---\n{result.error}")
         snapshot(job)
         job.exit_code = result.exit_code
         job.error = result.error
+        if result.success and job.mode == Mode.CODE and job.check_command:
+            run_check(store, job)
         job.state = "succeeded" if result.success else "failed"
     except Exception as e:
         # A Polyphony bug, not an executor failure. Record it so status shows
@@ -59,7 +70,7 @@ def main(argv: list[str]) -> None:
     # worker is reparented to init and can never be a zombie of the server.
     if os.fork() > 0:
         os._exit(0)
-    run(Path(argv[1]))
+    run(Path(argv[1]), attempt=int(argv[2]) if len(argv) > 2 else None)
 
 
 if __name__ == "__main__":

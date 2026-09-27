@@ -168,3 +168,101 @@ def test_cursor_usage_reports_a_binary_that_cannot_start(tmp_path):
     result = cursor_usage(binary=str(script), timeout=5)
     assert result["ok"] is False
     assert len(__import__("os").listdir("/dev/fd")) == before
+
+
+# --- Reading "out of quota" from a report, and caching reports on disk. ---
+
+
+def _agy_report(*rows):
+    return {"executor": "agy", "ok": True, "credits": 0, "limits": [
+        {"models": m, "window": w, "remaining_percent": p, "resets_at": r} for m, w, p, r in rows
+    ]}
+
+
+def _cursor_report(included, on_demand="Disabled"):
+    return {"executor": "cursor", "ok": True, "plan": "Team", "resets": "Oct 21", "categories": [
+        {"name": "Included", "parent": None, "current": f"{included}% used",
+         "used_percent": float(included)},
+        {"name": "Auto", "parent": "Included", "current": "100% used", "used_percent": 100.0},
+        {"name": "On-Demand", "parent": None, "current": on_demand, "used_percent": None},
+    ]}
+
+
+def test_agy_is_out_of_quota_only_when_every_model_group_is():
+    gemini_out = ("Gemini Models", "Weekly Limit", 0.0, "2026-10-01T02:17:05Z")
+    gemini_5h_out = ("Gemini Models", "Five Hour Limit", 0.0, "2026-10-02T00:00:00Z")
+    claude_ok = ("Claude and GPT models", "Weekly Limit", 40.0, "2026-10-03T10:41:07Z")
+    claude_out = ("Claude and GPT models", "Five Hour Limit", 0.0, "2026-09-26T15:41:07Z")
+    assert usage.out_of_quota(_agy_report(gemini_out, claude_ok)) is None
+    reason = usage.out_of_quota(_agy_report(gemini_out, gemini_5h_out, claude_ok, claude_out))
+    # Claude's group frees up first; Gemini's needs both of its windows to reset.
+    assert "2026-09-26T15:41:07Z" in reason
+
+
+def test_cursor_is_out_of_quota_when_included_is_used_up_and_on_demand_is_off():
+    assert usage.out_of_quota(_cursor_report(40)) is None
+    assert "Oct 21" in usage.out_of_quota(_cursor_report(100))
+    assert usage.out_of_quota(_cursor_report(100, on_demand="$3 / $50")) is None
+
+
+def test_a_failed_or_unknown_report_is_never_out_of_quota():
+    assert usage.out_of_quota({"executor": "agy", "ok": False, "error": "x"}) is None
+    assert usage.out_of_quota({"executor": "claude", "ok": True}) is None
+    assert usage.out_of_quota(None) is None
+
+
+class Checks:
+    """A stand-in for check_usage that records what was asked."""
+
+    def __init__(self, reports):
+        self.reports, self.calls = reports, []
+
+    def __call__(self, names=None):
+        names = list(names or self.reports)
+        self.calls.append(names)
+        unknown = [n for n in names if n not in self.reports]
+        if unknown:
+            raise ValueError(f"No usage check for {', '.join(unknown)}")
+        return [self.reports[n] for n in names]
+
+
+def test_cache_reuses_a_fresh_report_across_instances(tmp_path):
+    checks = Checks({"agy": {"executor": "agy", "ok": True, "limits": []}})
+    first = usage.UsageCache(tmp_path, check=checks)
+    assert first.report("agy")["ok"] is True
+    assert usage.UsageCache(tmp_path, check=checks).report("agy")["ok"] is True
+    assert checks.calls == [["agy"]]
+    assert (tmp_path / "usage-cache.json").exists()
+
+
+def test_cache_checks_again_once_the_ttl_passes(tmp_path):
+    checks = Checks({"agy": {"executor": "agy", "ok": False, "error": "x"}})
+    cache = usage.UsageCache(tmp_path, check=checks, ttl=0)
+    cache.report("agy")
+    cache.report("agy")
+    assert checks.calls == [["agy"], ["agy"]]
+
+
+def test_cache_refresh_and_cached_entries(tmp_path):
+    checks = Checks({
+        "agy": {"executor": "agy", "ok": True, "limits": []},
+        "cursor": {"executor": "cursor", "ok": False, "error": "x"},
+    })
+    cache = usage.UsageCache(tmp_path, check=checks)
+    assert cache.cached("agy") is None
+    assert [r["executor"] for r in cache.refresh()] == ["agy", "cursor"]
+    entry = cache.cached("cursor")
+    assert entry["report"]["error"] == "x"
+    assert entry["checked_at"] <= time.time()
+    assert len(checks.calls) == 1
+
+
+def test_cache_has_no_report_for_an_executor_without_a_check(tmp_path):
+    cache = usage.UsageCache(tmp_path, check=Checks({}))
+    assert cache.report("claude") is None
+
+
+def test_cache_survives_a_corrupt_file(tmp_path):
+    (tmp_path / "usage-cache.json").write_text("{not json")
+    checks = Checks({"agy": {"executor": "agy", "ok": True, "limits": []}})
+    assert usage.UsageCache(tmp_path, check=checks).report("agy")["ok"] is True

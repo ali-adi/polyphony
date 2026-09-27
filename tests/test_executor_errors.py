@@ -7,13 +7,23 @@ import pytest
 from polyphony.executors.agy import AgyExecutor
 from polyphony.executors.base import Mode
 from polyphony.executors.claude import ClaudeExecutor
+from polyphony.executors.codex import CodexExecutor
 from polyphony.executors.cursor import CursorExecutor
+from polyphony.executors.gemini import GeminiExecutor
+from polyphony.executors.opencode import OpencodeExecutor
 
 ADAPTERS = [
     (ClaudeExecutor, "claude"),
     (AgyExecutor, "agy"),
     (CursorExecutor, "cursor"),
+    (CodexExecutor, "codex"),
+    (GeminiExecutor, "gemini"),
+    (OpencodeExecutor, "opencode"),
 ]
+
+
+def _mode(cls):
+    return Mode.CODE if Mode.CODE in cls.modes else Mode.REVIEW
 
 
 @pytest.fixture(autouse=True)
@@ -36,11 +46,11 @@ def test_programming_errors_propagate(cls, name, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise NameError("name 'session_id' is not defined")
 
-    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
     ex = cls(binary_path="/bin/echo")
 
     with pytest.raises(NameError):
-        ex.execute(instruction="hi", cwd=str(tmp_path), mode=Mode.CODE)
+        ex.execute(instruction="hi", cwd=str(tmp_path), mode=_mode(cls))
 
 
 @pytest.mark.parametrize("cls,name", ADAPTERS, ids=[n for _, n in ADAPTERS])
@@ -49,9 +59,9 @@ def test_environment_errors_become_failed_results(cls, name, tmp_path, monkeypat
     def missing(*a, **k):
         raise FileNotFoundError("No such file or directory: 'binary'")
 
-    monkeypatch.setattr(subprocess, "run", missing)
+    monkeypatch.setattr(subprocess, "Popen", missing)
     ex = cls(binary_path="/bin/echo")
 
-    res = ex.execute(instruction="hi", cwd=str(tmp_path), mode=Mode.CODE)
+    res = ex.execute(instruction="hi", cwd=str(tmp_path), mode=_mode(cls))
     assert res.success is False
     assert res.error, "a failed result must explain itself"
