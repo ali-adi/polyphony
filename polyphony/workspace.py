@@ -14,7 +14,9 @@ Secret-looking files (SECRET_PATTERNS) are the exception: an untracked or
 gitignored `.env` is where a repository keeps its API keys, and copying it
 would hand them to every agent. They are withheld unless the project's
 `allow_secrets` names them. A tracked one is in HEAD, so the clone has it
-regardless; withholding covers only what the overlay would add.
+regardless; withholding covers only what the overlay would add, which
+includes the user's uncommitted edits to it (real keys filled into a
+committed placeholder `.env`): the copy keeps the committed version.
 """
 
 from __future__ import annotations
@@ -36,13 +38,15 @@ OVERLAY_SKIP = frozenset({
 OVERLAY_MAX_BYTES = 50 * 1024 * 1024
 IGNORE_FILE = ".polyphonyignore"
 
-# Untracked or gitignored files the overlay withholds, matched on the basename
-# at any depth and ignoring case (patterns here are lower case): dotenv files, private keys and keystores, and the credential
+# Untracked or gitignored files the overlay withholds, and tracked ones whose
+# uncommitted edits it withholds, matched on the basename
+# at any depth and ignoring case (patterns here are lower case): dotenv files
+# (`prod.env`, direnv's `.envrc`), private keys and keystores, and the credential
 # files of package managers and cloud SDKs. Only the private half of an SSH key
 # pair matches (id_rsa, not id_rsa.pub). Templates meant to be copied, like
 # .env.example, hold no real values and are let through (SECRET_TEMPLATES).
 SECRET_PATTERNS = (
-    ".env", ".env.*",
+    ".env", ".env.*", "*.env", ".envrc",
     "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     ".netrc", ".npmrc", ".pypirc",
@@ -50,6 +54,24 @@ SECRET_PATTERNS = (
 )
 SECRET_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template", ".env.dist"})
 SNAPSHOT_MESSAGE = "polyphony: working-tree snapshot"
+
+# Every diff whose output is fed to `git apply` or shown to the lead names each
+# output setting itself, so the user's config (global, or the repository's own)
+# cannot change it: diff.noprefix would make `git apply` strip a real
+# directory and patch the wrong file; diff.external, a textconv
+# driver or color.diff=always would print something that is not a patch;
+# diff.context=0 makes a patch that does not apply; diff.relative or
+# diff.submodule=log would leave paths or gitlinks out.
+DIFF_FLAGS = (
+    "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative",
+    "--src-prefix=a/", "--dst-prefix=b/", "-U3", "--submodule=short", "--find-renames",
+)
+# Written as the job's git dir's info/attributes, which outranks every
+# .gitattributes in the tree: the executor could otherwise mark its own text
+# changes `-diff` (or `binary`) and diff() would show "Binary files differ"
+# where the lead needs hunks, while apply (--binary) still carries them in
+# full. Unspecified means git decides by content, as it does for any file.
+NEUTRAL_ATTRIBUTES = "* !diff\n"
 
 
 class WorkspaceError(Exception):
@@ -139,15 +161,17 @@ class Workspace:
             ]
 
         # Edits to tracked files, staged or not, including deletions and binaries.
-        # A file staged but never committed is in this diff too, so a staged
-        # secret is excluded from it by name.
-        added = run_git(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD"],
-                        cwd=src, timeout=120)
-        staged_secrets = [r for r in added.stdout.split("\0") if r and self._secret(r)]
-        self.withheld += staged_secrets
+        # A secret-looking file staged but never committed is in this diff, and
+        # so are uncommitted edits to a committed one (real keys filled into a
+        # tracked placeholder `.env`): both are excluded by name, and the copy
+        # keeps what HEAD has. A deletion carries no secret, so it goes through.
+        edited = run_git(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", "HEAD"],
+                         cwd=src, timeout=120)
+        edited_secrets = [r for r in edited.stdout.split("\0") if r and self._secret(r)]
+        self.withheld += edited_secrets
         patch = subprocess.run(
-            ["git", "diff", "--binary", "HEAD", "--",
-             *(f":(exclude,literal){r}" for r in staged_secrets)],
+            ["git", "diff", "--binary", *DIFF_FLAGS, "HEAD", "--",
+             *(f":(exclude,literal){r}" for r in edited_secrets)],
             cwd=src, capture_output=True, timeout=120,
         )
         if patch.returncode != 0:
@@ -311,7 +335,8 @@ def copy_git(
     include.path, hooksPath) and in hooks, and follows a `.git` file or a
     `commondir` file to another repository, where a commit would write into
     the user's own objects. So before every command: the trusted config is
-    put back, commondir and alternates are removed, the copy's `.git`
+    put back, commondir and alternates are removed, info/attributes is
+    rewritten (NEUTRAL_ATTRIBUTES), the copy's `.git`
     pointer is rewritten, and git gets the git dir and work tree explicitly,
     with hooks and fsmonitor off. Replaced files are unlinked rather than
     written through, since the executor may have made them symlinks.
@@ -328,6 +353,13 @@ def copy_git(
         shutil.copyfile(trusted, gd / "config")
     _unlink(gd / "commondir")
     _unlink(gd / "objects" / "info" / "alternates")
+    info = gd / "info"
+    if gd.is_dir():
+        if info.is_symlink() or not info.is_dir():
+            _unlink(info)
+        info.mkdir(exist_ok=True)
+        _unlink(info / "attributes")
+        (info / "attributes").write_text(NEUTRAL_ATTRIBUTES)
     if not gd.is_relative_to(wt):
         pointer = wt / ".git"
         wanted = f"gitdir: {gd}\n"

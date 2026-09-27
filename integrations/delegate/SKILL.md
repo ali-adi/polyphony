@@ -107,5 +107,6 @@ Read `error` and `output_tail`.
   attempts, so review it all again. If the second attempt is also wrong,
   `discard` and do the task yourself.
 - **Missing secret**: `withheld` in `status` lists secret-looking files (`.env`,
-  keys) kept out of the copy. If the failure comes from one being missing, tell
+  keys) kept out of the copy; a committed one is there, but without the user's
+  uncommitted edits to it. If the failure comes from one being missing, tell
   the user; only they should add it to `allow_secrets` in the project config.

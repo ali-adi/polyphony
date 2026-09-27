@@ -28,7 +28,7 @@ from polyphony import ledger
 from polyphony.config import DEFAULT_HOME, ProjectConfig
 from polyphony.executors.base import Mode
 from polyphony.guard import run_git
-from polyphony.workspace import Workspace, WorkspaceError, copy_git
+from polyphony.workspace import DIFF_FLAGS, Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
 # agy, cursor, gemini and opencode take the whole prompt as one argv string, which
@@ -123,6 +123,11 @@ class Job:
     # the executor changed besides REPORT.md, which it was told not to touch.
     report_path: str | None = None
     stray_changes: list[str] = field(default_factory=list)
+    # Lane export. The commit snapshot() made (or found) in the copy: diff and
+    # apply read base_commit..head_commit, never the copy's live HEAD, which
+    # anything left running in the copy could move after the lead reviewed it.
+    # None for a job from before this, which reads HEAD.
+    head_commit: str | None = None
 
     @property
     def applied(self) -> bool:
@@ -523,6 +528,7 @@ def snapshot(job: Job) -> None:
 
     The commit lives only in the job's private copy. apply turns it into a
     patch, so its message and author never reach the repository's history.
+    Its id is recorded as head_commit, which diff and apply read from.
     """
     _jgit(job, ["add", "-A"])
     for path in job.link_paths:
@@ -533,10 +539,16 @@ def snapshot(job: Job) -> None:
             "-c", "user.email=polyphony@localhost",
             "commit", "--no-verify", "-q", "-m", f"polyphony job {job.id}",
         ])
+    job.head_commit = _jgit(job, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
     # -z, so a path git would C-quote (non-ASCII, quotes, newlines) keeps its real name.
-    names = _jgit(job, ["diff", "--name-only", "-z", f"{job.base_commit}..HEAD"]).stdout
+    names = _jgit(job, ["diff", "--name-only", "-z", _range(job)]).stdout
     job.files_changed = [name for name in names.split("\0") if name]
-    job.diff_stat = _jgit(job, ["diff", "--stat", f"{job.base_commit}..HEAD"]).stdout.rstrip()
+    job.diff_stat = _jgit(job, ["diff", "--stat", "--no-color", _range(job)]).stdout.rstrip()
+
+
+def _range(job: Job) -> str:
+    """What the job changed, as a revision range: base_commit to the snapshot."""
+    return f"{job.base_commit}..{job.head_commit or 'HEAD'}"
 
 
 def collect_report(store: JobStore, job: Job) -> None:
@@ -754,17 +766,23 @@ def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LI
 
 
 def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
-    """The job's changes against the commit it started from."""
+    """The job's changes against the commit it started from.
+
+    Exactly what apply would export: the snapshot's commit, not the copy's
+    HEAD, rendered with DIFF_FLAGS so the user's diff config cannot hide or
+    reshape it, and with the executor's .gitattributes overruled (see
+    workspace.NEUTRAL_ATTRIBUTES).
+    """
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is still {job.state}.")
-    text = _jgit(job, ["diff", f"{job.base_commit}..HEAD"]).stdout
+    text = _jgit(job, ["diff", *DIFF_FLAGS, _range(job)]).stdout
     if not text:
         return f"Job {job.id} changed nothing."
     if len(text) > limit:
         return text[:limit] + (
             f"\n\n[Truncated at {limit} of {len(text)} characters. Full diff: "
-            f"git -C {job.workdir} diff {job.base_commit}..HEAD]"
+            f"git -C {job.workdir} diff {_range(job)}]"
         )
     return text
 
@@ -816,11 +834,13 @@ def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
     """Write the job's changes to its changes.patch, only `pathspecs` if any, and return it.
 
     Binary, so an image or other non-text file survives the trip. Literal
-    pathspecs, so a file named like a glob exports only itself.
+    pathspecs, so a file named like a glob exports only itself. From the
+    snapshot's commit, which diff() showed, and with DIFF_FLAGS, so the
+    user's diff config cannot change which file `git apply` patches.
     """
     patch = store.path(job.id) / "changes.patch"
-    _jgit(job, ["--literal-pathspecs", "diff", "--binary", f"--output={patch}",
-                f"{job.base_commit}..HEAD", "--", *pathspecs])
+    _jgit(job, ["--literal-pathspecs", "diff", "--binary", *DIFF_FLAGS, f"--output={patch}",
+                _range(job), "--", *pathspecs])
     return patch
 
 
@@ -907,8 +927,7 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
 
 def _touched(job: Job) -> list[str]:
     """Every path the job's diff touches, both sides of a rename included."""
-    names = _jgit(job, ["diff", "--name-only", "--no-renames", "-z",
-                        f"{job.base_commit}..HEAD"]).stdout
+    names = _jgit(job, ["diff", "--name-only", "--no-renames", "-z", _range(job)]).stdout
     return [name for name in names.split("\0") if name]
 
 
@@ -1010,7 +1029,7 @@ def _select(job: Job, paths: list[str] | None) -> tuple[list[str], list[str]]:
 def _renames(job: Job) -> dict[str, str]:
     """Map each side of every file the job renamed to the other side."""
     out = _jgit(
-        job, ["diff", "--name-status", "-z", "--find-renames", f"{job.base_commit}..HEAD"]
+        job, ["diff", "--name-status", "-z", "--find-renames", _range(job)]
     ).stdout.split("\0")
     partner: dict[str, str] = {}
     i = 0
