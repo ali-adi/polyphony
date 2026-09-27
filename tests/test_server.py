@@ -13,7 +13,7 @@ from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
     "executors", "delegate", "delegate_many", "status", "diff", "apply", "discard", "cancel",
-    "jobs", "usage", "stats", "revise",
+    "jobs", "usage", "stats", "revise", "wait",
 }
 
 
@@ -752,3 +752,107 @@ def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
     for _ in range(7):
         call(srv, "delegate", instruction="x", repo=str(repo), executor="cursor")
     assert len(store.all()) == 7
+
+
+# wait lane
+
+SLOW_OR_FAST = 'case "$*" in *SLOW*) sleep 30;; *) sleep 1; echo fast > fast.txt;; esac'
+
+
+def _started(server, repo, *instructions):
+    return [call(server, "delegate", instruction=i, repo=str(repo))["job_id"]
+            for i in instructions]
+
+
+def test_wait_any_returns_when_the_first_job_finishes(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        began = time.monotonic()
+        result = call(server, "wait", job_ids=[slow, fast], wait_seconds=20)
+        assert time.monotonic() - began < 10
+        assert result["done"] is True
+        assert result["finished"] == [fast]
+        assert result["active"] == [slow]
+        assert [j["job_id"] for j in result["jobs"]] == [slow, fast], "keeps the caller's order"
+        compact, full = result["jobs"]
+        assert set(compact) == {"job_id", "state", "executor", "elapsed_seconds"}
+        assert compact["state"] in ("queued", "running")
+        assert full["state"] == "succeeded"
+        assert full["files_changed"] == ["fast.txt"]
+        assert "output_tail" in full
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_all_waits_for_every_job(server, repo, fake_agy):
+    fake_agy("sleep 1; echo done")
+    first, second = _started(server, repo, "a", "b")
+    result = call(server, "wait", job_ids=[first, second], until="all", wait_seconds=20)
+    assert result["done"] is True
+    assert result["finished"] == [first, second]
+    assert result["active"] == []
+    assert [j["state"] for j in result["jobs"]] == ["succeeded", "succeeded"]
+
+
+def test_wait_times_out_with_done_false(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        result = call(server, "wait", job_ids=[slow, fast], until="all", wait_seconds=3)
+        assert result["done"] is False
+        assert result["finished"] == [fast]
+        assert result["active"] == [slow]
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_any_returns_at_once_if_a_job_already_finished(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        assert call(server, "wait", job_ids=[fast], wait_seconds=20)["done"] is True
+        began = time.monotonic()
+        result = call(server, "wait", job_ids=[slow, fast], wait_seconds=20)
+        assert time.monotonic() - began < 2
+        assert result["done"] is True and result["finished"] == [fast]
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_without_waiting_reports_at_once(server, repo, fake_agy):
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    try:
+        result = call(server, "wait", job_ids=[job_id], wait_seconds=0)
+        assert result == {"done": False, "finished": [], "active": [job_id],
+                          "jobs": [result["jobs"][0]]}
+        assert result["jobs"][0]["job_id"] == job_id
+    finally:
+        call(server, "cancel", job_id=job_id)
+
+
+@pytest.mark.parametrize("args, expected", [
+    ({"job_ids": []}, "at least one"),
+    ({"job_ids": ["a", "a"]}, "more than once"),
+    ({"job_ids": ["a"], "until": "some"}, "until"),
+])
+def test_wait_refuses_bad_arguments(server, args, expected):
+    assert expected in refused(server, "wait", **args)
+
+
+def test_wait_refuses_an_unknown_job_before_waiting(server, repo, fake_agy):
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    try:
+        began = time.monotonic()
+        assert "No job" in refused(server, "wait", job_ids=[job_id, "nope"], wait_seconds=20)
+        assert time.monotonic() - began < 2
+    finally:
+        call(server, "cancel", job_id=job_id)
+
+
+def test_status_and_instructions_point_at_wait(server):
+    tools = {t.name: t for t in anyio.run(server.list_tools)}
+    assert "use wait" in tools["status"].description
+    assert "call the wait tool" in INSTRUCTIONS

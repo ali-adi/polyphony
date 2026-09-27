@@ -42,7 +42,8 @@ INSTRUCTIONS = (
     "until you apply it. Use it for well-specified mechanical work and read-only "
     "reviews; keep work that needs your own judgment. The loop is: delegate, "
     "status with wait_seconds, diff, then apply, revise with feedback, or "
-    "discard. apply stages the changes without committing."
+    "discard. apply stages the changes without committing. With more than one "
+    "job running, call the wait tool on all of them instead of status on each."
 )
 
 
@@ -181,6 +182,19 @@ def _summary(store: JobStore, job: Job) -> dict:
             check_output_path=str(check),
         )
     return info
+
+
+# wait lane
+WAIT_UNTIL = ("any", "all")
+
+
+def _brief(job: Job) -> dict:
+    """An active job as wait reports it: enough to see it is still going,
+    without the output tail that makes a full summary large when waiting on
+    many jobs. elapsed_seconds is computed as in _summary."""
+    end = job.finished_at or time.time()
+    return {"job_id": job.id, "state": job.state, "executor": job.executor,
+            "elapsed_seconds": round(end - (job.started_at or job.created_at), 1)}
 
 
 def build_server(
@@ -372,7 +386,7 @@ def build_server(
         """A job's state and the tail of its output so far, and once it has
         finished, what it changed and whether its check passed. wait_seconds
         (at most 240) blocks until the job finishes or the time runs out,
-        which is cheaper than polling."""
+        which is cheaper than polling. For more than one job, use wait."""
         with _anticipated():
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
             while True:
@@ -455,5 +469,41 @@ def build_server(
         succeeded, revised, applied, discarded, cancelled, check pass rate, and median
         elapsed time. Counted when a job is applied, discarded, or cancelled."""
         return {"executors": ledger.summarize(ledger.read(store.root))}
+
+    # wait lane
+    @server.tool()
+    def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 120) -> dict:
+        """Block until any (until="any") or all (until="all") of job_ids have
+        finished, or wait_seconds (at most 240) runs out: one call in place
+        of status on each job in turn. "done" says whether that happened.
+        "finished" and "active" list the ids by state, and "jobs" gives
+        each finished job in full, as status would, and each active one only
+        as job_id, state, executor and elapsed_seconds. With "any", a job
+        already finished counts, so pass only the ids you still wait on."""
+        with _anticipated():
+            if until not in WAIT_UNTIL:
+                raise ValueError(f"until must be one of {', '.join(WAIT_UNTIL)}, not {until!r}.")
+            if not job_ids:
+                raise ValueError("Name at least one job.")
+            repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
+            if repeated:
+                raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
+            deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
+            while True:
+                # Every id is loaded on the first pass, so an unknown one is
+                # refused before any waiting.
+                listed = [store.refresh(store.load(i)) for i in job_ids]
+                finished = [j.id for j in listed if j.state not in ACTIVE]
+                done = bool(finished) if until == "any" else len(finished) == len(listed)
+                if done or time.monotonic() >= deadline:
+                    break
+                time.sleep(1)
+            return {
+                "done": done,
+                "finished": finished,
+                "active": [j.id for j in listed if j.state in ACTIVE],
+                "jobs": [_summary(store, j) if j.state not in ACTIVE else _brief(j)
+                         for j in listed],
+            }
 
     return server
