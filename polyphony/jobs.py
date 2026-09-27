@@ -40,6 +40,9 @@ MAX_PROMPT_BYTES = 120 * 1024
 MAX_BRIEF_BYTES = 100 * 1024
 # A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
+# Lane lifecycle. How long cancel lets a process group shut down on SIGTERM
+# before it sends SIGKILL; the tool call waits this long at most.
+CANCEL_GRACE_SECONDS = 2
 
 # A report job is a read-only audit whose findings are a file rather than
 # stdout, which a caller tends to lose. Writing that file needs edit
@@ -60,6 +63,11 @@ class JobNotFound(Exception):
 
 class JobError(Exception):
     """A request the job's current state cannot satisfy."""
+
+
+class JobDisowned(JobError):
+    """The worker's job was cancelled (or marked died) under it: the record
+    is no longer the worker's to write. See save_running."""
 
 
 @dataclass
@@ -151,10 +159,14 @@ class JobStore:
         return self.path(job_id) / "report.md"
 
     def save(self, job: Job) -> None:
-        """Write atomically, so a reader never sees a half-written file."""
+        """Write atomically, so a reader never sees a half-written file.
+
+        The temp file is per process and thread: two writers sharing one name
+        could each replace the other's, and the second os.replace would fail.
+        """
         d = self.path(job.id)
         d.mkdir(parents=True, exist_ok=True)
-        tmp = d / "job.json.tmp"
+        tmp = d / f"job.json.{os.getpid()}-{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(asdict(job), indent=2))
         os.replace(tmp, d / "job.json")
 
@@ -210,6 +222,13 @@ class JobStore:
                 return current
             if current.state == "queued" and not _stuck(current):
                 return current
+            if current.state == "running":
+                # The executor and the check lead their own groups, so they outlive
+                # the worker, and only the worker enforced their timeouts. Left
+                # running they would keep editing the copy under a revise's new
+                # executor, or under discard's rmtree.
+                _signal_groups((current.executor_pgid, current.check_pgid), signal.SIGKILL)
+                current.executor_pgid = current.check_pgid = None
             current.state = "died"
             current.error = error
             current.finished_at = time.time()
@@ -244,6 +263,41 @@ def claim(store: JobStore, job_id: str, attempt: int) -> Job | None:
         job.started_at = time.time()
         store.save(job)
         return job
+
+
+def save_running(store: JobStore, job: Job) -> None:
+    """The worker's save: write its copy of a running job, unless the job is
+    no longer that worker's, and raise JobDisowned then instead.
+
+    The worker holds the record in memory for the whole run. Saving it
+    blindly would overwrite a cancel that landed meanwhile, so a job reported
+    and recorded as cancelled would end up succeeded. Under the store lock,
+    where cancel and refresh write too.
+    """
+    with store.lock():
+        current = store.load(job.id)
+        if current.state != "running" or current.attempt != job.attempt or current.pid != job.pid:
+            raise JobDisowned(f"Job {job.id} is {current.state} now; this worker stops.")
+        store.save(job)
+
+
+def _signal_groups(pgids: Iterable[int | None], sig: int) -> None:
+    for pgid in pgids:
+        if pgid:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass  # already gone, or (macOS) still being reaped
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # macOS: EPERM while a killed group is still being reaped
+    return True
 
 
 def _alive(pid: int) -> bool:
@@ -392,8 +446,18 @@ def launch(store: JobStore, job: Job) -> None:
     The worker double-forks (see polyphony.worker), so the process started
     here exits almost at once. Waiting on it means no zombie is left behind
     in a long-lived server, where it would make a dead worker look alive.
+
+    The grace a worker has to claim the job (QUEUE_GRACE_SECONDS) counts from
+    here, not from create_job: delegate_many makes every copy before launching
+    any, and a slow later copy would otherwise get an earlier job marked died
+    before its worker could claim it.
     """
     job_dir = store.path(job.id)
+    with store.lock():
+        current = store.load(job.id)
+        if current.state == "queued" and current.attempt == job.attempt:
+            current.queued_at = time.time()
+            store.save(current)
     with open(job_dir / "worker.log", "ab") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "polyphony.worker", str(job_dir), str(job.attempt)],
@@ -487,22 +551,35 @@ def revise(
 
 
 def cancel(store: JobStore, job_id: str) -> Job:
-    """Stop a queued or running job, killing its executor with it."""
-    job = store.load(job_id)
-    if job.state not in ACTIVE:
-        return job
-    # The worker first, so it cannot record the executor's death as a failure.
-    for pgid in (job.pgid, job.executor_pgid, job.check_pgid):
-        if pgid:
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass  # already gone, or (macOS) still being reaped
-    job = store.load(job_id)
-    job.state = "cancelled"
-    job.error = "Cancelled."
-    job.finished_at = time.time()
-    _record(store, job, "cancelled")
+    """Stop a queued or running job, killing its executor with it.
+
+    Read, signalled and recorded under the store lock, where claim and the
+    worker's saves (save_running) happen too. So a job claimed meanwhile has
+    its groups recorded by the time they are read here, a job that finished
+    meanwhile keeps its result, and a worker still alive after the signal
+    cannot overwrite "cancelled".
+
+    SIGTERM first, so a CLI can shut down cleanly; the worker dies of it.
+    Nothing else would ever escalate, since the worker was what enforced the
+    timeout, so any group still alive CANCEL_GRACE_SECONDS later gets
+    SIGKILL. That wait is outside the lock and ends as soon as the groups do.
+    """
+    with store.lock():
+        job = store.load(job_id)
+        if job.state not in ACTIVE:
+            return job
+        # The worker first, so it stops before it sees the executor die.
+        groups = [g for g in (job.pgid, job.executor_pgid, job.check_pgid) if g]
+        _signal_groups(groups, signal.SIGTERM)
+        job.state = "cancelled"
+        job.error = "Cancelled."
+        job.finished_at = time.time()
+        _record(store, job, "cancelled")
+    deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+    while groups and time.monotonic() < deadline:
+        time.sleep(0.05)
+        groups = [g for g in groups if _group_alive(g)]
+    _signal_groups(groups, signal.SIGKILL)
     return job
 
 
@@ -572,9 +649,10 @@ def run_check(store: JobStore, job: Job) -> None:
     afterwards, so whatever it writes (caches, coverage files, lockfile
     updates) stays out of the diff, including a revised attempt's. It gets
     its own process group so a timeout can kill everything it started, and
-    records that group so cancel can too. A failed check leaves the job's
-    state alone: the executor did succeed, and whether the work is still
-    worth applying is the caller's call.
+    records that group so cancel can too. On Linux it also gets its own pid
+    namespace, so what it daemonizes out of that group dies with it too. A
+    failed check leaves the job's state alone: the executor did succeed, and
+    whether the work is still worth applying is the caller's call.
     """
     tmp = store.path(job.id) / "tmp"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -599,8 +677,8 @@ def run_check(store: JobStore, job: Job) -> None:
             start_new_session=True,
         )
         job.check_pgid = proc.pid
-        store.save(job)
         try:
+            save_running(store, job)  # in the try, so a cancelled job's check is killed
             job.check_exit_code = proc.wait(timeout=job.check_timeout_seconds)
             job.check_passed = job.check_exit_code == 0
         except subprocess.TimeoutExpired:
@@ -619,7 +697,7 @@ def run_check(store: JobStore, job: Job) -> None:
             except (ProcessLookupError, PermissionError):
                 pass  # already gone, or (macOS) still being reaped
             job.check_pgid = None
-            store.save(job)
+            save_running(store, job)
     _restore(job, snapshot_head)
 
 
@@ -701,7 +779,10 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
             return None
         return [exe, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                 "--bind", str(work), str(work), "--ro-bind", str(gitdir), str(gitdir),
-                "--bind", str(tmp), str(tmp), "--unshare-net", "--die-with-parent", "--"]
+                "--bind", str(tmp), str(tmp), "--unshare-net", "--die-with-parent",
+                # Lane lifecycle: a new pid namespace dies with bwrap, taking with it
+                # anything the check daemonized (setsid) out of its process group.
+                "--unshare-pid", "--"]
     return None
 
 

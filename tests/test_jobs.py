@@ -378,10 +378,12 @@ def test_no_check_in_review_mode(store, repo):
 
 
 def test_a_check_timeout_fails_the_check_and_kills_its_group(store, repo):
-    # The sandbox lets the check write only in its copy and its own $TMPDIR.
-    job = _job(store, repo, "true", check='sleep 30 & echo $! > "$TMPDIR/bg.pid"; wait',
+    # The sandbox lets the check write only in its copy and its own $TMPDIR. It
+    # has its own pid namespace on Linux, so $! is no host pid: a background
+    # child that outlived the kill would show itself by writing `late`.
+    job = _job(store, repo, "true", check='(sleep 2; echo x > "$TMPDIR/late") & wait',
                check_timeout_seconds=1)
-    pidfile = store.path(job.id) / "tmp" / "bg.pid"
+    late = store.path(job.id) / "tmp" / "late"
     started = time.monotonic()
     run(store.path(job.id), executors=FAKE)
     assert time.monotonic() - started < 10
@@ -390,7 +392,8 @@ def test_a_check_timeout_fails_the_check_and_kills_its_group(store, repo):
     assert job.check_passed is False
     assert job.check_exit_code is None
     assert "timed out after 1s" in store.check_path(job.id).read_text()
-    assert _gone(int(pidfile.read_text()))
+    time.sleep(3)
+    assert not late.exists()
 
 
 def test_finished_process_groups_are_forgotten(store, repo):
@@ -407,15 +410,16 @@ def test_finished_process_groups_are_forgotten(store, repo):
 def test_cancel_during_the_check_kills_it(store, repo, fake_agy, wait_for):
     fake_agy("true")
     job = _job(store, repo, "x", executor="agy",
-               check='sleep 30 & echo $! > "$TMPDIR/bg.pid"; wait')
-    pidfile = store.path(job.id) / "tmp" / "bg.pid"
+               check='touch "$TMPDIR/started"; (sleep 2; echo x > "$TMPDIR/late") & wait')
+    tmp = store.path(job.id) / "tmp"
     launch(store, job)
     deadline = time.monotonic() + 20
-    while not pidfile.exists() or not pidfile.read_text().strip():
+    while not (tmp / "started").exists():
         assert time.monotonic() < deadline, "check never started"
         time.sleep(0.1)
     assert cancel(store, job.id).state == "cancelled"
-    assert _gone(int(pidfile.read_text()))
+    time.sleep(3)
+    assert not (tmp / "late").exists()  # see test_a_check_timeout_fails_the_check_and_kills_its_group
 
 
 def test_a_job_json_from_before_the_check_fields_still_loads(store, repo):
@@ -1376,3 +1380,114 @@ def test_apply_refuses_a_report_job(store, repo):
     with pytest.raises(JobError, match="report"):
         apply(store, job.id)
     assert _git("status", "--porcelain", cwd=repo) == ""
+
+
+# --- Lane lifecycle: cancel against the worker, leftover process groups, the claim grace. ---
+
+
+def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo):
+    import threading
+    job = _job(store, repo, "echo done > out.txt")
+    worker = threading.Thread(target=run, args=(store.path(job.id), FAKE, 1))
+    real_load = store.load
+
+    def load(job_id):
+        # The race was a claim between cancel's two reads of the job; cancel
+        # now reads it once, under the lock the claim needs.
+        if load.calls and worker.ident is None:
+            worker.start()
+            deadline = time.monotonic() + 2
+            while real_load(job_id).state != "running" and time.monotonic() < deadline:
+                time.sleep(0.01)
+        load.calls += 1
+        return real_load(job_id)
+
+    load.calls = 0
+    store.load = load
+    try:
+        assert cancel(store, job.id).state == "cancelled"
+    finally:
+        store.load = real_load
+    if worker.ident is None:
+        worker.start()  # late, as a worker launched just before the cancel would be
+    worker.join(timeout=20)
+    job = store.load(job.id)
+    assert job.state == "cancelled" and job.outcome == "cancelled"
+    assert job.files_changed == []
+
+
+def test_the_worker_never_overwrites_a_cancel_that_landed_while_it_ran(store, repo):
+    # The executor stands in for a cancel whose signal the worker survived:
+    # it marks the job cancelled on disk, as cancel does under the lock.
+    job = _job(store, repo, "")
+    record = store.path(job.id) / "job.json"
+    job.instruction = (
+        "python3 -c \"import json,sys; p=sys.argv[1]; r=json.load(open(p)); "
+        f"r['state']='cancelled'; json.dump(r, open(p, 'w'))\" '{record}'; echo hi > new.txt"
+    )
+    store.save(job)
+    run(store.path(job.id), executors=FAKE)
+    job = store.load(job.id)
+    assert job.state == "cancelled"
+    assert job.files_changed == []
+
+
+def test_what_the_executor_leaves_in_the_background_dies_with_it(store, repo, tmp_path):
+    pidfile = tmp_path / "bg.pid"
+    job = _job(store, repo, f"(sleep 300 & echo $! > {pidfile}); echo hi > f.txt")
+    run(store.path(job.id), executors=FAKE)
+    assert store.load(job.id).state == "succeeded"
+    assert _gone(int(pidfile.read_text()))
+
+
+def test_the_claim_grace_counts_from_launch_not_from_create(store, repo, fake_agy, wait_for):
+    # delegate_many makes every copy before it launches any, under the store lock.
+    fake_agy("true")
+    job = _job(store, repo, "x", executor="agy")
+    job.queued_at = time.time() - QUEUE_GRACE_SECONDS - 1  # slow later copies
+    store.save(job)
+    with store.lock():  # the worker can't claim until delegate_many lets go
+        launch(store, job)
+        assert store.refresh(store.load(job.id)).state == "queued"
+    assert wait_for(store, job.id, {"succeeded", "failed", "died"}).state == "succeeded"
+
+
+def test_refresh_of_a_dead_worker_kills_the_executor_it_left(store, repo, fake_agy, wait_for):
+    import signal
+    fake_agy("sleep 300")
+    job = _job(store, repo, "x", executor="agy")
+    launch(store, job)
+    deadline = time.monotonic() + 20
+    while not (job := store.load(job.id)).executor_pgid:
+        assert time.monotonic() < deadline, "executor never started"
+        time.sleep(0.05)
+    os.kill(job.pid, signal.SIGKILL)  # the OOM killer, say
+    died = wait_for(store, job.id, {"died"})
+    assert died.executor_pgid is None and died.check_pgid is None
+    assert _group_gone(job.executor_pgid), "executor outlived its dead worker"
+
+
+def test_cancel_kills_an_executor_that_ignores_sigterm(store, repo, fake_agy):
+    fake_agy("trap '' TERM; sleep 300")
+    job = _job(store, repo, "x", executor="agy")
+    launch(store, job)
+    deadline = time.monotonic() + 20
+    while not (job := store.load(job.id)).executor_pgid:
+        assert time.monotonic() < deadline, "executor never started"
+        time.sleep(0.05)
+    started = time.monotonic()
+    assert cancel(store, job.id).state == "cancelled"
+    assert time.monotonic() - started < 10
+    assert _group_gone(job.executor_pgid), "executor survived cancel"
+
+
+@pytest.mark.skipif("not sys.platform.startswith('linux')", reason="bwrap's pid namespace")
+def test_what_the_check_daemonizes_dies_with_it(store, repo):
+    job = _job(store, repo, "echo hi > new.txt",
+               check="setsid sh -c 'sleep 2; echo late > late.txt' "
+                     "</dev/null >/dev/null 2>&1 & exit 0")
+    run(store.path(job.id), executors=FAKE)
+    job = store.load(job.id)
+    assert job.check_passed is True
+    time.sleep(3)
+    assert not (Path(job.workdir) / "late.txt").exists()

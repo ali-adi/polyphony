@@ -13,8 +13,8 @@ from pathlib import Path
 
 from polyphony.executors import EXECUTORS, BaseExecutor, Mode
 from polyphony.jobs import (
-    REPORT, REPORT_FILE, JobStore, claim, collect_report, executor_mode, prompt, run_check,
-    scrub_env, snapshot,
+    REPORT, REPORT_FILE, JobDisowned, JobStore, claim, collect_report, executor_mode, prompt,
+    run_check, save_running, scrub_env, snapshot,
 )
 
 
@@ -24,7 +24,12 @@ def run(
     attempt: int | None = None,
 ) -> None:
     """Run the job's `attempt`. None means its current one (tests, or a launch from
-    before attempts were passed)."""
+    before attempts were passed).
+
+    Every save goes through save_running, so once the job is cancelled under
+    this worker it writes nothing more and stops (JobDisowned). Raised from
+    on_start, that also kills the executor that just started.
+    """
     job_dir = Path(job_dir)
     store = JobStore(job_dir.parent.parent)
     if attempt is None:
@@ -35,7 +40,7 @@ def run(
 
     def started(pgid: int) -> None:
         job.executor_pgid = pgid
-        store.save(job)
+        save_running(store, job)
 
     output = store.output_path(job.id)
     try:
@@ -46,7 +51,7 @@ def run(
         )
         # Its group is gone; a recorded id could be reused by the OS and hit by cancel.
         job.executor_pgid = None
-        store.save(job)
+        save_running(store, job)
         if result.error:
             with output.open("a") as f:
                 f.write(f"\n\n--- error ---\n{result.error}")
@@ -64,6 +69,8 @@ def run(
                     f"The executor finished but wrote no {REPORT_FILE} at the repository "
                     f"root, so there is no report. Its output is in {output}."
                 )
+    except JobDisowned:
+        return  # cancelled under it: the record is the canceller's now
     except Exception as e:
         # A Polyphony bug, not an executor failure. Record it so status shows
         # it, then re-raise so the traceback reaches worker.log.
@@ -74,7 +81,10 @@ def run(
         raise
     finally:
         job.finished_at = time.time()
-        store.save(job)
+        try:
+            save_running(store, job)
+        except JobDisowned:
+            pass
 
 
 def main(argv: list[str]) -> None:

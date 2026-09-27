@@ -73,7 +73,9 @@ store lock only if that attempt is still current. So a job cancelled while
 queued and then revised can't be run by both its old worker and its new one.
 A queued job that no worker claims within a minute (the server stopped
 between creating and launching it) is marked `died`, so it stops holding a
-job slot. The lock is reentrant per thread, because `delegate` holds it while
+job slot. The minute counts from `launch`, not from creating the job, so a
+`delegate_many` whose later copies are slow doesn't get its first job marked
+`died` while that job's worker waits for the lock. The lock is reentrant per thread, because `delegate` holds it while
 counting jobs and counting refreshes them.
 
 **The worker double-forks.** The server is long-lived. If it were the worker's
@@ -81,7 +83,16 @@ parent, a worker that died would linger as a zombie, `os.kill(pid, 0)` would kee
 succeeding, and `died` would never be detected. `launch()` waits on an
 intermediate process that exits at once, so the real worker is reparented to
 init. The worker, the executor, and the check each lead their own process
-group; the job records all three and `cancel` kills them all. On macOS,
+group; the job records all three and `cancel` kills them all: SIGTERM, then
+SIGKILL for any group still alive two seconds later, since the worker that
+enforced the timeout is gone by then. `cancel` reads and records the job under
+the store lock, and every save the worker makes goes through `save_running`,
+which under the same lock refuses once the job is no longer its running
+attempt. So a worker that claims or finishes during a `cancel` can't turn a
+cancelled job back into a succeeded one, nor a cancel overwrite a finished
+result. When `refresh` finds a worker dead, it kills the executor and check
+groups it left, which would otherwise run on with no timeout, beside a
+revise's new executor. On macOS,
 signalling a group that is still being reaped briefly returns `EPERM` before
 `ESRCH`, so treating `EPERM` as alive only delays `died` by a poll, and `cancel`
 ignores it.
@@ -93,7 +104,8 @@ because it is what explains a non-zero exit and would clutter a review's
 output. Both are files rather than pipes, so no buffer can fill and block the
 CLI. How often the file grows depends on the CLI's own buffering. The executor
 starts a new session, so a timeout kills everything it started, not only the
-CLI. That puts it outside the worker's group, so the worker records the
+CLI, and so does its exit: a dev server or watcher it left in the background
+would otherwise keep writing to the copy. That puts it outside the worker's group, so the worker records the
 executor's group in `job.json` for `cancel`. A `cancel` in the
 instant between the executor starting and that record being written still
 misses the executor.
@@ -149,8 +161,11 @@ the check does not run, and `check.txt` says why. Running it after the snapshot,
 then resetting the copy to that snapshot, keeps what it writes (caches, coverage
 files, lockfile updates) out of the diff, a revised attempt's included. A failing check still leaves the job `succeeded`: the executor did
 its part, and whether the work is worth fixing or applying is the lead's call.
-The check gets its own process group, killed on timeout, and the job records
-that group so `cancel` kills it too.
+The check gets its own process group, killed on timeout and when it exits, and
+the job records that group so `cancel` kills it too. On Linux `bwrap` also
+gives it its own pid namespace (`--unshare-pid`), so a process it daemonizes
+with `setsid` out of that group still dies when the check does, instead of
+writing into the copy after it was reset. `sandbox-exec` has no equivalent.
 
 **`apply` is a patch.** The job's changes are exported with
 `git diff --binary` and staged with `git apply --index`, which is atomic. If any
