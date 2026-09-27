@@ -8,6 +8,7 @@ Polyphony bug, which the SDK reports as a generic crash and logs here.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import time
 from collections.abc import Callable
@@ -36,6 +37,9 @@ MAX_WAIT_SECONDS = 240  # below MCP clients' tool-call timeouts
 OUTPUT_TAIL_CHARS = 8000
 CHECK_TAIL_CHARS = 4000
 INSTRUCTION_TAIL_CHARS = 200
+# A day. Far above any real task, and far below where the executor's
+# communicate(timeout=) overflows (about 35,791 minutes).
+MAX_TIMEOUT_MINUTES = 24 * 60
 WITHHELD_NOTE = (
     "These secret-looking files were kept out of the job's copy. If the task needs "
     "one, list it under allow_secrets in the project config and delegate again."
@@ -71,25 +75,36 @@ def _toplevel(repo: str) -> Path:
     return Path(res.stdout.strip()).resolve()
 
 
+def _check_timeout(timeout_minutes: int) -> None:
+    if timeout_minutes <= 0:
+        raise ValueError("timeout_minutes must be positive.")
+    if timeout_minutes > MAX_TIMEOUT_MINUTES:
+        raise ValueError(
+            f"timeout_minutes must be at most {MAX_TIMEOUT_MINUTES} (24 hours), "
+            f"not {timeout_minutes}.")
+
+
 def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {', '.join(MODES)}, not {mode!r}.")
-    if timeout_minutes <= 0:
-        raise ValueError("timeout_minutes must be positive.")
+    _check_timeout(timeout_minutes)
     if check and mode != "code":
         raise ValueError(
             f"check runs only in code mode; {mode} mode changes no code to check.")
 
 
 def _task(
-    instruction: str, brief_path: str | None, root: Path, mode: str
+    instruction: str, brief_path: str | None, repo: str, mode: str
 ) -> tuple[Path, str] | None:
     """The brief, read and checked, if one was named; refuses a delegate with no
     task, or one too long to hand an executor (see jobs.MAX_PROMPT_BYTES).
 
+    A relative brief_path is taken from `repo` as the caller gave it, which
+    may be a subdirectory, not from the repository's top level.
     Before any executor is chosen or copy made, so a bad path costs nothing.
     """
-    brief = jobs.read_brief(brief_path, root) if brief_path else None
+    base = Path(repo).expanduser().resolve()
+    brief = jobs.read_brief(brief_path, base) if brief_path else None
     if brief is None and not instruction.strip():
         raise ValueError("Give the task as instruction, brief_path, or both.")
     jobs.check_prompt(jobs.task_text(jobs.with_brief(instruction, brief and brief[1]), mode))
@@ -177,6 +192,19 @@ def _choose(
     )
 
 
+def _tail(path: Path, chars: int) -> str:
+    """The file's last `chars` characters, reading only its end (UTF-8 takes at
+    most 4 bytes a character). The executor, and the check it is judged by,
+    decide how large their output grows; status must not load all of it into
+    the server."""
+    try:
+        with path.open("rb") as f:
+            f.seek(max(0, f.seek(0, os.SEEK_END) - chars * 4))
+            return f.read(chars * 4).decode("utf-8", errors="replace")[-chars:]
+    except FileNotFoundError:
+        return ""
+
+
 def _summary(store: JobStore, job: Job) -> dict:
     end = job.finished_at or time.time()
     info = {
@@ -202,8 +230,7 @@ def _summary(store: JobStore, job: Job) -> dict:
         return info
     # A running job's output is whatever the executor has written so far.
     output = store.output_path(job.id)
-    text = output.read_text(errors="replace") if output.exists() else ""
-    info.update(output_tail=text[-OUTPUT_TAIL_CHARS:], output_path=str(output))
+    info.update(output_tail=_tail(output, OUTPUT_TAIL_CHARS), output_path=str(output))
     if job.state not in ACTIVE:
         info.update(
             exit_code=job.exit_code,
@@ -218,17 +245,23 @@ def _summary(store: JobStore, job: Job) -> dict:
         info.update(
             check_passed=job.check_passed,
             check_exit_code=job.check_exit_code,
-            check_output_tail=check.read_text(errors="replace")[-CHECK_TAIL_CHARS:] if check.exists() else "",
+            check_output_tail=_tail(check, CHECK_TAIL_CHARS),
             check_output_path=str(check),
         )
     if job.mode == jobs.REPORT and job.state not in ACTIVE:
         report = Path(job.report_path) if job.report_path else None
+        chars = job.report_chars
+        if chars is None:  # saved before the length was recorded: bytes, near enough
+            chars = report.stat().st_size if report and report.is_file() else 0
         info.update(
             report_path=job.report_path,
-            report_chars=len(report.read_text(errors="replace"))
-            if report and report.is_file() else 0,
+            report_chars=chars if report and report.is_file() else 0,
             stray_changes=job.stray_changes,
         )
+        if job.report_truncated:
+            info["report_truncated"] = (
+                f"REPORT.md was over {jobs.REPORT_MAX_BYTES} bytes; only the first "
+                f"{jobs.REPORT_MAX_BYTES} were kept.")
     return info
 
 
@@ -356,14 +389,16 @@ def build_server(
         repository's configured one; "" skips it. Nothing reaches the
         repository until you call apply. Follow up with status.
 
-        brief_path names a UTF-8 file (at most 100 KB; relative to repo) whose
-        text follows instruction, after a blank line, as the task; use it for
-        any long brief, which can be cut short when passed inline. It is
+        brief_path names a UTF-8 file (at most 100 KB; a relative path is
+        from the repo directory as given) whose text follows instruction,
+        after a blank line, as the task; use it for any long brief, which
+        can be cut short when passed inline. It is
         copied at once, so later edits to the file don't reach the job. Give
         instruction, brief_path, or both; together they must stay under 120
         KB. instruction_chars and instruction_tail in the result show the
         task arrived whole. model overrides the repository's model and needs
-        executor, since a model belongs to one CLI."""
+        executor, since a model belongs to one CLI. timeout_minutes is at
+        most 1440 (a day)."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
             model = _model(model)
@@ -374,7 +409,7 @@ def build_server(
                     "or leave model out for the project's."
                 )
             root = _toplevel(repo)
-            brief = _task(instruction, brief_path, root, mode)
+            brief = _task(instruction, brief_path, repo, mode)
             project = project_for(root)
             with store.lock():
                 chosen, skipped = _choose(
@@ -421,7 +456,7 @@ def build_server(
                 )
             models = {n: _model(m, f"models[{n!r}]") for n, m in models.items()}
             root = _toplevel(repo)
-            brief = _task(instruction, brief_path, root, mode)
+            brief = _task(instruction, brief_path, repo, mode)
             project = project_for(root)
             with store.lock():
                 running = active_counts(store)
@@ -449,8 +484,8 @@ def build_server(
         once any of the job has been applied, or once the task with all its
         feedback would pass 120 KB. Follow up with status."""
         with _anticipated():
-            if timeout_minutes is not None and timeout_minutes <= 0:
-                raise ValueError("timeout_minutes must be positive.")
+            if timeout_minutes is not None:
+                _check_timeout(timeout_minutes)
             job = store.load(job_id)
             name = job.executor
             if name not in executors or not executors[name]().is_available():

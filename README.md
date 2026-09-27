@@ -17,7 +17,7 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | Tool | What it does |
 |---|---|
 | `executors(repo?)` | The pool in preference order: whether each CLI is available, its modes, its active jobs against its limit, and its last cached quota check |
-| `delegate(instruction?, repo, executor?, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it) |
+| `delegate(instruction?, repo, executor?, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it). `timeout_minutes` (default 30) is at most 1440 |
 | `delegate_many(instruction?, repo, executors, mode?, timeout_minutes?, check?, brief_path?, models?)` | The same brief to several executors, one job each, to compare diffs. Spends quota on every one |
 | `status(job_id, wait_seconds?)` | State and the tail of the agent's output so far; once finished, also changed files, diff stat, and the check's result and output tail. Can block up to 240s |
 | `wait(job_ids, until?, wait_seconds?)` | Block until `any` (default) or `all` of several jobs finish, up to 240s: one call instead of `status` on each. Returns `done`, the `finished` and `active` ids, and `jobs`: finished ones in full as `status` gives them, active ones only as id, state, executor, and elapsed time. With `any`, an already finished job counts, so pass only the ids still awaited |
@@ -43,10 +43,13 @@ runs in the CLI's `code` mode, since writing a file needs edit permission, so a
 review-only executor can't take it. The report is saved as the job's
 `report.md`; `status` shows `report_path`, `report_chars`, and `stray_changes`
 (files changed besides `REPORT.md`), and `report` reads it. A run that writes no
-`REPORT.md` fails. So does one whose `REPORT.md` is a symlink, or is a file your
-repository already tracks that the job left unchanged: an old report is never
-passed off as the new one. If you track a `REPORT.md`, the agent has to rewrite
-it. No check runs, and `apply` and `apply_many` refuse a report job.
+`REPORT.md` fails. So does one whose `REPORT.md` is a symlink or a hard link, or
+is one that was already there and the run left unchanged (one your repository
+has, or an earlier attempt's before a `revise`): an old report is never passed
+off as the new one. If your working tree has a `REPORT.md`, the agent has to
+rewrite it; a gitignored one is left out of the job's copy. Only the first 5 MB
+of a report are kept (`status` then shows `report_truncated`). No check runs,
+and `apply` and `apply_many` refuse a report job.
 
 With no `executor` named, `delegate` takes the first one in the project's `pool`
 that is installed, supports the mode, is below its limit of active jobs, and is
@@ -69,11 +72,11 @@ still reachable. Without a sandbox it does not run.
 
 A long brief can be cut short when passed inline, so `delegate` and
 `delegate_many` also take `brief_path`: a UTF-8 file of at most 100 KB (relative
-paths are from the repo). It is copied into the job at once as `brief.md`, and
+paths are from the `repo` directory as given). It is copied into the job at once as `brief.md`, and
 the agent is told `instruction`, a blank line, then the brief; either may be
 left out, not both. The whole task (instruction, brief, and report mode's
-request) must stay under 120 KB, and `revise` refuses feedback that would take
-it over: agy, cursor, gemini and opencode get the task as one command-line
+request) must stay under 120 KB and hold no NUL byte, and `revise` refuses
+feedback that would break either: agy, cursor, gemini and opencode get the task as one command-line
 argument, which Linux caps at 128 KiB. `status` reports `instruction_chars`, `instruction_sha256`,
 and `instruction_tail` (the last 200 characters) of that task, before any
 `revise` feedback, so you can check it arrived whole. `model` overrides the

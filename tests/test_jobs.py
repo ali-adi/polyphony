@@ -1635,3 +1635,76 @@ def test_what_the_check_daemonizes_dies_with_it(store, repo):
     assert job.check_passed is True
     time.sleep(3)
     assert not (Path(job.workdir) / "late.txt").exists()
+
+
+# --- Lane reportapi: only a report this attempt wrote, bounded, is the job's. ---
+
+
+def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
+    (repo / ".gitignore").write_text("env/\ndata/\nREPORT.md\n")
+    _git("commit", "-q", "-am", "ignore reports", cwd=repo)
+    (repo / "REPORT.md").write_text("OLD REPORT FROM LAST MONTH\n")
+    job = _job(store, repo, "echo nothing new", mode="report")
+    assert not (Path(job.workdir) / "REPORT.md").exists()
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.report_path is None
+    assert (repo / "REPORT.md").read_text() == "OLD REPORT FROM LAST MONTH\n"
+    # A code job still gets the ignored file, as any other.
+    assert (Path(_job(store, repo, "true").workdir) / "REPORT.md").exists()
+
+
+def test_an_untracked_old_report_left_unchanged_is_not_this_jobs(store, repo):
+    (repo / "REPORT.md").write_text("old untracked findings\n")
+    job = _job(store, repo, "echo nothing new", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.report_path is None
+
+
+def test_a_revision_that_writes_no_report_does_not_reuse_the_last_one(store, repo):
+    job = _job(store, repo, "[ -f REPORT.md ] || echo first > REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    assert store.load(job.id).state == "succeeded"
+    revise(store, job.id, "go deeper")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.attempt == 2
+    assert job.state == "failed" and job.report_path is None
+
+
+def test_a_hardlinked_report_is_not_read(store, repo, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET OUTSIDE COPY\n")
+    job = _job(store, repo, f"ln {secret} REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.report_path is None
+    assert not store.report_path(job.id).exists()
+
+
+def test_an_oversized_report_is_cut_at_the_limit(store, repo, monkeypatch):
+    from polyphony import jobs
+    from polyphony.jobs import read_report, report
+    monkeypatch.setattr(jobs, "REPORT_MAX_BYTES", 10)
+    job = _job(store, repo, "printf 'abcdefghijklmnop' > REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "succeeded", job.error
+    assert job.report_truncated and job.report_chars == 10
+    assert store.report_path(job.id).read_bytes() == b"abcdefghij"
+    # A larger report.md saved before the cap is still read only up to it.
+    store.report_path(job.id).write_text("x" * 100)
+    assert read_report(store, job.id) == "x" * 10
+    assert report(store, job.id)["total_chars"] == 10
+
+
+def test_a_task_with_a_nul_byte_is_refused(store, repo):
+    from polyphony.jobs import check_prompt
+    with pytest.raises(ValueError, match="NUL"):
+        check_prompt("a\0b")
+    job = _job(store, repo, "true")
+    run(store.path(job.id), executors=REPORTING)
+    with pytest.raises(ValueError, match="NUL"):
+        revise(store, job.id, "fix\0this")
+    assert store.load(job.id).attempt == 1

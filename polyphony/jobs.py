@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -137,6 +138,13 @@ class Job:
     # anything left running in the copy could move after the lead reviewed it.
     # None for a job from before this, which reads HEAD.
     head_commit: str | None = None
+    # Lane reportapi. REPORT.md as the worker found it before this attempt ran
+    # (report_fingerprint), so collect_report takes only a file the attempt wrote;
+    # the saved report's length, so status never reads it; and whether it was cut
+    # at REPORT_MAX_BYTES.
+    report_before: list[int] | None = None
+    report_chars: int | None = None
+    report_truncated: bool = False
 
     @property
     def applied(self) -> bool:
@@ -324,9 +332,9 @@ def read_brief(path: str, base: Path) -> tuple[Path, str]:
     """The brief file's resolved path and text, or a ValueError saying what is wrong.
 
     A long instruction can be cut short on its way through a client, so a
-    caller writes it to a file instead. A relative path is taken from the
-    repository (`base`), not the server's working directory, which the caller
-    cannot see. Read once, at delegate time: the job keeps a copy, so editing
+    caller writes it to a file instead. A relative path is taken from `base`,
+    the repo directory the caller gave, not the server's working directory,
+    which the caller cannot see. Read once, at delegate time: the job keeps a copy, so editing
     the file afterwards changes neither a queued job nor a revision.
     """
     file = (base / Path(path).expanduser()).resolve()
@@ -354,13 +362,20 @@ def read_brief(path: str, base: Path) -> tuple[Path, str]:
 
 
 def check_prompt(text: str) -> None:
-    """Refuse a prompt too long for an executor that takes it as one argument.
+    """Refuse a prompt too long for an executor that takes it as one argument,
+    or one holding a NUL byte, which no argv string can carry.
 
     Checked when the job is created and on each revise, rather than left to
-    fail at launch with "Argument list too long". Applied to every executor,
-    though claude and codex read stdin, so a task's limit does not depend on
-    which executor happens to be chosen.
+    fail at launch with "Argument list too long" or "embedded null byte",
+    which the job would report as a Polyphony worker error. Applied to every
+    executor, though claude and codex read stdin, so a task's limits do not
+    depend on which executor happens to be chosen.
     """
+    if "\0" in text:
+        raise ValueError(
+            "The task contains a NUL byte (in the instruction, brief or feedback), "
+            "which an executor cannot be given; remove it."
+        )
     size = len(text.encode("utf-8"))
     if size > MAX_PROMPT_BYTES:
         raise ValueError(
@@ -411,6 +426,9 @@ def create_job(
     except WorkspaceError:
         shutil.rmtree(store.path(job_id), ignore_errors=True)
         raise
+    base_commit = _check(copy_git(["rev-parse", "HEAD"], ws.git_dir, ws.path)).stdout.strip()
+    if mode == REPORT:
+        _drop_untracked_report(ws, base_commit)
     job = Job(
         id=job_id,
         project=project.name,
@@ -421,7 +439,7 @@ def create_job(
         timeout_seconds=timeout_seconds,
         workdir=str(ws.path),
         git_dir=str(ws.git_dir),
-        base_commit=_check(copy_git(["rev-parse", "HEAD"], ws.git_dir, ws.path)).stdout.strip(),
+        base_commit=base_commit,
         model=model,
         link_paths=[
             str(e["path"]).rstrip("/") for e in project.provision if e.get("mode") == "link"
@@ -438,6 +456,23 @@ def create_job(
         store.brief_copy_path(job_id).write_text(brief[1], encoding="utf-8")
     store.save(job)
     return job
+
+
+def _drop_untracked_report(ws: Workspace, base_commit: str) -> None:
+    """Remove a REPORT.md the copy has but its base commit lacks.
+
+    That is a gitignored one the overlay brought over from the working tree:
+    an old report, which the agent should not build on or be mistaken for
+    having written. Being ignored, removing it changes nothing in the diff.
+    A REPORT.md in the base commit stays, and counts only if rewritten (see
+    collect_report).
+    """
+    stale = ws.path / REPORT_FILE
+    if not (stale.is_symlink() or stale.is_file()):
+        return
+    if copy_git(["cat-file", "-e", f"{base_commit}:{REPORT_FILE}"],
+                ws.git_dir, ws.path).returncode != 0:
+        stale.unlink()
 
 
 def executor_mode(mode: str) -> Mode:
@@ -549,6 +584,8 @@ def revise(
     job.check_exit_code = job.check_passed = None
     job.report_path = None
     job.stray_changes = []
+    job.report_chars = None
+    job.report_truncated = False
     # A cancelled attempt is not the job's outcome. The ledger keeps the last
     # entry per job, so the outcome of this attempt replaces it.
     job.outcome = None
@@ -629,23 +666,64 @@ def _range(job: Job) -> str:
     return f"{job.base_commit}..{job.head_commit or 'HEAD'}"
 
 
+def _fingerprint(st: os.stat_result) -> list[int]:
+    # ctime cannot be set from user space, so any write, rename or touch changes it.
+    return [st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def report_fingerprint(job: Job) -> list[int] | None:
+    """REPORT.md in the job's copy as it stands, or None if there is none.
+
+    The worker records it before each attempt runs, so collect_report can tell
+    a report this attempt wrote from one already there: an earlier attempt's,
+    or one the repository had.
+    """
+    try:
+        return _fingerprint(os.lstat(Path(job.workdir) / REPORT_FILE))
+    except OSError:
+        return None
+
+
+# A report is read in 20,000-character pages; far past this, it is not a report.
+REPORT_MAX_BYTES = 5 * 1024 * 1024
+
+
 def collect_report(store: JobStore, job: Job) -> None:
     """Save a report job's REPORT.md as jobs/<id>/report.md, after snapshot().
 
-    Only a regular file counts: a symlink could point anywhere on the
-    machine, and report() would hand its contents back. A REPORT.md the
-    repository already tracks counts only if the job changed it, so an old
-    report is never taken for this job's.
+    Only a regular file with one link counts: a symlink could point anywhere
+    on the machine, and a hard link could be another file on it, whose
+    contents report() would hand back. It is opened without following a
+    symlink and checked on the open file, so it cannot be swapped between the
+    check and the read. It counts only if this attempt wrote it (see
+    report_fingerprint), and a REPORT.md the repository already tracks only
+    if the job changed it, so an old report is never taken for this job's.
+    At most REPORT_MAX_BYTES are kept, so the executor cannot fill the disk
+    or the server's memory with it.
     """
     job.stray_changes = [f for f in job.files_changed if f != REPORT_FILE]
-    source = Path(job.workdir) / REPORT_FILE
-    if not source.is_file() or source.is_symlink():
-        return
-    tracked = _jgit(job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"], check=False)
-    if tracked.returncode == 0 and REPORT_FILE not in job.files_changed:
-        return
-    shutil.copyfile(source, store.report_path(job.id))
+    try:
+        # O_NONBLOCK, so a FIFO named REPORT.md cannot hang the open.
+        fd = os.open(Path(job.workdir) / REPORT_FILE,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return  # none, or a symlink
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            return
+        if job.report_before is not None and _fingerprint(st) == job.report_before:
+            return
+        tracked = _jgit(job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"],
+                        check=False)
+        if tracked.returncode == 0 and REPORT_FILE not in job.files_changed:
+            return
+        data = f.read(REPORT_MAX_BYTES + 1)
+    job.report_truncated = len(data) > REPORT_MAX_BYTES
+    data = data[:REPORT_MAX_BYTES]
+    store.report_path(job.id).write_bytes(data)
     job.report_path = str(store.report_path(job.id))
+    job.report_chars = len(data.decode("utf-8", errors="replace"))
 
 
 def run_check(store: JobStore, job: Job) -> None:
@@ -850,7 +928,9 @@ def read_report(store: JobStore, job_id: str) -> str:
             f"Job {job.id} has no report: it wrote no {REPORT_FILE}. "
             f"Its output is in {store.output_path(job.id)}."
         )
-    return Path(job.report_path).read_text(errors="replace")
+    # Bounded, for a report saved before collect_report capped its size.
+    with open(job.report_path, "rb") as f:
+        return f.read(REPORT_MAX_BYTES).decode("utf-8", errors="replace")
 
 
 def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LIMIT) -> dict:
