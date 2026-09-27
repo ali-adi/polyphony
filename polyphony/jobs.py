@@ -824,6 +824,10 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     for job in batch:
         if job.state != "succeeded":
             raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
+        if job.mode == REPORT:
+            # apply refuses it, so letting it through would stop the run part way.
+            raise JobError(f"Job {job.id} is a report job: it has no changes to apply; "
+                           "leave it out and read it with report().")
         if not job.files_changed:
             raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
         if job.applied and all(f in job.applied_paths for f in job.files_changed):

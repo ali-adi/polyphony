@@ -230,6 +230,22 @@ def test_every_job_is_validated_before_anything_changes(store, repo, tmp_path):
     assert not store.load(good.id).applied
 
 
+
+def test_a_report_job_is_refused_before_anything_changes(store, repo):
+    """apply refuses a report job, so apply_many must refuse it up front rather
+    than apply the jobs before it and stop there."""
+    good = _done(store, repo, "echo a > a.txt")
+    report = create_job(store, project=ProjectConfig(name="demo", path=repo),
+                        instruction="echo findings > REPORT.md; exit 0", executor="shell",
+                        mode="report")
+    run(store.path(report.id), executors={"shell": ShellExecutor})
+    assert store.load(report.id).state == "succeeded"
+    before = _state(repo)
+    with pytest.raises(JobError, match=f"Job {report.id} is a report job"):
+        apply_many(store, [good.id, report.id])
+    assert _state(repo) == before
+    assert not store.load(good.id).applied
+
 # --- The tool ---
 
 
