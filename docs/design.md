@@ -26,7 +26,7 @@ there. State lives in `~/.polyphony/`, not in any client's session.
 | `workspace.py` | A job's private clone of the repo, provisioning of gitignored paths |
 | `guard.py` | The only way git is spawned. Refuses `push` before a process exists |
 | `config.py` | Per-repository provisioning, pool order, models, check command, job limits. Found in the repo's `.polyphony.yaml`, then `$POLYPHONY_HOME/projects/`, then the legacy package-relative `projects/` |
-| `jobs.py` | Job records, launch, cancel, revise, snapshot, check, diff, apply, discard, gc |
+| `jobs.py` | Job records, launch, cancel, revise, snapshot, check, diff, apply, apply_many, discard, gc |
 | `ledger.py` | One line per job's outcome (applied, discarded, cancelled), and the `stats` summary |
 | `worker.py` | The detached process that runs one job |
 | `usage.py` | Remaining quota, read from each CLI's own report, and its on-disk cache |
@@ -164,6 +164,21 @@ both. The job records `applied_paths`; a later apply without paths takes the res
 and naming an applied path again is refused rather than applied twice. After
 any apply, `revise` is refused.
 
+**`apply_many` pre-checks the whole batch.** Applied one at a time, jobs from a
+fan-out that conflict with each other are found only at the second one, with the
+first already in the repository. `apply_many` first applies every patch, in
+order, with `git apply --cached` to two scratch index files under the store: a
+copy of the repository's index, and a copy that also takes the working tree's
+current content of every file a job touches. A job whose files agree in both
+and whose patch fits goes on both, as `apply --index` would stage it; one that
+fits only the working-tree index would land unstaged, as `apply` falls back to.
+Blobs go to a scratch object directory that borrows the repository's objects as
+an alternate, so the pre-check writes nothing to the repository. Only if every
+patch fits does each go through `apply` itself, so the ledger and
+`applied_paths` stay as they would be; if one fails then anyway (the repository
+changed meanwhile), it stops and says which landed. It takes whole jobs only:
+a partly applied job's remaining patch is not what its record describes.
+
 **`revise` reruns in the same copy.** A wrong-but-close result is cheaper to
 correct than to redo, so `revise` queues another run of the same executor in
 the job's copy, on top of what the last attempt left. `base_commit` does not
@@ -185,6 +200,29 @@ none. Applying then discarding counts as one applied job. `revise` writes
 nothing, and each line carries the job's attempt count. The one job with two
 lines is a cancelled attempt that is then revised: `revise` clears the outcome,
 and the ledger is read as each job's last line.
+
+**A brief file is copied into the job's instruction.** Long inline instructions
+were cut short on the way in, so `brief_path` names a file instead. It is read
+once, at delegate time (at most 100 KB, UTF-8, relative to the repo), and the
+instruction, a blank line, and its text are stored together as the job's
+`instruction`: `prompt()` and every `revise` then restate the whole task from
+`job.json` alone, and later edits to the file reach no queued or revised job.
+`brief.md` keeps the brief by itself for reading, and `brief_path` is kept for
+display only. `status` gives the stored task's length, SHA-256, and last 200
+characters so the lead can confirm it arrived whole. agy, cursor, gemini, and
+opencode take the prompt as one argv string, which Linux caps at 128 KiB
+(MAX_ARG_STRLEN); over it the executor fails to start with "Argument list too
+long". So the whole prompt, as `prompt()` builds it, is held to 120 KB
+(`MAX_PROMPT_BYTES`, in UTF-8 bytes, which is what the kernel counts), checked
+at delegate time before any copy is made and again on each `revise`, whose
+feedback only adds to it. The limit applies whichever executor runs, although
+claude and codex read stdin, so whether a task fits never depends on which one
+the pool picks. The brief's own 100 KB leaves room for the instruction, report
+mode's request and feedback.
+
+**A model needs its executor.** `model` on `delegate` is refused without
+`executor`: a model name belongs to one CLI, and with the pool choosing, it
+would go to whichever executor was free, which may not know it.
 
 **Old jobs are removed only on request.** `polyphony gc --older-than` has no
 default and never runs on its own. A finished job may hold work nobody has
@@ -223,6 +261,34 @@ job clone another.
 lists what an adapter supports, and the server refuses or skips one that lacks
 the requested mode. opencode's edit-capable agent allows everything without
 asking and has no sandbox, so it gets no `code` mode.
+
+**Secrets are withheld by name, and the check's environment is scrubbed.**
+The overlay copies untracked and gitignored files so the copy matches the
+working tree, which would also hand every agent the repository's `.env`. So
+files whose basename looks like a secret (`SECRET_PATTERNS` in `workspace.py`)
+are left out, including one staged but never committed, and listed in the
+job's `withheld`; `allow_secrets` lets named ones through. Both match without
+regard to case, since `.ENV` holds keys as surely as `.env`, and on macOS's
+default file system they are the same file. Matching is by name, not content: a key in `settings.toml` still goes, and a committed `.env` is in
+the clone regardless. Explicit `provision` entries are the user's choice and are
+not filtered. The check runs executor-written code, so it loses
+`*_API_KEY`-style variables by default. The executor does not, because agent
+CLIs authenticate with them; `env_scrub` names variables removed from both, and
+is recorded on the job so the detached worker applies it.
+
+**A report is a job mode, not an executor mode.** Audits run in review mode
+left their findings only in stdout, which callers lost, and users worked around
+it by running code mode with "only create ERROR_AUDIT.md". `report` makes that
+the contract: the executor runs in its `code` mode (writing a file needs edit
+permission), the prompt asks for `REPORT.md` and nothing else, and the worker
+copies it out as the job's `report.md`. Other edits are listed as
+`stray_changes` rather than prevented, since no CLI can grant write access to
+one file. A symlinked `REPORT.md` is not read, since it could point at any
+file on the machine. A tracked `REPORT.md` the job left unchanged is not taken
+as the report either, so an old report is never returned as the new one; the
+cost is that an agent writing exactly the tracked text fails the job. That is
+kept, rather than accepting any `REPORT.md` present, because a stale report
+passed off as fresh is worse than a rerun.
 
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work

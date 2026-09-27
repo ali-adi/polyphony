@@ -7,6 +7,7 @@ so a job started from one MCP client can be checked from another.
 from __future__ import annotations
 
 import fcntl
+import fnmatch
 import json
 import os
 import secrets
@@ -14,21 +15,43 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from polyphony import ledger
 from polyphony.config import DEFAULT_HOME, ProjectConfig
+from polyphony.executors.base import Mode
 from polyphony.guard import run_git
 from polyphony.workspace import Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
+# agy, cursor, gemini and opencode take the whole prompt as one argv string, which
+# Linux caps at 128 KiB (MAX_ARG_STRLEN); over it the executor cannot even start.
+# The prompt limit stays under that, and a brief under the prompt limit leaves
+# room for the instruction, report mode's request, and revise feedback.
+MAX_PROMPT_BYTES = 120 * 1024
+# A brief is read whole into the job record and the executor's prompt.
+MAX_BRIEF_BYTES = 100 * 1024
 # A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
+
+# A report job is a read-only audit whose findings are a file rather than
+# stdout, which a caller tends to lose. Writing that file needs edit
+# permission, so the executor runs in its code mode; what keeps it to the
+# report is the instruction, and stray_changes shows whether it listened.
+REPORT = "report"
+REPORT_FILE = "REPORT.md"
+REPORT_INSTRUCTION = (
+    f"Write your complete findings as Markdown to {REPORT_FILE} at the repository "
+    "root. That file is the product of this task, so put everything in it, not only "
+    "in your reply. Change no other file."
+)
 
 
 class JobNotFound(Exception):
@@ -88,6 +111,18 @@ class Job:
     git_dir: str | None = None
     # When the job last became queued, so a worker that never claims it is noticed.
     queued_at: float | None = None
+    # Lane r2-secrets. Secret-looking files the copy was not given (see
+    # workspace.SECRET_PATTERNS), and the project's env_scrub globs, recorded so
+    # the detached worker can keep those variables from the executor and check.
+    withheld: list[str] = field(default_factory=list)
+    env_scrub: list[str] = field(default_factory=list)
+    # Lane r2-brief. The brief file the task came from, resolved, for display
+    # only: its text was copied into `instruction` and brief.md at create.
+    brief_path: str | None = None
+    # Report mode: where the report was saved (jobs/<id>/report.md), and the files
+    # the executor changed besides REPORT.md, which it was told not to touch.
+    report_path: str | None = None
+    stray_changes: list[str] = field(default_factory=list)
 
     @property
     def applied(self) -> bool:
@@ -109,6 +144,11 @@ class JobStore:
 
     def check_path(self, job_id: str) -> Path:
         return self.path(job_id) / "check.txt"
+
+    def brief_copy_path(self, job_id: str) -> Path:
+        return self.path(job_id) / "brief.md"
+    def report_path(self, job_id: str) -> Path:
+        return self.path(job_id) / "report.md"
 
     def save(self, job: Job) -> None:
         """Write atomically, so a reader never sees a half-written file."""
@@ -220,6 +260,63 @@ def new_job_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
 
+def read_brief(path: str, base: Path) -> tuple[Path, str]:
+    """The brief file's resolved path and text, or a ValueError saying what is wrong.
+
+    A long instruction can be cut short on its way through a client, so a
+    caller writes it to a file instead. A relative path is taken from the
+    repository (`base`), not the server's working directory, which the caller
+    cannot see. Read once, at delegate time: the job keeps a copy, so editing
+    the file afterwards changes neither a queued job nor a revision.
+    """
+    file = (base / Path(path).expanduser()).resolve()
+    if not file.exists():
+        raise ValueError(f"brief_path {path!r}: no such file ({file}).")
+    if not file.is_file():
+        raise ValueError(f"brief_path {path!r}: {file} is not a regular file.")
+    try:
+        with file.open("rb") as f:
+            data = f.read(MAX_BRIEF_BYTES + 1)  # no more, however large the file
+    except OSError as e:
+        raise ValueError(f"brief_path {path!r}: cannot read it: {e.strerror or e}.") from e
+    if len(data) > MAX_BRIEF_BYTES:
+        raise ValueError(
+            f"brief_path {path!r} is over the {MAX_BRIEF_BYTES}-byte limit; split the task, "
+            "or have the brief point the agent at files in the repository instead."
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"brief_path {path!r}: not valid UTF-8 ({e}).") from e
+    if not text.strip():
+        raise ValueError(f"brief_path {path!r}: the file is empty.")
+    return file, text
+
+
+def check_prompt(text: str) -> None:
+    """Refuse a prompt too long for an executor that takes it as one argument.
+
+    Checked when the job is created and on each revise, rather than left to
+    fail at launch with "Argument list too long". Applied to every executor,
+    though claude and codex read stdin, so a task's limit does not depend on
+    which executor happens to be chosen.
+    """
+    size = len(text.encode("utf-8"))
+    if size > MAX_PROMPT_BYTES:
+        raise ValueError(
+            f"The task is {size} bytes, over the {MAX_PROMPT_BYTES}-byte limit on what "
+            "an executor can be given; shorten it, or have it point the agent at files "
+            "in the repository instead."
+        )
+
+
+def with_brief(instruction: str, brief: str | None) -> str:
+    """The task as the executor gets it: the instruction, a blank line, the brief."""
+    if brief is None:
+        return instruction
+    return f"{instruction}\n\n{brief}" if instruction.strip() else brief
+
+
 def create_job(
     store: JobStore,
     project: ProjectConfig,
@@ -230,10 +327,16 @@ def create_job(
     timeout_seconds: int = 1800,
     check: str | None = None,
     check_timeout_seconds: int = 600,
+    brief: tuple[Path, str] | None = None,
 ) -> Job:
     """Copy the repository, provision the copy, and record the job as queued.
 
     A check only makes sense after edits, so review mode drops it.
+
+    `brief` is read_brief's result. Its text is joined to the instruction and
+    stored as the job's instruction, so prompt() and every revision see the
+    whole task from job.json alone; brief.md keeps the brief by itself for a
+    person to read.
     """
     job_id = new_job_id()
     workdir = store.path(job_id) / "repo"
@@ -241,6 +344,7 @@ def create_job(
         project.path, workdir,
         exclude=tuple(str(e.get("path", "")) for e in project.provision),
         git_dir=store.path(job_id) / "git",
+        allow_secrets=tuple(project.allow_secrets),
     )
     try:
         ws.provision(project.provision)
@@ -253,7 +357,7 @@ def create_job(
         repo=str(project.path),
         executor=executor,
         mode=mode,
-        instruction=instruction,
+        instruction=with_brief(instruction, brief[1] if brief else None),
         timeout_seconds=timeout_seconds,
         workdir=str(ws.path),
         git_dir=str(ws.git_dir),
@@ -266,9 +370,20 @@ def create_job(
         check_command=check if mode == "code" else None,
         check_timeout_seconds=check_timeout_seconds,
         queued_at=time.time(),
+        withheld=ws.withheld,
+        env_scrub=list(project.env_scrub),
+        brief_path=str(brief[0]) if brief else None,
     )
+    if brief:
+        store.brief_copy_path(job_id).write_text(brief[1], encoding="utf-8")
     store.save(job)
     return job
+
+
+def executor_mode(mode: str) -> Mode:
+    """The mode the executor runs in for a job of `mode`: a report job needs
+    edit permission to write its report, so it is a code-mode run."""
+    return Mode.CODE if mode == REPORT else Mode(mode)
 
 
 def launch(store: JobStore, job: Job) -> None:
@@ -296,6 +411,11 @@ def launch(store: JobStore, job: Job) -> None:
         store.save(job)
 
 
+def task_text(instruction: str, mode: str) -> str:
+    """A first attempt's prompt: the instruction, plus report mode's request."""
+    return f"{instruction}\n\n{REPORT_INSTRUCTION}" if mode == REPORT else instruction
+
+
 def prompt(job: Job) -> str:
     """What the executor is told on this attempt.
 
@@ -303,11 +423,12 @@ def prompt(job: Job) -> str:
     whole task: the original instruction, where it stands, and every piece of
     feedback so far rather than only the latest.
     """
+    task = task_text(job.instruction, job.mode)
     if not job.feedback:
-        return job.instruction
+        return task
     notes = "\n\n".join(f"{i}. {text}" for i, text in enumerate(job.feedback, 1))
     return (
-        f"{job.instruction}\n\n---\n"
+        f"{task}\n\n---\n"
         f"This is attempt {job.attempt} at the task above, in the same working copy. "
         "The previous attempt's changes are already in the files: build on them, "
         "fix what the feedback points out, and do not start over.\n\n"
@@ -336,11 +457,16 @@ def revise(
         raise JobError(f"Job {job.id} no longer has its copy of the repository to revise.")
     if not feedback.strip():
         raise ValueError("feedback must say what to change.")
+    # Every attempt restates all feedback so far, so the prompt only grows.
+    check_prompt(prompt(replace(job, feedback=[*job.feedback, feedback.strip()],
+                                attempt=job.attempt + 1)))
 
-    # Keep each attempt's output and check result; the next run writes fresh ones.
-    for current in (store.output_path(job.id), store.check_path(job.id)):
+    # Keep each attempt's output, check result and report; the next run writes fresh ones.
+    for current in (store.output_path(job.id), store.check_path(job.id),
+                    store.report_path(job.id)):
         if current.exists():
-            os.replace(current, current.with_name(f"{current.stem}-{job.attempt}.txt"))
+            os.replace(current, current.with_name(
+                f"{current.stem}-{job.attempt}{current.suffix}"))
     job.feedback.append(feedback.strip())
     job.attempt += 1
     if timeout_seconds is not None:
@@ -351,6 +477,8 @@ def revise(
     job.pid = job.pgid = job.executor_pgid = job.check_pgid = None
     job.started_at = job.finished_at = job.exit_code = job.error = None
     job.check_exit_code = job.check_passed = None
+    job.report_path = None
+    job.stray_changes = []
     # A cancelled attempt is not the job's outcome. The ledger keeps the last
     # entry per job, so the outcome of this attempt replaces it.
     job.outcome = None
@@ -411,6 +539,25 @@ def snapshot(job: Job) -> None:
     job.diff_stat = _jgit(job, ["diff", "--stat", f"{job.base_commit}..HEAD"]).stdout.rstrip()
 
 
+def collect_report(store: JobStore, job: Job) -> None:
+    """Save a report job's REPORT.md as jobs/<id>/report.md, after snapshot().
+
+    Only a regular file counts: a symlink could point anywhere on the
+    machine, and report() would hand its contents back. A REPORT.md the
+    repository already tracks counts only if the job changed it, so an old
+    report is never taken for this job's.
+    """
+    job.stray_changes = [f for f in job.files_changed if f != REPORT_FILE]
+    source = Path(job.workdir) / REPORT_FILE
+    if not source.is_file() or source.is_symlink():
+        return
+    tracked = _jgit(job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"], check=False)
+    if tracked.returncode == 0 and REPORT_FILE not in job.files_changed:
+        return
+    shutil.copyfile(source, store.report_path(job.id))
+    job.report_path = str(store.report_path(job.id))
+
+
 def run_check(store: JobStore, job: Job) -> None:
     """Run the job's check command in its copy, output to check.txt.
 
@@ -418,7 +565,8 @@ def run_check(store: JobStore, job: Job) -> None:
     Makefile), so it runs in an OS sandbox: it can write only in its copy
     (not the copy's .git) and in a private temp dir, and it has no network
     beyond loopback. Without a sandbox it does not run at all. See
-    _sandbox_argv.
+    _sandbox_argv. Its environment is the server's minus credential-looking
+    variables (CHECK_SCRUB) and the project's env_scrub.
 
     It runs after snapshot(), and the copy is reset to that snapshot
     afterwards, so whatever it writes (caches, coverage files, lockfile
@@ -441,7 +589,8 @@ def run_check(store: JobStore, job: Job) -> None:
                 "macOS, bwrap on Linux).\n"
             )
             return
-        env = dict(os.environ, TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp),
+        env = dict(scrub_env(os.environ, (*CHECK_SCRUB, *job.env_scrub)),
+                   TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp),
                    XDG_CACHE_HOME=str(tmp / "cache"))
         snapshot_head = _jgit(job, ["rev-parse", "HEAD"]).stdout.strip()
         proc = subprocess.Popen(
@@ -472,6 +621,24 @@ def run_check(store: JobStore, job: Job) -> None:
             job.check_pgid = None
             store.save(job)
     _restore(job, snapshot_head)
+
+
+# Environment variables the check never gets, on top of the project's env_scrub.
+# The check runs code the executor may have written, and the sandbox has no
+# network, so it has no use for credentials; a test that needs one can be
+# given it by name in the check command. The executor keeps these (agent CLIs
+# authenticate with them) unless env_scrub names them.
+CHECK_SCRUB = ("*_API_KEY", "*_TOKEN", "*_SECRET", "*_PASSWORD", "*_CREDENTIALS")
+
+
+def scrub_env(env: Mapping[str, str], patterns: Iterable[str]) -> dict[str, str]:
+    """`env` without the variables whose names match any of `patterns`.
+
+    Case-sensitive, as names are: `*_TOKEN` leaves `my_token` alone.
+    """
+    patterns = tuple(patterns)
+    return {k: v for k, v in env.items()
+            if not any(fnmatch.fnmatchcase(k, p) for p in patterns)}
 
 
 def _restore(job: Job, head: str) -> None:
@@ -551,6 +718,39 @@ def _check(res: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
 
 
 DIFF_LIMIT = 60_000
+REPORT_LIMIT = 20_000
+
+
+def read_report(store: JobStore, job_id: str) -> str:
+    """A finished report job's whole report."""
+    job = store.refresh(store.load(job_id))
+    if job.mode != REPORT:
+        raise JobError(f"Job {job.id} is a {job.mode} job; only a report job has a report.")
+    if job.state in ACTIVE:
+        raise JobError(f"Job {job.id} is still {job.state}; its report is not written yet.")
+    if not job.report_path or not Path(job.report_path).is_file():
+        raise JobError(
+            f"Job {job.id} has no report: it wrote no {REPORT_FILE}. "
+            f"Its output is in {store.output_path(job.id)}."
+        )
+    return Path(job.report_path).read_text(errors="replace")
+
+
+def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LIMIT) -> dict:
+    """One page of a report job's report, so a long one can be read in parts
+    rather than cut short."""
+    if offset < 0:
+        raise ValueError("offset must not be negative.")
+    if limit <= 0:
+        raise ValueError("limit must be positive.")
+    text = read_report(store, job_id)
+    return {
+        "job_id": job_id,
+        "total_chars": len(text),
+        "offset": offset,
+        "text": text[offset:offset + limit],
+        "more": offset + limit < len(text),
+    }
 
 
 def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
@@ -580,16 +780,18 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     yet applied goes. Returns the entries of files_changed applied this time.
     """
     job = store.load(job_id)
+    if job.mode == REPORT:
+        raise JobError(
+            f"Job {job.id} is a report job: its product is its report, not changes to "
+            "apply. Read it with report()."
+        )
     if job.state != "succeeded":
         raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
     if not job.files_changed:
         raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
     files, pathspecs = _select(job, paths)
 
-    patch = store.path(job.id) / "changes.patch"
-    # Literal pathspecs, so a file named like a glob exports only itself.
-    _jgit(job, ["--literal-pathspecs", "diff", "--binary", f"--output={patch}",
-                f"{job.base_commit}..HEAD", "--", *pathspecs])
+    patch = _export(store, job, pathspecs)
     res = run_git(["apply", "--index", str(patch)], cwd=job.repo)
     unstaged = False
     if res.returncode != 0 and run_git(["apply", "--check", str(patch)], cwd=job.repo).returncode == 0:
@@ -608,6 +810,166 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     if job.outcome is None:
         _record(store, job, "applied")
     return files
+
+
+def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
+    """Write the job's changes to its changes.patch, only `pathspecs` if any, and return it.
+
+    Binary, so an image or other non-text file survives the trip. Literal
+    pathspecs, so a file named like a glob exports only itself.
+    """
+    patch = store.path(job.id) / "changes.patch"
+    _jgit(job, ["--literal-pathspecs", "diff", "--binary", f"--output={patch}",
+                f"{job.base_commit}..HEAD", "--", *pathspecs])
+    return patch
+
+
+def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> dict:
+    """Apply several succeeded jobs to one repository in order, or none of them.
+
+    Applying a fan-out one job at a time finds a conflict between two jobs
+    only when the second is reached, with the first already in the
+    repository. Here every patch is first applied, in order, to throwaway
+    copies of the repository's index and of its working tree's state (see
+    _precheck), so the second job is checked on top of the first before
+    anything changes. Then each goes through apply, so the ledger,
+    applied_paths and applied_unstaged stay exactly as one apply leaves them.
+
+    Only whole jobs: a job partly applied already is refused (use apply for
+    the rest of it). Refusals raise, changing nothing. What the pre-check
+    or the apply itself finds is returned instead, next to the report:
+    applied and not_applied (job ids), overlaps (each file more than one job
+    touches, with those jobs), unstaged (jobs that land, or would land,
+    unstaged because they touch files with unstaged edits), dry_run, and
+    error (None, or which job did not apply and why).
+    """
+    if not job_ids:
+        raise ValueError("Name at least one job.")
+    repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
+    if repeated:
+        raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
+    batch = [store.load(i) for i in job_ids]
+    for job in batch:
+        if job.state != "succeeded":
+            raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
+        if job.mode == REPORT:
+            # apply refuses it, so letting it through would stop the run part way.
+            raise JobError(f"Job {job.id} is a report job: it has no changes to apply; "
+                           "leave it out and read it with report().")
+        if not job.files_changed:
+            raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
+        if job.applied and all(f in job.applied_paths for f in job.files_changed):
+            raise JobError(f"Job {job.id} is already applied; leave it out.")
+        if job.applied:
+            raise JobError(
+                f"Job {job.id} is already partly applied ({', '.join(job.applied_paths)}); "
+                "apply_many takes only whole jobs. Use apply for the rest of it."
+            )
+    repos = sorted({job.repo for job in batch})
+    if len(repos) > 1:
+        raise JobError(f"The jobs are for different repositories ({', '.join(repos)}); "
+                       "apply_many applies to one.")
+
+    touched = {job.id: _touched(job) for job in batch}
+    by_path: dict[str, list[str]] = {}
+    for job in batch:
+        for path in touched[job.id]:
+            by_path.setdefault(path, []).append(job.id)
+    result = {
+        "applied": [],
+        "not_applied": list(job_ids),
+        "overlaps": {p: ids for p, ids in sorted(by_path.items()) if len(ids) > 1},
+        "unstaged": [],
+        "dry_run": dry_run,
+        "error": None,
+    }
+    patches = {job.id: _export(store, job, []) for job in batch}
+    result["unstaged"], result["error"] = _precheck(store, repos[0], batch, patches, touched)
+    if result["error"] or dry_run:
+        return result
+
+    result["unstaged"] = []  # from here on, what apply actually did
+    for job in batch:
+        try:
+            apply(store, job.id)
+        except JobError as e:
+            result["error"] = (
+                f"Stopped at job {job.id}: the pre-check passed, so the repository changed "
+                f"while the jobs were being applied. {e}"
+            )
+            break
+        result["applied"].append(job.id)
+        result["not_applied"].remove(job.id)
+        if store.load(job.id).applied_unstaged:
+            result["unstaged"].append(job.id)
+    return result
+
+
+def _touched(job: Job) -> list[str]:
+    """Every path the job's diff touches, both sides of a rename included."""
+    names = _jgit(job, ["diff", "--name-only", "--no-renames", "-z",
+                        f"{job.base_commit}..HEAD"]).stdout
+    return [name for name in names.split("\0") if name]
+
+
+def _precheck(
+    store: JobStore, repo: str, batch: list[Job], patches: dict[str, Path],
+    touched: dict[str, list[str]],
+) -> tuple[list[str], str | None]:
+    """Apply each patch in turn to scratch copies of the repository's state,
+    as apply would: the jobs that would land unstaged, and the first failure.
+
+    Two temporary index files stand in for the repository. One is a copy of
+    its index; the other starts as that copy and takes the working tree's
+    current content of every file a job touches, so it stands for the
+    working tree. apply's `git apply --index` needs a file's index and
+    working-tree content to agree, and the patch to fit: then the patch goes
+    on both. Otherwise apply falls back to the working tree alone, leaving
+    the change unstaged, which here means the second index alone.
+
+    `git apply --cached` and `update-index` write blobs, so git is pointed
+    at a scratch object directory that borrows the repository's objects as
+    an alternate: the repository's index, objects and files are only read.
+    """
+    store.root.mkdir(parents=True, exist_ok=True)
+    located = _check(run_git(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects", "--git-path", "index"],
+        cwd=repo,
+    )).stdout.splitlines()
+    objects, index = located[0], Path(located[1])
+    with tempfile.TemporaryDirectory(prefix="apply-many-", dir=store.root) as tmp:
+        staged, tree = Path(tmp) / "index", Path(tmp) / "worktree-index"
+        if index.exists():
+            shutil.copyfile(index, staged)
+            shutil.copyfile(index, tree)
+        base_env = dict(os.environ, GIT_OBJECT_DIRECTORY=str(Path(tmp) / "objects"),
+                        GIT_ALTERNATE_OBJECT_DIRECTORIES=objects)
+        (Path(tmp) / "objects").mkdir()
+
+        def git(index_file: Path, args: list[str]) -> subprocess.CompletedProcess:
+            return run_git(args, cwd=repo, env=dict(base_env, GIT_INDEX_FILE=str(index_file)))
+
+        every = sorted({p for paths in touched.values() for p in paths})
+        res = git(tree, ["update-index", "--add", "--remove", "--", *every])
+        if res.returncode != 0:
+            return [], f"Could not read the working tree's state: {res.stderr.strip()}"
+        unstaged: list[str] = []
+        for n, job in enumerate(batch):
+            patch = str(patches[job.id])
+            listing = ["--literal-pathspecs", "ls-files", "-s", "-z", "--", *touched[job.id]]
+            agree = git(staged, listing).stdout == git(tree, listing).stdout
+            fits_index = agree and git(staged, ["apply", "--cached", patch]).returncode == 0
+            res = git(tree, ["apply", "--cached", patch])
+            if res.returncode != 0:
+                onto = (f"on top of job(s) {', '.join(j.id for j in batch[:n])}" if n
+                        else "to the repository as it is now")
+                return unstaged, (
+                    f"Job {job.id} does not apply cleanly {onto}; nothing was changed:\n"
+                    f"{res.stderr.strip()}"
+                )
+            if not fits_index:
+                unstaged.append(job.id)
+        return unstaged, None
 
 
 def _select(job: Job, paths: list[str] | None) -> tuple[list[str], list[str]]:

@@ -1,5 +1,6 @@
 """The MCP tools, called in-process exactly as a client would call them."""
 
+import hashlib
 import json
 import subprocess
 import time
@@ -9,11 +10,12 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from polyphony.executors import AgyExecutor, Mode
+from polyphony.jobs import MAX_BRIEF_BYTES, MAX_PROMPT_BYTES
 from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
     "executors", "delegate", "delegate_many", "status", "diff", "apply", "discard", "cancel",
-    "jobs", "usage", "stats", "revise",
+    "jobs", "usage", "stats", "revise", "report", "wait", "apply_many",
 }
 
 
@@ -752,3 +754,423 @@ def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
     for _ in range(7):
         call(srv, "delegate", instruction="x", repo=str(repo), executor="cursor")
     assert len(store.all()) == 7
+
+
+def test_status_lists_withheld_secrets(server, repo, fake_agy):
+    fake_agy("true")
+    (repo / ".env").write_text("API_KEY=real\n")
+    started = call(server, "delegate", instruction="x", repo=str(repo))
+    assert started["withheld"] == [".env"]
+    assert "allow_secrets" in started["withheld_note"]
+    status = finished(server, started["job_id"])
+    assert status["withheld"] == [".env"]
+
+
+def test_status_has_no_withheld_key_when_nothing_was(server, repo, fake_agy):
+    fake_agy("true")
+    status = finished(server, call(server, "delegate", instruction="x", repo=str(repo))["job_id"])
+    assert "withheld" not in status
+
+
+# --- Lane r2-brief: the task from a file, confirming it arrived whole, and a model per call. ---
+
+
+def _record_prompt(fake_agy):
+    """The fake agy keeps its prompt (given as -p=<text>) and its argv beside the copy."""
+    fake_agy('for a in "$@"; do case "$a" in -p=*) printf "%s" "${a#-p=}" > ../prompt.txt;; '
+             'esac; done; echo "$@" > ../argv.txt')
+
+
+def test_delegate_with_a_brief_file_gives_the_executor_the_whole_task(
+        server, repo, fake_agy, store, tmp_path):
+    _record_prompt(fake_agy)
+    brief = tmp_path / "brief.md"
+    text = "# Brief\n\n" + "step\n" * 20_000 + "THE END"
+    brief.write_text(text)
+
+    started = call(server, "delegate", instruction="Do what the brief says.",
+                   repo=str(repo), brief_path=str(brief))
+    job_id = started["job_id"]
+    full = "Do what the brief says.\n\n" + text
+    assert started["brief_path"] == str(brief.resolve())
+    assert started["instruction_chars"] == len(full)
+    assert started["instruction_sha256"] == hashlib.sha256(full.encode()).hexdigest()
+    assert started["instruction_tail"] == full[-200:]
+    assert (store.path(job_id) / "brief.md").read_text() == text
+
+    brief.write_text("edited after delegating")
+    assert finished(server, job_id)["state"] == "succeeded"
+    assert (store.path(job_id) / "prompt.txt").read_text() == full
+
+    # A revision restates the brief as copied, not as the file reads now.
+    call(server, "revise", job_id=job_id, feedback="again")
+    status = finished(server, job_id)
+    assert status["instruction_chars"] == len(full)  # feedback is not counted
+    assert (store.path(job_id) / "prompt.txt").read_text().startswith(full + "\n\n---\n")
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_brief_alone_is_the_task_and_a_relative_path_is_from_the_repo(store, repo, tmp_path):
+    (repo / "docs").mkdir()
+    (repo / "docs" / "brief.md").write_text("only the brief\n")
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="docs/brief.md",
+                   executor="agy")
+    job = store.load(started["job_id"])
+    assert job.instruction == "only the brief\n"
+    assert job.brief_path == str((repo / "docs" / "brief.md").resolve())
+    assert started["instruction_tail"] == "only the brief\n"
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_status_reports_the_instruction_for_every_job(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    job_id = call(srv, "delegate", instruction="short task", repo=str(repo))["job_id"]
+    status = call(srv, "status", job_id=job_id)
+    assert status["instruction_chars"] == 10
+    assert status["instruction_tail"] == "short task"
+    assert status["instruction_sha256"] == hashlib.sha256(b"short task").hexdigest()
+    assert "brief_path" not in status
+
+
+@pytest.mark.parametrize("setup, expected", [
+    (lambda f: None, "no such file"),
+    (lambda f: f.mkdir(), "not a regular file"),
+    (lambda f: f.write_bytes(b"x" * (MAX_BRIEF_BYTES + 1)), "limit"),
+    (lambda f: f.write_bytes(b"caf\xe9"), "UTF-8"),
+    (lambda f: f.write_text(" \n"), "empty"),
+])
+@pytest.mark.usefixtures("no_launch")
+def test_a_bad_brief_is_refused_before_anything_is_copied(store, repo, tmp_path, setup, expected):
+    brief = tmp_path / "brief.md"
+    setup(brief)
+    srv = _server(store, tmp_path)
+    assert expected in refused(srv, "delegate", instruction="x", repo=str(repo),
+                               brief_path=str(brief))
+    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                               brief_path=str(brief), executors=["agy"])
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_brief_at_the_limit_is_accepted(store, repo, tmp_path):
+    brief = tmp_path / "brief.md"
+    brief.write_bytes(b"x" * MAX_BRIEF_BYTES)
+    started = call(_server(store, tmp_path), "delegate", repo=str(repo), brief_path=str(brief))
+    assert started["instruction_chars"] == MAX_BRIEF_BYTES
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_needs_an_instruction_or_a_brief(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    for tool, extra in [("delegate", {}), ("delegate_many", {"executors": ["agy"]})]:
+        assert "brief_path" in refused(srv, tool, repo=str(repo), **extra)
+        assert "brief_path" in refused(srv, tool, instruction="  ", brief_path="",
+                                       repo=str(repo), **extra)
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_gives_every_job_the_brief_and_its_model(store, repo, tmp_path):
+    (repo / ".polyphony.yaml").write_text("models: {agy: configured, cursor: configured}\n")
+    brief = tmp_path / "brief.md"
+    brief.write_text("the brief")
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate_many", instruction="lead", repo=str(repo),
+                   executors=["agy", "cursor"], brief_path=str(brief),
+                   models={"cursor": "picked"})["jobs"]
+    loaded = {j["executor"]: store.load(j["job_id"]) for j in started}
+    assert {j.instruction for j in loaded.values()} == {"lead\n\nthe brief"}
+    assert all((store.path(j.id) / "brief.md").read_text() == "the brief"
+               for j in loaded.values())
+    assert loaded["agy"].model == "configured"
+    assert loaded["cursor"].model == "picked"
+
+
+@pytest.mark.parametrize("models, expected", [
+    ({"claude": "m"}, "not in executors"),
+    ({"agy": " "}, "blank"),
+])
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_refuses_bad_models(store, repo, tmp_path, models, expected):
+    srv = _server(store, tmp_path)
+    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                               executors=["agy", "cursor"], models=models)
+    assert store.all() == []
+
+
+def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo, fake_agy, store):
+    (repo / ".polyphony.yaml").write_text("models: {agy: configured}\n")
+    _record_prompt(fake_agy)
+    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ",
+                   executor="agy")
+    job_id = started["job_id"]
+    assert started["model"] == "picked"
+    finished(server, job_id)
+    assert "--model picked" in (store.path(job_id) / "argv.txt").read_text()
+
+    call(server, "revise", job_id=job_id, feedback="again")
+    assert finished(server, job_id)["model"] == "picked"
+    assert "--model picked" in (store.path(job_id) / "argv.txt").read_text()
+
+    default = call(server, "delegate", instruction="x", repo=str(repo))
+    assert default["model"] == "configured"
+    finished(server, default["job_id"])
+
+
+def test_a_blank_model_is_refused(server, repo, store):
+    assert "blank" in refused(server, "delegate", instruction="x", repo=str(repo), model="")
+    assert store.all() == []
+
+
+def test_a_model_without_an_executor_is_refused(server, repo, store):
+    """A model names one CLI's model; leaving the pool to pick the CLI would
+    hand it to whichever runs."""
+    assert "needs executor" in refused(server, "delegate", instruction="x", repo=str(repo),
+                                       model="picked")
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_task_too_long_for_one_argument_is_refused(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    over = "x" * (MAX_PROMPT_BYTES + 1)
+    assert "limit" in refused(srv, "delegate", instruction=over, repo=str(repo))
+    # A brief under its own limit still counts toward the task's, with the instruction.
+    brief = tmp_path / "brief.md"
+    brief.write_bytes(b"b" * MAX_BRIEF_BYTES)
+    long_lead = "i" * (MAX_PROMPT_BYTES - MAX_BRIEF_BYTES)
+    assert "limit" in refused(srv, "delegate", instruction=long_lead, repo=str(repo),
+                              brief_path=str(brief))
+    assert "limit" in refused(srv, "delegate_many", instruction=long_lead, repo=str(repo),
+                              brief_path=str(brief), executors=["agy"])
+    # Bytes, not characters: what the kernel counts.
+    assert "limit" in refused(srv, "delegate", repo=str(repo),
+                              instruction="\u00e9" * (MAX_PROMPT_BYTES // 2 + 1))
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_report_modes_request_counts_toward_the_limit(store, repo, tmp_path):
+    from polyphony.jobs import REPORT_INSTRUCTION
+    srv = _server(store, tmp_path)
+    fits_in_code_mode = "x" * (MAX_PROMPT_BYTES - len(REPORT_INSTRUCTION))
+    assert "limit" in refused(srv, "delegate", instruction=fits_in_code_mode, repo=str(repo),
+                              mode="report")
+    call(srv, "delegate", instruction=fits_in_code_mode, repo=str(repo))
+
+
+def test_revise_is_refused_once_feedback_would_pass_the_limit(server, repo, fake_agy, store):
+    fake_agy("true")
+    job_id = call(server, "delegate", instruction="x" * (MAX_PROMPT_BYTES - 1000),
+                  repo=str(repo))["job_id"]
+    finished(server, job_id)
+    assert "limit" in refused(server, "revise", job_id=job_id, feedback="f" * 2000)
+    job = store.load(job_id)
+    assert job.attempt == 1 and job.feedback == []  # nothing was queued
+    call(server, "revise", job_id=job_id, feedback="short")
+
+
+# --- Report mode: an audit whose findings are REPORT.md, read with report(). ---
+
+
+def test_report_mode_delegate_status_report(server, repo, fake_agy, store):
+    fake_agy("printf '# Audit\\n\\nall clear\\n' > REPORT.md; echo done")
+    started = call(server, "delegate", instruction="audit errors", repo=str(repo), mode="report")
+    assert started["mode"] == "report"
+    status = finished(server, started["job_id"])
+    assert status["state"] == "succeeded", status
+    assert status["report_path"].endswith("report.md")
+    assert status["report_chars"] == len("# Audit\n\nall clear\n")
+    assert status["stray_changes"] == []
+
+    page = call(server, "report", job_id=started["job_id"])
+    assert page["text"] == "# Audit\n\nall clear\n" and page["more"] is False
+    assert call(server, "report", job_id=started["job_id"], limit=3)["more"] is True
+    assert "offset" in refused(server, "report", job_id=started["job_id"], offset=-1)
+    assert "limit" in refused(server, "report", job_id=started["job_id"], limit=0)
+    assert "report()" in refused(server, "apply", job_id=started["job_id"])
+    assert _git("status", "--porcelain", cwd=repo) == ""
+
+
+def test_report_mode_status_shows_stray_changes(server, repo, fake_agy):
+    fake_agy("echo r > REPORT.md; echo y > app.py")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    assert finished(server, job_id)["stray_changes"] == ["app.py"]
+
+
+def test_report_mode_without_a_report_fails_readably(server, repo, fake_agy):
+    fake_agy("echo findings only on stdout")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    status = finished(server, job_id)
+    assert status["state"] == "failed"
+    assert "REPORT.md" in status["error"]
+    assert status["report_path"] is None and status["report_chars"] == 0
+    assert "findings only on stdout" in status["output_tail"]
+    assert "no report" in refused(server, "report", job_id=job_id)
+
+
+def test_report_refuses_a_running_or_code_job(server, repo, fake_agy, store, wait_for):
+    fake_agy("sleep 30")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    wait_for(store, job_id, {"running"})
+    try:
+        assert "still running" in refused(server, "report", job_id=job_id)
+        assert "report_path" not in call(server, "status", job_id=job_id)
+    finally:
+        call(server, "cancel", job_id=job_id)
+    fake_agy("true")
+    code = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    finished(server, code)
+    assert "report_path" not in finished(server, code)
+    assert "only a report job" in refused(server, "report", job_id=code)
+    assert "No job" in refused(server, "report", job_id="nope")
+
+
+def test_revising_a_report_job_writes_a_fresh_report(server, repo, fake_agy, store):
+    fake_agy("if [ -f REPORT.md ]; then echo second > REPORT.md; "
+             "else echo first > REPORT.md; fi")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    finished(server, job_id)
+    call(server, "revise", job_id=job_id, feedback="go deeper")
+    status = finished(server, job_id)
+    assert status["state"] == "succeeded" and status["attempt"] == 2
+    assert call(server, "report", job_id=job_id)["text"] == "second\n"
+    assert (store.path(job_id) / "report-1.md").read_text() == "first\n"
+
+
+def test_a_check_in_report_mode_is_refused(server, repo):
+    msg = refused(server, "delegate", instruction="x", repo=str(repo), mode="report",
+                  check="pytest")
+    assert "code" in msg and "report" in msg
+
+
+def test_report_mode_needs_an_executor_with_a_code_mode(store, repo, fake_agy):
+    srv = build_server(store=store, executors={"opencode": _ReviewOnly}, usage_check=Checks())
+    msg = refused(srv, "delegate", instruction="x", repo=str(repo), executor="opencode",
+                  mode="report")
+    assert "opencode" in msg and "code" in msg
+    msg = refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                  executors=["opencode"], mode="report")
+    assert "opencode" in msg and "code" in msg
+
+    fake_agy("echo r > REPORT.md")
+    (repo / ".polyphony.yaml").write_text("pool: [opencode, agy]\n")
+    srv = build_server(store=store, executors={"opencode": _ReviewOnly, "agy": AgyExecutor},
+                       usage_check=Checks())
+    started = call(srv, "delegate", instruction="x", repo=str(repo), mode="report")
+    assert started["executor"] == "agy"
+    assert started["skipped"] == [{"executor": "opencode", "reason": "has no code mode"}]
+    finished(srv, started["job_id"])
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_takes_report_mode(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate_many", instruction="x", repo=str(repo),
+                   executors=["agy", "cursor"], mode="report")["jobs"]
+    assert [j["mode"] for j in started] == ["report", "report"]
+
+
+# wait lane
+
+SLOW_OR_FAST = 'case "$*" in *SLOW*) sleep 30;; *) sleep 1; echo fast > fast.txt;; esac'
+
+
+def _started(server, repo, *instructions):
+    return [call(server, "delegate", instruction=i, repo=str(repo))["job_id"]
+            for i in instructions]
+
+
+def test_wait_any_returns_when_the_first_job_finishes(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        began = time.monotonic()
+        result = call(server, "wait", job_ids=[slow, fast], wait_seconds=20)
+        assert time.monotonic() - began < 10
+        assert result["done"] is True
+        assert result["finished"] == [fast]
+        assert result["active"] == [slow]
+        assert [j["job_id"] for j in result["jobs"]] == [slow, fast], "keeps the caller's order"
+        compact, full = result["jobs"]
+        assert set(compact) == {"job_id", "state", "executor", "elapsed_seconds"}
+        assert compact["state"] in ("queued", "running")
+        assert full["state"] == "succeeded"
+        assert full["files_changed"] == ["fast.txt"]
+        assert "output_tail" in full
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_all_waits_for_every_job(server, repo, fake_agy):
+    fake_agy("sleep 1; echo done")
+    first, second = _started(server, repo, "a", "b")
+    result = call(server, "wait", job_ids=[first, second], until="all", wait_seconds=20)
+    assert result["done"] is True
+    assert result["finished"] == [first, second]
+    assert result["active"] == []
+    assert [j["state"] for j in result["jobs"]] == ["succeeded", "succeeded"]
+
+
+def test_wait_times_out_with_done_false(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        result = call(server, "wait", job_ids=[slow, fast], until="all", wait_seconds=3)
+        assert result["done"] is False
+        assert result["finished"] == [fast]
+        assert result["active"] == [slow]
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_any_returns_at_once_if_a_job_already_finished(server, repo, fake_agy):
+    fake_agy(SLOW_OR_FAST)
+    slow, fast = _started(server, repo, "SLOW", "quick")
+    try:
+        assert call(server, "wait", job_ids=[fast], wait_seconds=20)["done"] is True
+        began = time.monotonic()
+        result = call(server, "wait", job_ids=[slow, fast], wait_seconds=20)
+        assert time.monotonic() - began < 2
+        assert result["done"] is True and result["finished"] == [fast]
+    finally:
+        call(server, "cancel", job_id=slow)
+
+
+def test_wait_without_waiting_reports_at_once(server, repo, fake_agy):
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    try:
+        result = call(server, "wait", job_ids=[job_id], wait_seconds=0)
+        assert result == {"done": False, "finished": [], "active": [job_id],
+                          "jobs": [result["jobs"][0]]}
+        assert result["jobs"][0]["job_id"] == job_id
+    finally:
+        call(server, "cancel", job_id=job_id)
+
+
+@pytest.mark.parametrize("args, expected", [
+    ({"job_ids": []}, "at least one"),
+    ({"job_ids": ["a", "a"]}, "more than once"),
+    ({"job_ids": ["a"], "until": "some"}, "until"),
+])
+def test_wait_refuses_bad_arguments(server, args, expected):
+    assert expected in refused(server, "wait", **args)
+
+
+def test_wait_refuses_an_unknown_job_before_waiting(server, repo, fake_agy):
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    try:
+        began = time.monotonic()
+        assert "No job" in refused(server, "wait", job_ids=[job_id, "nope"], wait_seconds=20)
+        assert time.monotonic() - began < 2
+    finally:
+        call(server, "cancel", job_id=job_id)
+
+
+def test_status_and_instructions_point_at_wait(server):
+    tools = {t.name: t for t in anyio.run(server.list_tools)}
+    assert "use wait" in tools["status"].description
+    assert "call the wait tool" in INSTRUCTIONS

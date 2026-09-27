@@ -181,3 +181,78 @@ def test_polyphonyignore_and_exclude_are_respected(repo, tmp_path):
     assert not (ws.path / "local").exists()
     assert not (ws.path / "notes.txt").exists()
     assert (ws.path / "src" / "app.py").read_text() == "x = 2\n"
+
+
+# --- Secrets: secret-looking untracked and ignored files stay out of the copy. ---
+
+
+def _secrets(repo):
+    with open(repo / ".gitignore", "a", encoding="utf-8") as f:
+        f.write(".env\nconfig/\n")
+    (repo / ".env").write_text("API_KEY=real\n", encoding="utf-8")                # ignored
+    (repo / ".env.example").write_text("API_KEY=\n", encoding="utf-8")            # untracked
+    (repo / ".env.local").write_text("API_KEY=real\n", encoding="utf-8")          # untracked
+    (repo / "config").mkdir()
+    (repo / "config" / "server.pem").write_text("-----BEGIN-----\n", encoding="utf-8")
+    (repo / "config" / "settings.toml").write_text("debug = true\n", encoding="utf-8")
+    (repo / "src" / "deep").mkdir()
+    (repo / "src" / "deep" / ".env").write_text("TOKEN=real\n", encoding="utf-8")
+    (repo / "id_ed25519").write_text("private\n", encoding="utf-8")
+    (repo / "id_ed25519.pub").write_text("public\n", encoding="utf-8")
+
+
+def test_secret_looking_files_are_withheld_and_listed(repo, tmp_path):
+    _secrets(repo)
+    ws = Workspace.create(repo, tmp_path / "ws")
+    for gone in (".env", ".env.local", "config/server.pem", "src/deep/.env", "id_ed25519"):
+        assert not (ws.path / gone).exists(), gone
+    for kept in (".env.example", "config/settings.toml", "id_ed25519.pub"):
+        assert (ws.path / kept).exists(), kept
+    assert ws.withheld == sorted(
+        [".env", ".env.local", "config/server.pem", "src/deep/.env", "id_ed25519"])
+
+
+def test_allow_secrets_lets_matching_paths_through(repo, tmp_path):
+    _secrets(repo)
+    ws = Workspace.create(repo, tmp_path / "ws", allow_secrets=(".env", "config/*.pem"))
+    assert (ws.path / ".env").read_text() == "API_KEY=real\n"
+    assert (ws.path / "src" / "deep" / ".env").exists()  # a basename pattern matches at any depth
+    assert (ws.path / "config" / "server.pem").exists()
+    assert ws.withheld == [".env.local", "id_ed25519"]
+
+
+def test_secret_matching_ignores_case(repo, tmp_path):
+    (repo / "config").mkdir()
+    for name in (".ENV", "config/Server.PEM", "Id_Rsa", ".Env.Example"):
+        (repo / name).write_text("x\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert ws.withheld == [".ENV", "Id_Rsa", "config/Server.PEM"]
+    assert (ws.path / ".Env.Example").exists()  # a template in any case is still a template
+
+
+def test_allow_secrets_ignores_case_too(repo, tmp_path):
+    (repo / "config").mkdir()
+    (repo / ".ENV").write_text("A=1\n", encoding="utf-8")
+    (repo / "config" / "Server.PEM").write_text("x\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws", allow_secrets=(".env", "CONFIG/*.pem"))
+    assert ws.withheld == []
+    assert (ws.path / ".ENV").exists() and (ws.path / "config" / "Server.PEM").exists()
+
+def test_a_staged_new_secret_is_withheld_too(repo, tmp_path):
+    (repo / "prod.key").write_text("secret\n", encoding="utf-8")
+    (repo / "notes.txt").write_text("todo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "prod.key", "notes.txt"], cwd=repo, check=True)
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert not (ws.path / "prod.key").exists()
+    assert (ws.path / "notes.txt").exists()
+    assert ws.withheld == ["prod.key"]
+
+
+def test_a_tracked_secret_is_already_in_the_clone(repo, tmp_path):
+    (repo / ".env").write_text("A=1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".env"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "env"],
+                   cwd=repo, check=True)
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert (ws.path / ".env").exists()
+    assert ws.withheld == []
