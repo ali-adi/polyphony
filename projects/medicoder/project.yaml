@@ -1,6 +1,6 @@
 # Settings Polyphony applies when a task targets this repository.
 name: medicoder
-path: /Users/ali/root/Work/Medicoder/medicoder/medicoder
+path: /Users/ali/root/work/medicoder/medicoder/medicoder
 
 # Gitignored paths a fresh copy lacks. Verified: without all three,
 # the test suite cannot run (docs/evidence/provisioning-spike.md).
