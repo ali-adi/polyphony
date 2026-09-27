@@ -3,86 +3,103 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## What it is
+An MCP server that lets the agent you're already working with hand a task to a
+cheaper one. Your main agent (Claude Code, Codex, anything that speaks MCP) calls
+`delegate`. Polyphony runs `agy`, `cursor-agent`, or `claude` on the task in a
+private copy of your repository, and your agent reviews the diff before anything
+touches the real one.
 
-Polyphony is a local-first orchestrator that drives the `claude`, `agy`, and
-`cursor-agent` CLIs as subprocesses instead of calling metered APIs, so
-existing subscriptions do the work.
+The point is quota. A Claude Max weekly limit runs out long before a cheap agy
+plan or a team Cursor seat does, so mechanical work goes to those instead.
 
-## Status
+## Tools
 
-> Under active redesign. Two of the three executor adapters had never
-> successfully executed anything until 2026-09-21; they now pass real-binary
-> smoke tests. The orchestration loop is being rebuilt. Treat anything not
-> listed under "What works" as not implemented.
+| Tool | What it does |
+|---|---|
+| `executors(repo?)` | Which agent CLIs are available right now, in preference order |
+| `delegate(instruction, repo, executor?, mode?, timeout_minutes?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once |
+| `status(job_id, wait_seconds?)` | State, and once finished: changed files, diff stat, output tail. Can block up to 240s |
+| `diff(job_id)` | The job's full diff |
+| `apply(job_id)` | Stage the changes in your repo, uncommitted. Refuses without touching anything on conflict |
+| `discard(job_id)` | Delete the job's copy and record |
+| `cancel(job_id)` | Kill a running job |
+| `jobs()` | Recent jobs |
+| `usage(executor?)` | agy's and cursor's remaining quota and reset times, as each CLI reports it |
 
-## What works
+`mode` is `code` (the agent may edit) or `review` (read-only). Each maps onto the
+CLI's own permission mode. Nothing runs with permission checks bypassed.
 
-- Three executor adapters (`claude`, `agy`, `cursor-agent`) with `review`
-  (read-only) and `code` (accept-edits) modes, each mapped onto the CLI's own
-  permission flags. Verified by `pytest tests/smoke -m smoke`.
-- Isolated task workspaces: a git worktree outside the target repo,
-  provisioning of gitignored paths via copy-on-write, and a squash-merge
-  hand-back. `polyphony workspace create|list|clean`.
-- `git push` refused at the subprocess layer.
-- `polyphony migrate` — ingests `.claude/`, `.cursor/`, `.agents/` config.
-- `polyphony doctor` — environment diagnostics.
+## Guarantees
 
-## What does not work yet
+- The agent works in its own clone under `~/.polyphony/jobs/<job_id>/repo`. Nothing
+  is written to your repository while a job exists: no branch, no worktree, no
+  git objects. The clone has no remote, so the agent has no route to GitHub.
+- Nothing lands until you call `apply`, and `apply` only stages. You commit.
+  It applies a patch, so the job's internal commit never enters your history.
+- Polyphony refuses `git push` before spawning git.
+- Jobs run in a detached process and survive the client disconnecting. State is
+  in `~/.polyphony/jobs/`, so any MCP client can check any job.
 
-- The orchestration loop (`polyphony start`) is mid-rewrite and has never
-  been run against a real task.
-- `events`, `replay`, `explain`, and `export` have no event stream to read.
-- `approve` and `reject` have no approval flow behind them.
-- `benchmark` produces synthetic numbers and should not be used.
-
-## Install and quick start
+## Install
 
 ```bash
-git clone https://github.com/ali-adi/polyphony.git
-cd polyphony
-
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/polyphony doctor
 ```
 
-Verify the install and check the environment:
+**Claude Code:**
 
 ```bash
-polyphony --version
-polyphony doctor
+claude mcp add --scope user polyphony -- /absolute/path/to/.venv/bin/polyphony mcp
 ```
 
-Migrate an existing repo's `.claude/`, `.cursor/`, or `.agents/` config into
-a Polyphony project (`--output` defaults to the current directory, so pass
-one explicitly unless you're running this from inside a Polyphony root):
+**Codex** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.polyphony]
+command = "/absolute/path/to/.venv/bin/polyphony"
+args = ["mcp"]
+tool_timeout_sec = 300  # lets status(wait_seconds=240) finish
+```
+
+`integrations/delegate/SKILL.md` teaches the calling agent when to delegate and how
+to review the result. Link it into your agent's skills directory.
+
+## Project config
+
+Optional, one file per repository in `projects/<name>/project.yaml`:
+
+```yaml
+name: medicoder
+path: /absolute/path/to/repo
+provision:                          # gitignored paths a fresh copy lacks
+  - { path: env/, mode: clone }     # clone = APFS copy-on-write; link = symlink
+pool: [agy, cursor, claude]         # preference order when no executor is named
+models:
+  cursor: composer-2.5
+```
+
+A repository with no config works too, just with no provisioning and the default
+pool.
+
+## Command line
+
+`polyphony mcp` serves the tools on stdio. `polyphony usage [agy|cursor]`,
+`polyphony jobs [JOB_ID]`, `polyphony discard JOB_ID`, and `polyphony doctor` are
+for checking by hand.
+
+## Development
 
 ```bash
-polyphony migrate /path/to/your-repo --name your-project --output /path/to/polyphony-root
+.venv/bin/pytest                 # unit and integration tests
+.venv/bin/pytest -m smoke        # real CLI calls; uses subscription quota
+.venv/bin/ruff check .
 ```
 
-Create, list, and clean an isolated task workspace (a git worktree outside
-the target repo):
-
-```bash
-polyphony workspace create your-project task-1 --repo /path/to/your-repo
-polyphony workspace list --repo /path/to/your-repo
-polyphony workspace clean task-1 --repo /path/to/your-repo
-```
-
-Run the test suite:
-
-```bash
-.venv/bin/python -m pytest -q          # 275 passed, 3 deselected
-.venv/bin/python -m pytest tests/smoke -m smoke -q   # 3 passed — real executor binaries
-```
-
-## Design docs
-
-- `docs/superpowers/specs/` — the redesign spec.
-- `docs/superpowers/plans/` — implementation plans, including this cleanup.
+`docs/design.md` covers the design. `docs/evidence/` records what was verified
+against the real CLIs.
 
 ## License
 
-Polyphony is licensed under the [MIT License](LICENSE).
+MIT. See [LICENSE](LICENSE).

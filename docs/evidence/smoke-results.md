@@ -1,5 +1,9 @@
 # Plan 1 Task 6: Real-subprocess smoke test results
 
+> Recorded 2026-09-21, under the earlier orchestrator design. "The spec" and
+> "Plan N" refer to documents since removed (see git history). The findings
+> about the CLIs and provisioning still hold; `docs/design.md` is current.
+
 **Date:** 2026-09-21
 **Command run:** `.venv/bin/python -m pytest tests/smoke -m smoke -v`
 **Outcome:** 1 passed (claude), 2 failed (agy, cursor)

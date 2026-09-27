@@ -1,5 +1,9 @@
 # Provisioning spike: does a cloned virtualenv work in a worktree?
 
+> Recorded 2026-09-21, under the earlier orchestrator design. "The spec" and
+> "Plan N" refer to documents since removed (see git history). The findings
+> about the CLIs and provisioning still hold; `docs/design.md` is current.
+
 **Date:** 2026-09-21
 **Question:** The spec's Session design (§1) assumes a `cp -Rc` (APFS copy-on-write)
 clone of a project's gitignored `env/` produces a working virtualenv inside a
