@@ -27,6 +27,8 @@ from polyphony.guard import run_git
 from polyphony.workspace import Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
+# A brief is read whole into the job record and the executor's prompt.
+MAX_BRIEF_BYTES = 200 * 1024
 # A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
 
@@ -88,6 +90,9 @@ class Job:
     git_dir: str | None = None
     # When the job last became queued, so a worker that never claims it is noticed.
     queued_at: float | None = None
+    # Lane r2-brief. The brief file the task came from, resolved, for display
+    # only: its text was copied into `instruction` and brief.md at create.
+    brief_path: str | None = None
 
     @property
     def applied(self) -> bool:
@@ -109,6 +114,9 @@ class JobStore:
 
     def check_path(self, job_id: str) -> Path:
         return self.path(job_id) / "check.txt"
+
+    def brief_copy_path(self, job_id: str) -> Path:
+        return self.path(job_id) / "brief.md"
 
     def save(self, job: Job) -> None:
         """Write atomically, so a reader never sees a half-written file."""
@@ -220,6 +228,46 @@ def new_job_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
 
 
+def read_brief(path: str, base: Path) -> tuple[Path, str]:
+    """The brief file's resolved path and text, or a ValueError saying what is wrong.
+
+    A long instruction can be cut short on its way through a client, so a
+    caller writes it to a file instead. A relative path is taken from the
+    repository (`base`), not the server's working directory, which the caller
+    cannot see. Read once, at delegate time: the job keeps a copy, so editing
+    the file afterwards changes neither a queued job nor a revision.
+    """
+    file = (base / Path(path).expanduser()).resolve()
+    if not file.exists():
+        raise ValueError(f"brief_path {path!r}: no such file ({file}).")
+    if not file.is_file():
+        raise ValueError(f"brief_path {path!r}: {file} is not a regular file.")
+    try:
+        with file.open("rb") as f:
+            data = f.read(MAX_BRIEF_BYTES + 1)  # no more, however large the file
+    except OSError as e:
+        raise ValueError(f"brief_path {path!r}: cannot read it: {e.strerror or e}.") from e
+    if len(data) > MAX_BRIEF_BYTES:
+        raise ValueError(
+            f"brief_path {path!r} is over the {MAX_BRIEF_BYTES}-byte limit; split the task, "
+            "or have the brief point the agent at files in the repository instead."
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"brief_path {path!r}: not valid UTF-8 ({e}).") from e
+    if not text.strip():
+        raise ValueError(f"brief_path {path!r}: the file is empty.")
+    return file, text
+
+
+def with_brief(instruction: str, brief: str | None) -> str:
+    """The task as the executor gets it: the instruction, a blank line, the brief."""
+    if brief is None:
+        return instruction
+    return f"{instruction}\n\n{brief}" if instruction.strip() else brief
+
+
 def create_job(
     store: JobStore,
     project: ProjectConfig,
@@ -230,10 +278,16 @@ def create_job(
     timeout_seconds: int = 1800,
     check: str | None = None,
     check_timeout_seconds: int = 600,
+    brief: tuple[Path, str] | None = None,
 ) -> Job:
     """Copy the repository, provision the copy, and record the job as queued.
 
     A check only makes sense after edits, so review mode drops it.
+
+    `brief` is read_brief's result. Its text is joined to the instruction and
+    stored as the job's instruction, so prompt() and every revision see the
+    whole task from job.json alone; brief.md keeps the brief by itself for a
+    person to read.
     """
     job_id = new_job_id()
     workdir = store.path(job_id) / "repo"
@@ -253,7 +307,7 @@ def create_job(
         repo=str(project.path),
         executor=executor,
         mode=mode,
-        instruction=instruction,
+        instruction=with_brief(instruction, brief[1] if brief else None),
         timeout_seconds=timeout_seconds,
         workdir=str(ws.path),
         git_dir=str(ws.git_dir),
@@ -266,7 +320,10 @@ def create_job(
         check_command=check if mode == "code" else None,
         check_timeout_seconds=check_timeout_seconds,
         queued_at=time.time(),
+        brief_path=str(brief[0]) if brief else None,
     )
+    if brief:
+        store.brief_copy_path(job_id).write_text(brief[1], encoding="utf-8")
     store.save(job)
     return job
 

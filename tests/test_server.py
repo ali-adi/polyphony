@@ -1,5 +1,6 @@
 """The MCP tools, called in-process exactly as a client would call them."""
 
+import hashlib
 import json
 import subprocess
 import time
@@ -9,6 +10,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from polyphony.executors import AgyExecutor, Mode
+from polyphony.jobs import MAX_BRIEF_BYTES
 from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
@@ -752,3 +754,154 @@ def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
     for _ in range(7):
         call(srv, "delegate", instruction="x", repo=str(repo), executor="cursor")
     assert len(store.all()) == 7
+
+
+
+# --- Lane r2-brief: the task from a file, confirming it arrived whole, and a model per call. ---
+
+
+def _record_prompt(fake_agy):
+    """The fake agy keeps its prompt (given as -p=<text>) and its argv beside the copy."""
+    fake_agy('for a in "$@"; do case "$a" in -p=*) printf "%s" "${a#-p=}" > ../prompt.txt;; '
+             'esac; done; echo "$@" > ../argv.txt')
+
+
+def test_delegate_with_a_brief_file_gives_the_executor_the_whole_task(
+        server, repo, fake_agy, store, tmp_path):
+    _record_prompt(fake_agy)
+    brief = tmp_path / "brief.md"
+    text = "# Brief\n\n" + "step\n" * 20_000 + "THE END"
+    brief.write_text(text)
+
+    started = call(server, "delegate", instruction="Do what the brief says.",
+                   repo=str(repo), brief_path=str(brief))
+    job_id = started["job_id"]
+    full = "Do what the brief says.\n\n" + text
+    assert started["brief_path"] == str(brief.resolve())
+    assert started["instruction_chars"] == len(full)
+    assert started["instruction_sha256"] == hashlib.sha256(full.encode()).hexdigest()
+    assert started["instruction_tail"] == full[-200:]
+    assert (store.path(job_id) / "brief.md").read_text() == text
+
+    brief.write_text("edited after delegating")
+    assert finished(server, job_id)["state"] == "succeeded"
+    assert (store.path(job_id) / "prompt.txt").read_text() == full
+
+    # A revision restates the brief as copied, not as the file reads now.
+    call(server, "revise", job_id=job_id, feedback="again")
+    status = finished(server, job_id)
+    assert status["instruction_chars"] == len(full)  # feedback is not counted
+    assert (store.path(job_id) / "prompt.txt").read_text().startswith(full + "\n\n---\n")
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_brief_alone_is_the_task_and_a_relative_path_is_from_the_repo(store, repo, tmp_path):
+    (repo / "docs").mkdir()
+    (repo / "docs" / "brief.md").write_text("only the brief\n")
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="docs/brief.md",
+                   executor="agy")
+    job = store.load(started["job_id"])
+    assert job.instruction == "only the brief\n"
+    assert job.brief_path == str((repo / "docs" / "brief.md").resolve())
+    assert started["instruction_tail"] == "only the brief\n"
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_status_reports_the_instruction_for_every_job(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    job_id = call(srv, "delegate", instruction="short task", repo=str(repo))["job_id"]
+    status = call(srv, "status", job_id=job_id)
+    assert status["instruction_chars"] == 10
+    assert status["instruction_tail"] == "short task"
+    assert status["instruction_sha256"] == hashlib.sha256(b"short task").hexdigest()
+    assert "brief_path" not in status
+
+
+@pytest.mark.parametrize("setup, expected", [
+    (lambda f: None, "no such file"),
+    (lambda f: f.mkdir(), "not a regular file"),
+    (lambda f: f.write_bytes(b"x" * (MAX_BRIEF_BYTES + 1)), "limit"),
+    (lambda f: f.write_bytes(b"caf\xe9"), "UTF-8"),
+    (lambda f: f.write_text(" \n"), "empty"),
+])
+@pytest.mark.usefixtures("no_launch")
+def test_a_bad_brief_is_refused_before_anything_is_copied(store, repo, tmp_path, setup, expected):
+    brief = tmp_path / "brief.md"
+    setup(brief)
+    srv = _server(store, tmp_path)
+    assert expected in refused(srv, "delegate", instruction="x", repo=str(repo),
+                               brief_path=str(brief))
+    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                               brief_path=str(brief), executors=["agy"])
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_brief_at_the_limit_is_accepted(store, repo, tmp_path):
+    brief = tmp_path / "brief.md"
+    brief.write_bytes(b"x" * MAX_BRIEF_BYTES)
+    started = call(_server(store, tmp_path), "delegate", repo=str(repo), brief_path=str(brief))
+    assert started["instruction_chars"] == MAX_BRIEF_BYTES
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_needs_an_instruction_or_a_brief(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    for tool, extra in [("delegate", {}), ("delegate_many", {"executors": ["agy"]})]:
+        assert "brief_path" in refused(srv, tool, repo=str(repo), **extra)
+        assert "brief_path" in refused(srv, tool, instruction="  ", brief_path="",
+                                       repo=str(repo), **extra)
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_gives_every_job_the_brief_and_its_model(store, repo, tmp_path):
+    (repo / ".polyphony.yaml").write_text("models: {agy: configured, cursor: configured}\n")
+    brief = tmp_path / "brief.md"
+    brief.write_text("the brief")
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate_many", instruction="lead", repo=str(repo),
+                   executors=["agy", "cursor"], brief_path=str(brief),
+                   models={"cursor": "picked"})["jobs"]
+    loaded = {j["executor"]: store.load(j["job_id"]) for j in started}
+    assert {j.instruction for j in loaded.values()} == {"lead\n\nthe brief"}
+    assert all((store.path(j.id) / "brief.md").read_text() == "the brief"
+               for j in loaded.values())
+    assert loaded["agy"].model == "configured"
+    assert loaded["cursor"].model == "picked"
+
+
+@pytest.mark.parametrize("models, expected", [
+    ({"claude": "m"}, "not in executors"),
+    ({"agy": " "}, "blank"),
+])
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_refuses_bad_models(store, repo, tmp_path, models, expected):
+    srv = _server(store, tmp_path)
+    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                               executors=["agy", "cursor"], models=models)
+    assert store.all() == []
+
+
+def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo, fake_agy, store):
+    (repo / ".polyphony.yaml").write_text("models: {agy: configured}\n")
+    _record_prompt(fake_agy)
+    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ")
+    job_id = started["job_id"]
+    assert started["model"] == "picked"
+    finished(server, job_id)
+    assert "--model picked" in (store.path(job_id) / "argv.txt").read_text()
+
+    call(server, "revise", job_id=job_id, feedback="again")
+    assert finished(server, job_id)["model"] == "picked"
+    assert "--model picked" in (store.path(job_id) / "argv.txt").read_text()
+
+    default = call(server, "delegate", instruction="x", repo=str(repo))
+    assert default["model"] == "configured"
+    finished(server, default["job_id"])
+
+
+def test_a_blank_model_is_refused(server, repo, store):
+    assert "blank" in refused(server, "delegate", instruction="x", repo=str(repo), model="")
+    assert store.all() == []

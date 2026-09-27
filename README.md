@@ -17,8 +17,8 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | Tool | What it does |
 |---|---|
 | `executors(repo?)` | The pool in preference order: whether each CLI is available, its modes, its active jobs against its limit, and its last cached quota check |
-| `delegate(instruction, repo, executor?, mode?, timeout_minutes?, check?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it) |
-| `delegate_many(instruction, repo, executors, mode?, timeout_minutes?, check?)` | The same brief to several executors, one job each, to compare diffs. Spends quota on every one |
+| `delegate(instruction?, repo, executor?, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it) |
+| `delegate_many(instruction?, repo, executors, mode?, timeout_minutes?, check?, brief_path?, models?)` | The same brief to several executors, one job each, to compare diffs. Spends quota on every one |
 | `status(job_id, wait_seconds?)` | State and the tail of the agent's output so far; once finished, also changed files, diff stat, and the check's result and output tail. Can block up to 240s |
 | `diff(job_id)` | The job's full diff |
 | `apply(job_id, paths?)` | Stage the changes in your repo, uncommitted. `paths` takes only some files; a later call without it applies the rest. Refuses without touching anything on conflict |
@@ -46,6 +46,16 @@ whether it passed. A failing check does not fail the job; you decide. The check
 runs sandboxed (`sandbox-exec` on macOS, `bwrap` on Linux): it can write only in
 the copy and a private `$TMPDIR`, with no network beyond loopback. Without a
 sandbox it does not run.
+
+A long brief can be cut short when passed inline, so `delegate` and
+`delegate_many` also take `brief_path`: a UTF-8 file of at most 200 KB (relative
+paths are from the repo). It is copied into the job at once as `brief.md`, and
+the agent is told `instruction`, a blank line, then the brief; either may be
+left out, not both. `status` reports `instruction_chars`, `instruction_sha256`,
+and `instruction_tail` (the last 200 characters) of that task, before any
+`revise` feedback, so you can check it arrived whole. `model` overrides the
+project's model for the executor that runs (`models`, keyed by executor, for
+`delegate_many`), and `revise` keeps it.
 
 A finished job is applied (all of it, or some files), revised, or discarded.
 Each job's outcome goes once into `~/.polyphony/ledger.jsonl`, which outlives the

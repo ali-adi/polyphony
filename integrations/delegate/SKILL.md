@@ -24,6 +24,13 @@ constraints (style, what to leave alone), the command that proves it works, and
 what done looks like. Done when a competent stranger could finish the task from the
 brief alone.
 
+Anything over a few paragraphs goes in a file, passed as `brief_path` (with a
+one-line `instruction`, or none): a long inline `instruction` can be cut short
+on the way. Then check that `instruction_chars` and `instruction_tail` in the
+result match what you wrote. The file is copied when you delegate, so editing
+it afterwards changes nothing. Pass `model` only when the user asked for one,
+and name `executor` with it.
+
 ## 3. Delegate and wait
 
 1. `delegate(instruction, repo=<repository root>, mode="code")`, or
