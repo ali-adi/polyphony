@@ -28,8 +28,10 @@ Anything over a few paragraphs goes in a file, passed as `brief_path` (with a
 one-line `instruction`, or none): a long inline `instruction` can be cut short
 on the way. Then check that `instruction_chars` and `instruction_tail` in the
 result match what you wrote. The file is copied when you delegate, so editing
-it afterwards changes nothing. Pass `model` only when the user asked for one,
-and name `executor` with it.
+it afterwards changes nothing. A brief is at most 100 KB and the whole task
+under 120 KB; for more, have the brief point the agent at files in the
+repository. Pass `model` only when the user asked for one; it is refused
+without `executor`, since a model belongs to one CLI.
 
 ## 3. Delegate and wait
 
@@ -85,7 +87,9 @@ In review mode the product is `output_tail` (the full text is at `output_path`).
 
 For an audit whose findings you want as a document, use `mode="report"` rather
 than `review`, and don't ask for a file in the brief: Polyphony tells the agent to
-write `REPORT.md`. On `succeeded`, read it with `report(job_id)`, paging with
+write `REPORT.md`. If the repository already tracks a `REPORT.md`, tell the
+agent to overwrite it: one left unchanged is not taken as the report, and the
+job fails. On `succeeded`, read it with `report(job_id)`, paging with
 `offset` while `more` is true. A non-empty `stray_changes` means the agent edited
 other files too; the report can still stand, but `apply` is refused, so save the
 report where the user wants it yourself, then `discard`.

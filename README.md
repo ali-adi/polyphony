@@ -41,7 +41,10 @@ runs in the CLI's `code` mode, since writing a file needs edit permission, so a
 review-only executor can't take it. The report is saved as the job's
 `report.md`; `status` shows `report_path`, `report_chars`, and `stray_changes`
 (files changed besides `REPORT.md`), and `report` reads it. A run that writes no
-`REPORT.md` fails. No check runs, and `apply` refuses a report job.
+`REPORT.md` fails. So does one whose `REPORT.md` is a symlink, or is a file your
+repository already tracks that the job left unchanged: an old report is never
+passed off as the new one. If you track a `REPORT.md`, the agent has to rewrite
+it. No check runs, and `apply` and `apply_many` refuse a report job.
 
 With no `executor` named, `delegate` takes the first one in the project's `pool`
 that is installed, supports the mode, is below its limit of active jobs, and is
@@ -59,14 +62,17 @@ the copy and a private `$TMPDIR`, with no network beyond loopback. Without a
 sandbox it does not run.
 
 A long brief can be cut short when passed inline, so `delegate` and
-`delegate_many` also take `brief_path`: a UTF-8 file of at most 200 KB (relative
+`delegate_many` also take `brief_path`: a UTF-8 file of at most 100 KB (relative
 paths are from the repo). It is copied into the job at once as `brief.md`, and
 the agent is told `instruction`, a blank line, then the brief; either may be
-left out, not both. `status` reports `instruction_chars`, `instruction_sha256`,
+left out, not both. The whole task (instruction, brief, and report mode's
+request) must stay under 120 KB, and `revise` refuses feedback that would take
+it over: agy, cursor, gemini and opencode get the task as one command-line
+argument, which Linux caps at 128 KiB. `status` reports `instruction_chars`, `instruction_sha256`,
 and `instruction_tail` (the last 200 characters) of that task, before any
 `revise` feedback, so you can check it arrived whole. `model` overrides the
-project's model for the executor that runs (`models`, keyed by executor, for
-`delegate_many`), and `revise` keeps it.
+project's model and needs `executor`, since a model belongs to one CLI
+(`delegate_many` takes `models`, keyed by executor); `revise` keeps it.
 
 A finished job is applied (all of it, or some files), revised, or discarded.
 Each job's outcome goes once into `~/.polyphony/ledger.jsonl`, which outlives the
@@ -91,8 +97,9 @@ edit-capable agent allows every tool, shell included, without asking.
 - Secret-looking files the copy would otherwise take from your working tree
   (untracked or gitignored `.env`, `.env.*` but not `.env.example`, private keys,
   `.netrc`, `.npmrc`, `credentials.json`, and so on; `SECRET_PATTERNS` in
-  `workspace.py`) are withheld, at any depth, and `status` lists them as
-  `withheld`. A secret you have committed is in the clone regardless.
+  `workspace.py`) are withheld, at any depth and in any case (`.ENV` too), and
+  `status` lists them as `withheld`. A secret you have committed is in the
+  clone regardless.
 - The check does not see credential-looking environment variables (`*_API_KEY`,
   `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`). The agent keeps them,
   since its CLI may authenticate with one; `env_scrub` removes others from both.
@@ -152,7 +159,7 @@ check: .venv/bin/pytest -q          # run in the copy after a code job succeeds
 check_timeout_minutes: 10           # default 10
 max_parallel:                       # active jobs per executor, across all projects (default: no limit)
   agy: 2
-allow_secrets: [.env.test]          # withheld secret-looking files the copy gets anyway (path or basename globs)
+allow_secrets: [.env.test]          # withheld secret-looking files the copy gets anyway (path or basename globs, any case)
 env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the check
 ```
 

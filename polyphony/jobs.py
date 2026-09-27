@@ -21,7 +21,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from polyphony import ledger
@@ -31,8 +31,13 @@ from polyphony.guard import run_git
 from polyphony.workspace import Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
+# agy, cursor, gemini and opencode take the whole prompt as one argv string, which
+# Linux caps at 128 KiB (MAX_ARG_STRLEN); over it the executor cannot even start.
+# The prompt limit stays under that, and a brief under the prompt limit leaves
+# room for the instruction, report mode's request, and revise feedback.
+MAX_PROMPT_BYTES = 120 * 1024
 # A brief is read whole into the job record and the executor's prompt.
-MAX_BRIEF_BYTES = 200 * 1024
+MAX_BRIEF_BYTES = 100 * 1024
 # A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
 
@@ -288,6 +293,23 @@ def read_brief(path: str, base: Path) -> tuple[Path, str]:
     return file, text
 
 
+def check_prompt(text: str) -> None:
+    """Refuse a prompt too long for an executor that takes it as one argument.
+
+    Checked when the job is created and on each revise, rather than left to
+    fail at launch with "Argument list too long". Applied to every executor,
+    though claude and codex read stdin, so a task's limit does not depend on
+    which executor happens to be chosen.
+    """
+    size = len(text.encode("utf-8"))
+    if size > MAX_PROMPT_BYTES:
+        raise ValueError(
+            f"The task is {size} bytes, over the {MAX_PROMPT_BYTES}-byte limit on what "
+            "an executor can be given; shorten it, or have it point the agent at files "
+            "in the repository instead."
+        )
+
+
 def with_brief(instruction: str, brief: str | None) -> str:
     """The task as the executor gets it: the instruction, a blank line, the brief."""
     if brief is None:
@@ -389,6 +411,11 @@ def launch(store: JobStore, job: Job) -> None:
         store.save(job)
 
 
+def task_text(instruction: str, mode: str) -> str:
+    """A first attempt's prompt: the instruction, plus report mode's request."""
+    return f"{instruction}\n\n{REPORT_INSTRUCTION}" if mode == REPORT else instruction
+
+
 def prompt(job: Job) -> str:
     """What the executor is told on this attempt.
 
@@ -396,9 +423,7 @@ def prompt(job: Job) -> str:
     whole task: the original instruction, where it stands, and every piece of
     feedback so far rather than only the latest.
     """
-    task = job.instruction
-    if job.mode == REPORT:
-        task = f"{task}\n\n{REPORT_INSTRUCTION}"
+    task = task_text(job.instruction, job.mode)
     if not job.feedback:
         return task
     notes = "\n\n".join(f"{i}. {text}" for i, text in enumerate(job.feedback, 1))
@@ -432,6 +457,9 @@ def revise(
         raise JobError(f"Job {job.id} no longer has its copy of the repository to revise.")
     if not feedback.strip():
         raise ValueError("feedback must say what to change.")
+    # Every attempt restates all feedback so far, so the prompt only grows.
+    check_prompt(prompt(replace(job, feedback=[*job.feedback, feedback.strip()],
+                                attempt=job.attempt + 1)))
 
     # Keep each attempt's output, check result and report; the next run writes fresh ones.
     for current in (store.output_path(job.id), store.check_path(job.id),

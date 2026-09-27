@@ -10,7 +10,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from polyphony.executors import AgyExecutor, Mode
-from polyphony.jobs import MAX_BRIEF_BYTES
+from polyphony.jobs import MAX_BRIEF_BYTES, MAX_PROMPT_BYTES
 from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
@@ -902,7 +902,8 @@ def test_delegate_many_refuses_bad_models(store, repo, tmp_path, models, expecte
 def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo, fake_agy, store):
     (repo / ".polyphony.yaml").write_text("models: {agy: configured}\n")
     _record_prompt(fake_agy)
-    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ")
+    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ",
+                   executor="agy")
     job_id = started["job_id"]
     assert started["model"] == "picked"
     finished(server, job_id)
@@ -920,6 +921,54 @@ def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo,
 def test_a_blank_model_is_refused(server, repo, store):
     assert "blank" in refused(server, "delegate", instruction="x", repo=str(repo), model="")
     assert store.all() == []
+
+
+def test_a_model_without_an_executor_is_refused(server, repo, store):
+    """A model names one CLI's model; leaving the pool to pick the CLI would
+    hand it to whichever runs."""
+    assert "needs executor" in refused(server, "delegate", instruction="x", repo=str(repo),
+                                       model="picked")
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_task_too_long_for_one_argument_is_refused(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    over = "x" * (MAX_PROMPT_BYTES + 1)
+    assert "limit" in refused(srv, "delegate", instruction=over, repo=str(repo))
+    # A brief under its own limit still counts toward the task's, with the instruction.
+    brief = tmp_path / "brief.md"
+    brief.write_bytes(b"b" * MAX_BRIEF_BYTES)
+    long_lead = "i" * (MAX_PROMPT_BYTES - MAX_BRIEF_BYTES)
+    assert "limit" in refused(srv, "delegate", instruction=long_lead, repo=str(repo),
+                              brief_path=str(brief))
+    assert "limit" in refused(srv, "delegate_many", instruction=long_lead, repo=str(repo),
+                              brief_path=str(brief), executors=["agy"])
+    # Bytes, not characters: what the kernel counts.
+    assert "limit" in refused(srv, "delegate", repo=str(repo),
+                              instruction="\u00e9" * (MAX_PROMPT_BYTES // 2 + 1))
+    assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_report_modes_request_counts_toward_the_limit(store, repo, tmp_path):
+    from polyphony.jobs import REPORT_INSTRUCTION
+    srv = _server(store, tmp_path)
+    fits_in_code_mode = "x" * (MAX_PROMPT_BYTES - len(REPORT_INSTRUCTION))
+    assert "limit" in refused(srv, "delegate", instruction=fits_in_code_mode, repo=str(repo),
+                              mode="report")
+    call(srv, "delegate", instruction=fits_in_code_mode, repo=str(repo))
+
+
+def test_revise_is_refused_once_feedback_would_pass_the_limit(server, repo, fake_agy, store):
+    fake_agy("true")
+    job_id = call(server, "delegate", instruction="x" * (MAX_PROMPT_BYTES - 1000),
+                  repo=str(repo))["job_id"]
+    finished(server, job_id)
+    assert "limit" in refused(server, "revise", job_id=job_id, feedback="f" * 2000)
+    job = store.load(job_id)
+    assert job.attempt == 1 and job.feedback == []  # nothing was queued
+    call(server, "revise", job_id=job_id, feedback="short")
 
 
 # --- Report mode: an audit whose findings are REPORT.md, read with report(). ---

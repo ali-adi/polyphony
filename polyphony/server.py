@@ -81,16 +81,19 @@ def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
             f"check runs only in code mode; {mode} mode changes no code to check.")
 
 
-def _task(instruction: str, brief_path: str | None, root: Path) -> tuple[Path, str] | None:
-    """The brief, read and checked, if one was named; refuses a delegate with no task.
+def _task(
+    instruction: str, brief_path: str | None, root: Path, mode: str
+) -> tuple[Path, str] | None:
+    """The brief, read and checked, if one was named; refuses a delegate with no
+    task, or one too long to hand an executor (see jobs.MAX_PROMPT_BYTES).
 
     Before any executor is chosen or copy made, so a bad path costs nothing.
     """
-    if brief_path:
-        return jobs.read_brief(brief_path, root)
-    if not instruction.strip():
+    brief = jobs.read_brief(brief_path, root) if brief_path else None
+    if brief is None and not instruction.strip():
         raise ValueError("Give the task as instruction, brief_path, or both.")
-    return None
+    jobs.check_prompt(jobs.task_text(jobs.with_brief(instruction, brief and brief[1]), mode))
+    return brief
 
 
 def _model(model: str | None, what: str = "model") -> str | None:
@@ -346,27 +349,32 @@ def build_server(
         returning a job_id at once. mode "code" lets the agent edit files;
         "review" is read-only; "report" is an audit whose findings the agent
         writes to REPORT.md, read with report(). executor defaults to the
-        first one in the
-        repository's preference order that is available, below its limit of
-        active jobs, and not out of quota; "skipped" says why any before it
-        were passed over. check is a shell command run in the copy once the
-        agent succeeds (code mode only), overriding the repository's
-        configured one; "" skips it. Nothing reaches the repository until you
-        call apply. Follow up with status.
+        first one in the repository's preference order that is available,
+        below its limit of active jobs, and not out of quota; "skipped" says
+        why any before it were passed over. check is a shell command run in
+        the copy once the agent succeeds (code mode only), overriding the
+        repository's configured one; "" skips it. Nothing reaches the
+        repository until you call apply. Follow up with status.
 
-        brief_path names a UTF-8 file (at most 200 KB; relative to repo) whose
+        brief_path names a UTF-8 file (at most 100 KB; relative to repo) whose
         text follows instruction, after a blank line, as the task; use it for
         any long brief, which can be cut short when passed inline. It is
         copied at once, so later edits to the file don't reach the job. Give
-        instruction, brief_path, or both. instruction_chars and
-        instruction_tail in the result show the task arrived whole. model
-        overrides the repository's model for the executor that runs, so name
-        executor with it."""
+        instruction, brief_path, or both; together they must stay under 120
+        KB. instruction_chars and instruction_tail in the result show the
+        task arrived whole. model overrides the repository's model and needs
+        executor, since a model belongs to one CLI."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
             model = _model(model)
+            if model is not None and executor is None:
+                # A model belongs to one CLI; which one runs would be up to the pool.
+                raise ValueError(
+                    "model needs executor: name the executor the model belongs to, "
+                    "or leave model out for the project's."
+                )
             root = _toplevel(repo)
-            brief = _task(instruction, brief_path, root)
+            brief = _task(instruction, brief_path, root, mode)
             project = project_for(root)
             with store.lock():
                 chosen, skipped = _choose(
@@ -413,7 +421,7 @@ def build_server(
                 )
             models = {n: _model(m, f"models[{n!r}]") for n, m in models.items()}
             root = _toplevel(repo)
-            brief = _task(instruction, brief_path, root)
+            brief = _task(instruction, brief_path, root, mode)
             project = project_for(root)
             with store.lock():
                 running = active_counts(store)
@@ -438,7 +446,8 @@ def build_server(
         previous changes, with your feedback on what to fix. The agent gets
         the original instruction plus all feedback so far, and the job's check
         runs again. diff and apply then cover every attempt together. Refused
-        once any of the job has been applied. Follow up with status."""
+        once any of the job has been applied, or once the task with all its
+        feedback would pass 120 KB. Follow up with status."""
         with _anticipated():
             if timeout_minutes is not None and timeout_minutes <= 0:
                 raise ValueError("timeout_minutes must be positive.")
@@ -559,7 +568,9 @@ def build_server(
     def report(job_id: str, offset: int = 0, limit: int = jobs.REPORT_LIMIT) -> dict:
         """The report a finished report-mode job wrote, limit characters
         from offset. more is true while text stops short of total_chars; call
-        again with offset + limit for the rest."""
+        again with offset + limit for the rest. The report is the REPORT.md
+        the job wrote or changed: a tracked REPORT.md it left as it was, or a
+        symlink, is not taken as one, and the job fails with no report."""
         with _anticipated():
             return jobs.report(store, job_id, offset, limit)
 

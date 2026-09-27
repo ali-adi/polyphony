@@ -221,6 +221,23 @@ def test_allow_secrets_lets_matching_paths_through(repo, tmp_path):
     assert ws.withheld == [".env.local", "id_ed25519"]
 
 
+def test_secret_matching_ignores_case(repo, tmp_path):
+    (repo / "config").mkdir()
+    for name in (".ENV", "config/Server.PEM", "Id_Rsa", ".Env.Example"):
+        (repo / name).write_text("x\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert ws.withheld == [".ENV", "Id_Rsa", "config/Server.PEM"]
+    assert (ws.path / ".Env.Example").exists()  # a template in any case is still a template
+
+
+def test_allow_secrets_ignores_case_too(repo, tmp_path):
+    (repo / "config").mkdir()
+    (repo / ".ENV").write_text("A=1\n", encoding="utf-8")
+    (repo / "config" / "Server.PEM").write_text("x\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws", allow_secrets=(".env", "CONFIG/*.pem"))
+    assert ws.withheld == []
+    assert (ws.path / ".ENV").exists() and (ws.path / "config" / "Server.PEM").exists()
+
 def test_a_staged_new_secret_is_withheld_too(repo, tmp_path):
     (repo / "prod.key").write_text("secret\n", encoding="utf-8")
     (repo / "notes.txt").write_text("todo\n", encoding="utf-8")

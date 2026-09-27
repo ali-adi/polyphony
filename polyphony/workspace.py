@@ -37,7 +37,7 @@ OVERLAY_MAX_BYTES = 50 * 1024 * 1024
 IGNORE_FILE = ".polyphonyignore"
 
 # Untracked or gitignored files the overlay withholds, matched on the basename
-# at any depth: dotenv files, private keys and keystores, and the credential
+# at any depth and ignoring case (patterns here are lower case): dotenv files, private keys and keystores, and the credential
 # files of package managers and cloud SDKs. Only the private half of an SSH key
 # pair matches (id_rsa, not id_rsa.pub). Templates meant to be copied, like
 # .env.example, hold no real values and are let through (SECRET_TEMPLATES).
@@ -217,14 +217,20 @@ class Workspace:
 
     def _secret(self, rel: str) -> bool:
         """Whether the overlay withholds `rel`: its basename looks like a
-        secret, and no allow_secrets glob names it."""
-        name = Path(rel).name
+        secret, and no allow_secrets glob names it.
+
+        Case is ignored on both sides, whatever the file system does: `.ENV`
+        and `KEY.PEM` hold keys as surely as `.env` and `key.pem`, and on
+        macOS they may be the same file.
+        """
+        low, name = rel.lower(), Path(rel).name.lower()
         if name in SECRET_TEMPLATES or not any(
             fnmatch.fnmatchcase(name, p) for p in SECRET_PATTERNS
         ):
             return False
-        return not any(fnmatch.fnmatchcase(rel, p) or fnmatch.fnmatchcase(name, p)
-                       for p in self.allow_secrets)
+        allowed = [p.lower() for p in self.allow_secrets]
+        return not any(fnmatch.fnmatchcase(low, p) or fnmatch.fnmatchcase(name, p)
+                       for p in allowed)
 
     def remove(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)

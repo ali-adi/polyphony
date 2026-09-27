@@ -203,16 +203,26 @@ and the ledger is read as each job's last line.
 
 **A brief file is copied into the job's instruction.** Long inline instructions
 were cut short on the way in, so `brief_path` names a file instead. It is read
-once, at delegate time (at most 200 KB, UTF-8, relative to the repo), and the
+once, at delegate time (at most 100 KB, UTF-8, relative to the repo), and the
 instruction, a blank line, and its text are stored together as the job's
 `instruction`: `prompt()` and every `revise` then restate the whole task from
 `job.json` alone, and later edits to the file reach no queued or revised job.
 `brief.md` keeps the brief by itself for reading, and `brief_path` is kept for
 display only. `status` gives the stored task's length, SHA-256, and last 200
 characters so the lead can confirm it arrived whole. agy, cursor, gemini, and
-opencode take the prompt as one argv string, which Linux caps at 128 KiB, so on
-Linux a task over that fails with "Argument list too long" there; claude and
-codex read it on stdin.
+opencode take the prompt as one argv string, which Linux caps at 128 KiB
+(MAX_ARG_STRLEN); over it the executor fails to start with "Argument list too
+long". So the whole prompt, as `prompt()` builds it, is held to 120 KB
+(`MAX_PROMPT_BYTES`, in UTF-8 bytes, which is what the kernel counts), checked
+at delegate time before any copy is made and again on each `revise`, whose
+feedback only adds to it. The limit applies whichever executor runs, although
+claude and codex read stdin, so whether a task fits never depends on which one
+the pool picks. The brief's own 100 KB leaves room for the instruction, report
+mode's request and feedback.
+
+**A model needs its executor.** `model` on `delegate` is refused without
+`executor`: a model name belongs to one CLI, and with the pool choosing, it
+would go to whichever executor was free, which may not know it.
 
 **Old jobs are removed only on request.** `polyphony gc --older-than` has no
 default and never runs on its own. A finished job may hold work nobody has
@@ -257,8 +267,9 @@ The overlay copies untracked and gitignored files so the copy matches the
 working tree, which would also hand every agent the repository's `.env`. So
 files whose basename looks like a secret (`SECRET_PATTERNS` in `workspace.py`)
 are left out, including one staged but never committed, and listed in the
-job's `withheld`; `allow_secrets` lets named ones through. Matching is by name,
-not content: a key in `settings.toml` still goes, and a committed `.env` is in
+job's `withheld`; `allow_secrets` lets named ones through. Both match without
+regard to case, since `.ENV` holds keys as surely as `.env`, and on macOS's
+default file system they are the same file. Matching is by name, not content: a key in `settings.toml` still goes, and a committed `.env` is in
 the clone regardless. Explicit `provision` entries are the user's choice and are
 not filtered. The check runs executor-written code, so it loses
 `*_API_KEY`-style variables by default. The executor does not, because agent
@@ -272,8 +283,12 @@ the contract: the executor runs in its `code` mode (writing a file needs edit
 permission), the prompt asks for `REPORT.md` and nothing else, and the worker
 copies it out as the job's `report.md`. Other edits are listed as
 `stray_changes` rather than prevented, since no CLI can grant write access to
-one file. A symlinked `REPORT.md`, or a tracked one the job left unchanged, is
-not taken as the report.
+one file. A symlinked `REPORT.md` is not read, since it could point at any
+file on the machine. A tracked `REPORT.md` the job left unchanged is not taken
+as the report either, so an old report is never returned as the new one; the
+cost is that an agent writing exactly the tracked text fails the job. That is
+kept, rather than accepting any `REPORT.md` present, because a stale report
+passed off as fresh is worse than a rerun.
 
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work
