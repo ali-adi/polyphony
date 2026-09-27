@@ -38,8 +38,13 @@ def _subcommand(args: List[str]) -> str | None:
     return None
 
 
-def run_git(args: List[str], cwd: str, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a git command, refusing forbidden subcommands before spawning."""
+def run_git(
+    args: List[str], cwd: str, timeout: int = 30, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run a git command, refusing forbidden subcommands before spawning.
+
+    `env`, if given, replaces the environment, as in subprocess.run.
+    """
     sub = _subcommand(args)
     if sub in _FORBIDDEN_SUBCOMMANDS:
         raise ForbiddenGitCommand(
@@ -52,4 +57,5 @@ def run_git(args: List[str], cwd: str, timeout: int = 30) -> subprocess.Complete
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )

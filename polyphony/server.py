@@ -599,4 +599,21 @@ def build_server(
                          for j in listed],
             }
 
+    # --- apply_many lane ---
+
+    @server.tool()
+    def apply_many(job_ids: list[str], dry_run: bool = False) -> dict:
+        """Stage several succeeded jobs in one repository, in the order given,
+        without committing: all of them or, if any would not apply, none.
+        Every patch is first checked on top of the ones before it, so jobs
+        that conflict with each other are found before anything changes;
+        "error" names the job that did not apply and why. "overlaps" lists
+        each file more than one job touched; "unstaged" the jobs left unstaged
+        because they touch files with unstaged edits. dry_run only reports.
+        Whole jobs only: for a job partly applied, use apply. Use it after a
+        fan-out of separate tasks, not after delegate_many (apply one of
+        those). Call discard afterwards."""
+        with _anticipated():
+            return jobs.apply_many(store, job_ids, dry_run)
+
     return server

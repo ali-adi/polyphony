@@ -26,7 +26,7 @@ there. State lives in `~/.polyphony/`, not in any client's session.
 | `workspace.py` | A job's private clone of the repo, provisioning of gitignored paths |
 | `guard.py` | The only way git is spawned. Refuses `push` before a process exists |
 | `config.py` | Per-repository provisioning, pool order, models, check command, job limits. Found in the repo's `.polyphony.yaml`, then `$POLYPHONY_HOME/projects/`, then the legacy package-relative `projects/` |
-| `jobs.py` | Job records, launch, cancel, revise, snapshot, check, diff, apply, discard, gc |
+| `jobs.py` | Job records, launch, cancel, revise, snapshot, check, diff, apply, apply_many, discard, gc |
 | `ledger.py` | One line per job's outcome (applied, discarded, cancelled), and the `stats` summary |
 | `worker.py` | The detached process that runs one job |
 | `usage.py` | Remaining quota, read from each CLI's own report, and its on-disk cache |
@@ -163,6 +163,21 @@ same path. A rename is one change with two paths, so naming either side exports
 both. The job records `applied_paths`; a later apply without paths takes the rest,
 and naming an applied path again is refused rather than applied twice. After
 any apply, `revise` is refused.
+
+**`apply_many` pre-checks the whole batch.** Applied one at a time, jobs from a
+fan-out that conflict with each other are found only at the second one, with the
+first already in the repository. `apply_many` first applies every patch, in
+order, with `git apply --cached` to two scratch index files under the store: a
+copy of the repository's index, and a copy that also takes the working tree's
+current content of every file a job touches. A job whose files agree in both
+and whose patch fits goes on both, as `apply --index` would stage it; one that
+fits only the working-tree index would land unstaged, as `apply` falls back to.
+Blobs go to a scratch object directory that borrows the repository's objects as
+an alternate, so the pre-check writes nothing to the repository. Only if every
+patch fits does each go through `apply` itself, so the ledger and
+`applied_paths` stay as they would be; if one fails then anyway (the repository
+changed meanwhile), it stops and says which landed. It takes whole jobs only:
+a partly applied job's remaining patch is not what its record describes.
 
 **`revise` reruns in the same copy.** A wrong-but-close result is cheaper to
 correct than to redo, so `revise` queues another run of the same executor in

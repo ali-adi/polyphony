@@ -23,6 +23,7 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | `wait(job_ids, until?, wait_seconds?)` | Block until `any` (default) or `all` of several jobs finish, up to 240s: one call instead of `status` on each. Returns `done`, the `finished` and `active` ids, and `jobs`: finished ones in full as `status` gives them, active ones only as id, state, executor, and elapsed time. With `any`, an already finished job counts, so pass only the ids still awaited |
 | `diff(job_id)` | The job's full diff |
 | `apply(job_id, paths?)` | Stage the changes in your repo, uncommitted. `paths` takes only some files; a later call without it applies the rest. Refuses without touching anything on conflict |
+| `apply_many(job_ids, dry_run?)` | Apply several whole jobs in order, all or none: each patch is checked on top of the ones before it, on scratch copies of the index, before anything lands. Returns `applied`, `not_applied`, `overlaps` (file: jobs), `unstaged`, `dry_run`, and `error` naming the job that would not apply. `dry_run` only reports |
 | `revise(job_id, feedback, timeout_minutes?)` | Run the job's agent again in the same copy, on top of its last attempt, with your feedback. `diff` and `apply` then cover all attempts. Refused once any of it is applied |
 | `discard(job_id)` | Delete the job's copy and record |
 | `cancel(job_id)` | Kill a running job |
@@ -157,6 +158,15 @@ env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the 
 
 A repository with no config works too, just with no provisioning and the default
 pool.
+
+The copy never takes `node_modules` from the working tree (nor `env`, `.venv`,
+or the other environments and caches), so a frontend check such as `npm test`
+fails there unless the project provisions it:
+`provision: [{ path: node_modules, mode: clone }]` gives each job its own copy
+(copy-on-write on APFS, a full copy elsewhere). `mode: link` symlinks yours
+instead: instant and free on disk, but the agent's installs then write into your
+real `node_modules`, and the sandboxed check sees it read-only, so a tool that
+caches inside it (`node_modules/.cache`) may fail there.
 
 ## Command line
 
