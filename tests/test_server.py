@@ -15,7 +15,7 @@ from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
     "executors", "delegate", "delegate_many", "status", "diff", "apply", "discard", "cancel",
-    "jobs", "usage", "stats", "revise",
+    "jobs", "usage", "stats", "revise", "report",
 }
 
 
@@ -920,3 +920,104 @@ def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo,
 def test_a_blank_model_is_refused(server, repo, store):
     assert "blank" in refused(server, "delegate", instruction="x", repo=str(repo), model="")
     assert store.all() == []
+
+
+# --- Report mode: an audit whose findings are REPORT.md, read with report(). ---
+
+
+def test_report_mode_delegate_status_report(server, repo, fake_agy, store):
+    fake_agy("printf '# Audit\\n\\nall clear\\n' > REPORT.md; echo done")
+    started = call(server, "delegate", instruction="audit errors", repo=str(repo), mode="report")
+    assert started["mode"] == "report"
+    status = finished(server, started["job_id"])
+    assert status["state"] == "succeeded", status
+    assert status["report_path"].endswith("report.md")
+    assert status["report_chars"] == len("# Audit\n\nall clear\n")
+    assert status["stray_changes"] == []
+
+    page = call(server, "report", job_id=started["job_id"])
+    assert page["text"] == "# Audit\n\nall clear\n" and page["more"] is False
+    assert call(server, "report", job_id=started["job_id"], limit=3)["more"] is True
+    assert "offset" in refused(server, "report", job_id=started["job_id"], offset=-1)
+    assert "limit" in refused(server, "report", job_id=started["job_id"], limit=0)
+    assert "report()" in refused(server, "apply", job_id=started["job_id"])
+    assert _git("status", "--porcelain", cwd=repo) == ""
+
+
+def test_report_mode_status_shows_stray_changes(server, repo, fake_agy):
+    fake_agy("echo r > REPORT.md; echo y > app.py")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    assert finished(server, job_id)["stray_changes"] == ["app.py"]
+
+
+def test_report_mode_without_a_report_fails_readably(server, repo, fake_agy):
+    fake_agy("echo findings only on stdout")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    status = finished(server, job_id)
+    assert status["state"] == "failed"
+    assert "REPORT.md" in status["error"]
+    assert status["report_path"] is None and status["report_chars"] == 0
+    assert "findings only on stdout" in status["output_tail"]
+    assert "no report" in refused(server, "report", job_id=job_id)
+
+
+def test_report_refuses_a_running_or_code_job(server, repo, fake_agy, store, wait_for):
+    fake_agy("sleep 30")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    wait_for(store, job_id, {"running"})
+    try:
+        assert "still running" in refused(server, "report", job_id=job_id)
+        assert "report_path" not in call(server, "status", job_id=job_id)
+    finally:
+        call(server, "cancel", job_id=job_id)
+    fake_agy("true")
+    code = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    finished(server, code)
+    assert "report_path" not in finished(server, code)
+    assert "only a report job" in refused(server, "report", job_id=code)
+    assert "No job" in refused(server, "report", job_id="nope")
+
+
+def test_revising_a_report_job_writes_a_fresh_report(server, repo, fake_agy, store):
+    fake_agy("if [ -f REPORT.md ]; then echo second > REPORT.md; "
+             "else echo first > REPORT.md; fi")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    finished(server, job_id)
+    call(server, "revise", job_id=job_id, feedback="go deeper")
+    status = finished(server, job_id)
+    assert status["state"] == "succeeded" and status["attempt"] == 2
+    assert call(server, "report", job_id=job_id)["text"] == "second\n"
+    assert (store.path(job_id) / "report-1.md").read_text() == "first\n"
+
+
+def test_a_check_in_report_mode_is_refused(server, repo):
+    msg = refused(server, "delegate", instruction="x", repo=str(repo), mode="report",
+                  check="pytest")
+    assert "code" in msg and "report" in msg
+
+
+def test_report_mode_needs_an_executor_with_a_code_mode(store, repo, fake_agy):
+    srv = build_server(store=store, executors={"opencode": _ReviewOnly}, usage_check=Checks())
+    msg = refused(srv, "delegate", instruction="x", repo=str(repo), executor="opencode",
+                  mode="report")
+    assert "opencode" in msg and "code" in msg
+    msg = refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                  executors=["opencode"], mode="report")
+    assert "opencode" in msg and "code" in msg
+
+    fake_agy("echo r > REPORT.md")
+    (repo / ".polyphony.yaml").write_text("pool: [opencode, agy]\n")
+    srv = build_server(store=store, executors={"opencode": _ReviewOnly, "agy": AgyExecutor},
+                       usage_check=Checks())
+    started = call(srv, "delegate", instruction="x", repo=str(repo), mode="report")
+    assert started["executor"] == "agy"
+    assert started["skipped"] == [{"executor": "opencode", "reason": "has no code mode"}]
+    finished(srv, started["job_id"])
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_delegate_many_takes_report_mode(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate_many", instruction="x", repo=str(repo),
+                   executors=["agy", "cursor"], mode="report")["jobs"]
+    assert [j["mode"] for j in started] == ["report", "report"]

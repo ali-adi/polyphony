@@ -28,9 +28,18 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | `jobs()` | Recent jobs |
 | `usage(executor?)` | agy's and cursor's remaining quota and reset times, as each CLI reports it. Refreshes the cache `delegate` reads |
 | `stats()` | Per executor and model: jobs, succeeded, revised, applied, discarded, cancelled, check pass rate, median elapsed |
+| `report(job_id, offset?, limit?)` | A finished `report`-mode job's report, `limit` (default 20000) characters from `offset`, with `total_chars` and `more` for paging |
 
 `mode` is `code` (the agent may edit) or `review` (read-only). Each maps onto the
 CLI's own permission mode. Nothing runs with permission checks bypassed.
+
+`mode="report"` is an audit whose findings are a file: the agent is told to write
+them as Markdown to `REPORT.md` at the copy's root and change nothing else. It
+runs in the CLI's `code` mode, since writing a file needs edit permission, so a
+review-only executor can't take it. The report is saved as the job's
+`report.md`; `status` shows `report_path`, `report_chars`, and `stray_changes`
+(files changed besides `REPORT.md`), and `report` reads it. A run that writes no
+`REPORT.md` fails. No check runs, and `apply` refuses a report job.
 
 With no `executor` named, `delegate` takes the first one in the project's `pool`
 that is installed, supports the mode, is below its limit of active jobs, and is
@@ -155,6 +164,7 @@ pool.
 - `polyphony jobs [JOB_ID]`: recent jobs and the disk they use, or one job with
   its check, attempts, and applied files.
 - `polyphony discard JOB_ID`
+- `polyphony report JOB_ID`: a report-mode job's whole report.
 - `polyphony usage [agy|cursor]`: remaining quota, as each CLI reports it.
 - `polyphony stats`: the ledger, per executor and model.
 - `polyphony doctor`: which CLIs are installed, and which config applies to the

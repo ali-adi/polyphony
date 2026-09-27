@@ -36,11 +36,11 @@ MAX_WAIT_SECONDS = 240  # below MCP clients' tool-call timeouts
 OUTPUT_TAIL_CHARS = 8000
 CHECK_TAIL_CHARS = 4000
 INSTRUCTION_TAIL_CHARS = 200
-MODES = [m.value for m in Mode]
 WITHHELD_NOTE = (
     "These secret-looking files were kept out of the job's copy. If the task needs "
     "one, list it under allow_secrets in the project config and delegate again."
 )
+MODES = [m.value for m in Mode] + [jobs.REPORT]
 
 INSTRUCTIONS = (
     "Polyphony runs a coding task with a separate agent CLI (agy, cursor, or "
@@ -76,7 +76,8 @@ def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
     if timeout_minutes <= 0:
         raise ValueError("timeout_minutes must be positive.")
     if check and mode != "code":
-        raise ValueError("check runs only in code mode; review mode edits nothing.")
+        raise ValueError(
+            f"check runs only in code mode; {mode} mode changes no code to check.")
 
 
 def _task(instruction: str, brief_path: str | None, root: Path) -> tuple[Path, str] | None:
@@ -216,6 +217,14 @@ def _summary(store: JobStore, job: Job) -> dict:
             check_output_tail=check.read_text(errors="replace")[-CHECK_TAIL_CHARS:] if check.exists() else "",
             check_output_path=str(check),
         )
+    if job.mode == jobs.REPORT and job.state not in ACTIVE:
+        report = Path(job.report_path) if job.report_path else None
+        info.update(
+            report_path=job.report_path,
+            report_chars=len(report.read_text(errors="replace"))
+            if report and report.is_file() else 0,
+            stray_changes=job.stray_changes,
+        )
     return info
 
 
@@ -321,7 +330,9 @@ def build_server(
     ) -> dict:
         """Start a task with another agent CLI in a private copy of repo,
         returning a job_id at once. mode "code" lets the agent edit files;
-        "review" is read-only. executor defaults to the first one in the
+        "review" is read-only; "report" is an audit whose findings the agent
+        writes to REPORT.md, read with report(). executor defaults to the
+        first one in the
         repository's preference order that is available, below its limit of
         active jobs, and not out of quota; "skipped" says why any before it
         were passed over. check is a shell command run in the copy once the
@@ -346,7 +357,8 @@ def build_server(
             with store.lock():
                 chosen, skipped = _choose(
                     executor, project, executors, active_counts(store),
-                    lambda name: out_of_quota(usage_cache.report(name)), Mode(mode),
+                    lambda name: out_of_quota(usage_cache.report(name)),
+                    jobs.executor_mode(mode),
                 )
                 job = start(project, instruction, chosen, mode, timeout_minutes, check,
                             brief, model)
@@ -392,7 +404,7 @@ def build_server(
             with store.lock():
                 running = active_counts(store)
                 for name in executors:
-                    _check_named(name, known, running, project, Mode(mode))
+                    _check_named(name, known, running, project, jobs.executor_mode(mode))
                 # Every copy first, so a failure part way leaves nothing running.
                 created: list[Job] = []
                 try:
@@ -526,5 +538,15 @@ def build_server(
         succeeded, revised, applied, discarded, cancelled, check pass rate, and median
         elapsed time. Counted when a job is applied, discarded, or cancelled."""
         return {"executors": ledger.summarize(ledger.read(store.root))}
+
+    # --- Report mode ---
+
+    @server.tool()
+    def report(job_id: str, offset: int = 0, limit: int = jobs.REPORT_LIMIT) -> dict:
+        """The report a finished report-mode job wrote, limit characters
+        from offset. more is true while text stops short of total_chars; call
+        again with offset + limit for the rest."""
+        with _anticipated():
+            return jobs.report(store, job_id, offset, limit)
 
     return server

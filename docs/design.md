@@ -250,6 +250,16 @@ not filtered. The check runs executor-written code, so it loses
 CLIs authenticate with them; `env_scrub` names variables removed from both, and
 is recorded on the job so the detached worker applies it.
 
+**A report is a job mode, not an executor mode.** Audits run in review mode
+left their findings only in stdout, which callers lost, and users worked around
+it by running code mode with "only create ERROR_AUDIT.md". `report` makes that
+the contract: the executor runs in its `code` mode (writing a file needs edit
+permission), the prompt asks for `REPORT.md` and nothing else, and the worker
+copies it out as the job's `report.md`. Other edits are listed as
+`stray_changes` rather than prevented, since no CLI can grant write access to
+one file. A symlinked `REPORT.md`, or a tracked one the job left unchanged, is
+not taken as the report.
+
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work
 (`evidence/provisioning-spike.md`).

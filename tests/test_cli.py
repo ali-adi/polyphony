@@ -29,7 +29,7 @@ def test_help_lists_exactly_the_commands():
     result = CliRunner().invoke(cli, ["--help"])
     assert result.exit_code == 0
     commands = result.output.split("Commands:")[1].split()
-    assert {"mcp", "jobs", "discard", "doctor", "usage", "stats", "gc"} <= set(commands)
+    assert {"mcp", "jobs", "discard", "doctor", "usage", "stats", "gc", "report"} <= set(commands)
     assert "workspace" not in commands
 
 
@@ -260,3 +260,28 @@ def test_jobs_shows_attempts_and_applied_files(run, tmp_path, repo):
     assert shown.exit_code == 0, shown.output
     assert "attempt    2" in shown.output and "add tests" in shown.output
     assert "applied    a.py" in shown.output
+
+
+def test_report_prints_the_whole_report(run, tmp_path, repo):
+    store = JobStore(tmp_path / "home")
+    job = create_job(store, project=ProjectConfig(name="demo", path=repo),
+                     instruction="audit", executor="agy", mode="report")
+    text = "# Audit\n\n" + "finding\n" * 5000
+    store.report_path(job.id).write_text(text)
+    job.state, job.report_path = "succeeded", str(store.report_path(job.id))
+    store.save(job)
+    result = run("report", job.id)
+    assert result.exit_code == 0, result.output
+    assert result.output == text
+
+
+def test_report_without_one_fails_readably(run, tmp_path, repo):
+    store = JobStore(tmp_path / "home")
+    job = create_job(store, project=ProjectConfig(name="demo", path=repo),
+                     instruction="audit", executor="agy", mode="report")
+    job.state = "failed"
+    store.save(job)
+    result = run("report", job.id)
+    assert result.exit_code != 0
+    assert "no report" in result.output
+    assert "No job" in run("report", "nope").output
