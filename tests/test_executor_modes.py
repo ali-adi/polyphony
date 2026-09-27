@@ -148,3 +148,98 @@ def test_cursor_does_not_flag_normal_output():
     ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
     assert ex.detect_failure("POLYPHONY_OK") is None
     assert ex.detect_failure("") is None
+
+
+# The adapters below are opt-in and unverified against real binaries; their
+# flags come from each CLI's official docs
+# (docs/evidence/new-adapters-unverified.md).
+
+import pytest
+
+from polyphony.config import DEFAULT_POOL
+from polyphony.executors import EXECUTORS
+from polyphony.executors.codex import CodexExecutor
+from polyphony.executors.gemini import GeminiExecutor
+from polyphony.executors.opencode import OpencodeExecutor
+
+BYPASS_FLAGS = {
+    "--dangerously-bypass-approvals-and-sandbox", "--yolo", "-y",
+    "--full-auto", "--auto", "--dangerously-skip-permissions",
+    "danger-full-access", "--approval-mode=yolo",
+}
+
+
+def test_new_adapters_are_registered_but_opt_in():
+    for name in ("codex", "gemini", "opencode"):
+        assert name in EXECUTORS
+        assert name not in DEFAULT_POOL
+
+
+def test_codex_review_mode_is_read_only_sandbox():
+    argv = CodexExecutor(binary_path="/bin/codex").build_argv("task", Mode.REVIEW, "/tmp/w")
+    assert argv[:2] == ["/bin/codex", "exec"]
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert not BYPASS_FLAGS & set(argv)
+
+
+def test_codex_code_mode_is_workspace_write_sandbox():
+    argv = CodexExecutor(binary_path="/bin/codex").build_argv("task", Mode.CODE, "/tmp/w")
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert not BYPASS_FLAGS & set(argv)
+
+
+def test_codex_reads_the_prompt_from_stdin_and_sets_workspace_and_model():
+    ex = CodexExecutor(binary_path="/bin/codex")
+    argv = ex.build_argv("--looks like a flag", Mode.CODE, "/tmp/w", model="gpt-x")
+    assert argv[-1] == "-"
+    assert "--looks like a flag" not in argv
+    assert ex.stdin("--looks like a flag") == "--looks like a flag"
+    assert argv[argv.index("--cd") + 1] == "/tmp/w"
+    assert argv[argv.index("--model") + 1] == "gpt-x"
+
+
+def test_gemini_review_mode_is_plan():
+    argv = GeminiExecutor(binary_path="/bin/gemini").build_argv("task", Mode.REVIEW, "/tmp")
+    assert argv[argv.index("--approval-mode") + 1] == "plan"
+    assert not BYPASS_FLAGS & set(argv)
+
+
+def test_gemini_code_mode_auto_approves_edits_only():
+    argv = GeminiExecutor(binary_path="/bin/gemini").build_argv("task", Mode.CODE, "/tmp")
+    assert argv[argv.index("--approval-mode") + 1] == "auto_edit"
+    assert not BYPASS_FLAGS & set(argv)
+
+
+def test_gemini_attaches_prompt_so_a_leading_dash_is_not_a_flag():
+    tricky = "-rf everything; echo $HOME"
+    argv = GeminiExecutor(binary_path="/bin/gemini").build_argv(
+        tricky, Mode.CODE, "/tmp", model="gemini-x"
+    )
+    assert f"--prompt={tricky}" in argv
+    assert tricky not in argv
+    assert argv[argv.index("--model") + 1] == "gemini-x"
+
+
+def test_opencode_review_mode_uses_the_plan_agent():
+    argv = OpencodeExecutor(binary_path="/bin/opencode").build_argv(
+        "task", Mode.REVIEW, "/tmp/w", model="anthropic/x"
+    )
+    assert argv[:2] == ["/bin/opencode", "run"]
+    assert argv[argv.index("--agent") + 1] == "plan"
+    assert argv[argv.index("--dir") + 1] == "/tmp/w"
+    assert argv[argv.index("--model") + 1] == "anthropic/x"
+    assert argv[-1] == "task"
+    assert not BYPASS_FLAGS & set(argv)
+
+
+def test_opencode_has_no_code_mode():
+    """Its only edit-capable setup allows every tool, shell included, unprompted."""
+    ex = OpencodeExecutor(binary_path="/bin/opencode")
+    assert ex.modes == (Mode.REVIEW,)
+    with pytest.raises(ValueError, match="code"):
+        ex.build_argv("task", Mode.CODE, "/tmp")
+
+
+def test_existing_adapters_support_both_modes():
+    for name in ("agy", "cursor", "claude", "codex", "gemini"):
+        assert set(EXECUTORS[name].modes) == {Mode.REVIEW, Mode.CODE}

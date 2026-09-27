@@ -27,11 +27,17 @@ brief alone.
 ## 3. Delegate and wait
 
 1. `delegate(instruction, repo=<repository root>, mode="code")`, or
-   `mode="review"` for read-only work. Leave `executor` unset so the cheapest
-   available one is used, unless the user named one.
+   `mode="review"` for read-only work. Leave `executor` unset unless the user
+   named one: the first executor with quota and a free slot is used, and
+   `skipped` says what was passed over. In code mode, pass the brief's check
+   command as `check` unless the repository already configures one.
+   For a risky change where two independent attempts are worth twice the quota,
+   `delegate_many(instruction, repo, executors=[...])` runs the same brief on
+   each; compare the diffs, apply at most one, and discard the rest.
 2. `status(job_id, wait_seconds=240)`, repeated until `state` is `succeeded`,
-   `failed`, `cancelled`, or `died`. Carry on with other work between calls if
-   there is any.
+   `failed`, `cancelled`, or `died`. `output_tail` shows progress while it runs;
+   `cancel` a job that is plainly off track. Carry on with other work between
+   calls if there is any.
 
 ## 4. Review like a pull request
 
@@ -39,12 +45,17 @@ On `succeeded` in code mode:
 
 1. `diff(job_id)` and read every hunk. Scope creep, deleted tests, and edits
    outside the brief are grounds to discard.
-2. Run the brief's check command inside the job's `workdir` (from `status`).
-3. `apply(job_id)`: the changes land **staged, not committed**. Then
-   `discard(job_id)`. Tell the user what is staged; committing is theirs.
+2. If `status` shows `check_passed: true`, the check already passed in the
+   job's copy; don't run it again. If it shows `false`, read `check_output_tail`.
+   With no check reported, run the brief's check command inside the job's
+   `workdir` (from `status`).
+3. `apply(job_id)`: the changes land **staged, not committed**. When most files
+   are right and a few are not, `apply(job_id, paths=[...])` with only the good
+   ones and fix the rest yourself. Then `discard(job_id)`. Tell the user what is
+   staged; committing is theirs.
 
-Done when every hunk is read, the check passed in the `workdir`, and the job is
-applied or discarded.
+Done when every hunk is read, the check passed (by you or as `check_passed`),
+and the job is applied or discarded.
 
 In review mode the product is `output_tail` (the full text is at `output_path`).
 `files_changed` is empty. `discard` when you have what you need.
@@ -53,7 +64,11 @@ In review mode the product is `output_tail` (the full text is at `output_path`).
 
 Read `error` and `output_tail`.
 
-- **Executor problem** (out of quota, unavailable, `died`): `discard`, check
-  `usage()` for which executor still has quota, and delegate again with it.
-- **Wrong work**: `discard`, sharpen the brief once, and delegate again. If the
-  second attempt is also wrong, do the task yourself.
+- **Executor problem** (out of quota, unavailable, `died`): `discard` and
+  delegate again with `executor` unset. An executor out of quota by its last
+  usage report is skipped; `usage()` refreshes those reports.
+- **Wrong work**: before applying anything, `revise(job_id, feedback)` once, with
+  specific feedback: what is wrong, where, and what right looks like. The agent
+  keeps its previous changes, the check runs again, and the diff covers both
+  attempts, so review it all again. If the second attempt is also wrong,
+  `discard` and do the task yourself.

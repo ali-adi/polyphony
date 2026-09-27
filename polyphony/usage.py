@@ -10,6 +10,7 @@ its own request; Polyphony never touches their credentials.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import select
@@ -18,7 +19,9 @@ import struct
 import subprocess
 import tempfile
 import termios
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -242,6 +245,97 @@ def check_usage(names: list[str] | None = None) -> list[dict]:
         )
     with ThreadPoolExecutor(max_workers=len(names)) as pool:
         return list(pool.map(lambda n: checks[n](), names))
+
+
+def _agy_out(report: dict) -> str | None:
+    """agy is out only when every model group has a window at 0%: which
+    group a job's model draws on isn't known here, so any group left means
+    it may still run. A group frees up when all its empty windows reset."""
+    empty: dict[str, list[str]] = {}
+    for row in report["limits"]:
+        empty.setdefault(row["models"], [])
+        if row["remaining_percent"] <= 0:
+            empty[row["models"]].append(row["resets_at"])
+    if not empty or not all(empty.values()):
+        return None
+    return f"out of quota in every model group; resets {min(max(r) for r in empty.values())}"
+
+
+def _cursor_out(report: dict) -> str | None:
+    """cursor is out when every top-level category is used up or disabled,
+    so enabled on-demand usage (shown as an amount, not a percent) keeps it in."""
+    top = [c for c in report["categories"] if c["parent"] is None]
+    used_up = [c for c in top if c["used_percent"] is not None and c["used_percent"] >= 100]
+    if not used_up or any(c not in used_up and c["current"] != "Disabled" for c in top):
+        return None
+    return f"{report['plan']} plan usage is used up and on-demand is off; resets {report['resets']}"
+
+
+_OUT = {"agy": _agy_out, "cursor": _cursor_out}
+
+
+def out_of_quota(report: dict | None) -> str | None:
+    """Why this report says its executor can't run now, with the reset time.
+    None when the report is missing, failed, or not understood: a broken
+    check must never stop delegation."""
+    if not report or not report.get("ok") or report.get("executor") not in _OUT:
+        return None
+    return _OUT[report["executor"]](report)
+
+
+USAGE_TTL_SECONDS = 300
+
+
+class UsageCache:
+    """Usage reports kept in <home>/usage-cache.json, shared by every server
+    using that home. A check takes seconds (cursor-agent runs in a
+    pseudo-terminal), too slow to repeat on every delegate."""
+
+    def __init__(
+        self,
+        root: Path,
+        check: Callable[[list[str] | None], list[dict]] = check_usage,
+        ttl: float = USAGE_TTL_SECONDS,
+    ):
+        self.file = Path(root) / "usage-cache.json"
+        self.check = check
+        self.ttl = ttl
+
+    def _read(self) -> dict:
+        try:
+            data = json.loads(self.file.read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def cached(self, name: str) -> dict | None:
+        """The last stored {"checked_at", "report"} for name, however old. Never checks."""
+        return self._read().get(name)
+
+    def refresh(self, names: list[str] | None = None) -> list[dict]:
+        """Check now and store the results, failures included, so a broken
+        check costs its timeout once per TTL rather than on every delegate."""
+        reports = self.check(names)
+        data = self._read()  # re-read: another server may have stored other executors meanwhile
+        now = time.time()
+        for r in reports:
+            data[r["executor"]] = {"checked_at": now, "report": r}
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.file.with_name(f"{self.file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, self.file)
+        return reports
+
+    def report(self, name: str) -> dict | None:
+        """name's latest report, checking again if the stored one is older
+        than the TTL. None when name has no usage check."""
+        entry = self.cached(name)
+        if entry and time.time() - entry["checked_at"] < self.ttl:
+            return entry["report"]
+        try:
+            return self.refresh([name])[0]
+        except ValueError:
+            return None
 
 
 def format_usage(results: list[dict]) -> str:
