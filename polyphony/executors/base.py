@@ -17,7 +17,9 @@ class Mode(str, Enum):
     """How much authority an executor gets for one invocation.
 
     REVIEW maps onto each CLI's native read-only/plan mode, CODE onto its
-    accept-edits mode. The CLI enforces the permission; nothing bypasses it.
+    accept-edits mode. The CLI enforces the permission. No CLI runs with its
+    sandbox off, but not every CODE mode asks before running commands:
+    cursor's is `-f` (force-allow commands) inside `--sandbox enabled`.
     """
 
     REVIEW = "review"

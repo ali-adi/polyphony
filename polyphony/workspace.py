@@ -316,12 +316,26 @@ def copy_git(
     with hooks and fsmonitor off. Replaced files are unlinked rather than
     written through, since the executor may have made them symlinks.
 
+    Git itself writes through symlinks it finds in the git dir: its lockfile
+    code resolves a symlinked `index` and renames the new one over the
+    target, and a symlinked `objects` (or `objects/ab`, `refs/heads`, ...)
+    takes new objects and refs wherever it points, such as the user's own
+    repository. Git never makes a symlink there, so any symlink anywhere in
+    the git dir is refused rather than repaired: the job fails loudly instead
+    of guessing which of its files are still its own.
+
     A job from before separate git dirs has its git dir inside the copy;
     it gets the flags, but has no trusted config to restore.
     """
     gd, wt = Path(git_dir), Path(work_tree)
     if gd.is_symlink():
         raise WorkspaceError(f"{gd} has been replaced by a symlink; refusing to run git there.")
+    planted = _first_symlink(gd)
+    if planted is not None:
+        raise WorkspaceError(
+            f"{planted} in the job's git dir is a symlink, which git would write through; "
+            "refusing to run git there."
+        )
     trusted = trusted_config(gd)
     if trusted.is_file() and not trusted.is_symlink():
         _unlink(gd / "config")
@@ -339,6 +353,20 @@ def copy_git(
          "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args],
         cwd=str(wt), timeout=timeout,
     )
+
+
+def _first_symlink(git_dir: Path) -> Path | None:
+    """The first symlink found under `git_dir`, or None.
+
+    os.walk does not follow symlinked directories, and lists them among the
+    directories, so a symlinked `objects` is caught before anything under it.
+    """
+    for root, dirs, files in os.walk(git_dir):
+        for name in (*dirs, *files):
+            path = Path(root, name)
+            if path.is_symlink():
+                return path
+    return None
 
 
 def _unlink(path: Path) -> None:
