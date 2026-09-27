@@ -274,3 +274,96 @@ def test_the_tool_applies_a_fan_out_and_refuses_readably(store, repo, fake_agy, 
     with pytest.raises(ToolError, match=f"Job {ids[0]} is already applied") as e:
         _call(server, "apply_many", job_ids=ids)
     assert e.type is ToolError
+
+
+# --- applyrobust lane ---
+
+
+def _tree(repo):
+    """Every file under the repository outside .git, with its bytes."""
+    return {str(p.relative_to(repo)): p.read_bytes()
+            for p in sorted(repo.rglob("*")) if p.is_file() and ".git" not in p.parts}
+
+
+def _dir_to_file(store, repo, wip):
+    """A job that replaces directory d with a file, over an ignored d/cache.pyc
+    that keeps the directory from going, so git apply fails part way through."""
+    (repo / "d").mkdir()
+    (repo / "d" / "a.txt").write_text("a\n")
+    (repo / ".gitignore").write_text("env/\ndata/\n*.pyc\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "d", cwd=repo)
+    if wip:
+        (repo / "app.py").write_text("x = 1\n# precious unstaged work\n")
+    (repo / "d" / "cache.pyc").write_text("ignored\n")
+    return _done(store, repo, "rm -rf d && echo file > d && echo 'y = 2' >> app.py")
+
+
+@pytest.mark.parametrize("wip", [True, False], ids=["unstaged", "staged"])
+def test_a_failed_apply_puts_back_what_git_removed_before_failing(store, repo, wip):
+    # git apply removes the files it rewrites before writing any. When writing
+    # d fails, app.py (with wip, an unstaged edit that exists nowhere else) and
+    # d/a.txt must not stay deleted.
+    job = _dir_to_file(store, repo, wip)
+    before, files = _state(repo), _tree(repo)
+    with pytest.raises(JobError, match="nothing was changed"):
+        apply(store, job.id)
+    assert (_state(repo), _tree(repo)) == (before, files)
+    assert not store.load(job.id).applied
+
+
+def test_a_dry_run_in_a_split_index_repository_writes_nothing_to_git(store, repo):
+    _git("config", "core.splitIndex", "true", cwd=repo)
+    _git("config", "splitIndex.sharedIndexExpire", "now", cwd=repo)
+    _git("update-index", "--split-index", cwd=repo)
+    a = _done(store, repo, "echo 'x = 2' > app.py")
+    b = _done(store, repo, "echo c > c.py")
+    git_dir = repo / ".git"
+    before = {str(p): p.read_bytes() for p in git_dir.rglob("*") if p.is_file()}
+    result = apply_many(store, [a.id, b.id], dry_run=True)
+    assert result["error"] is None
+    after = {str(p): p.read_bytes() for p in git_dir.rglob("*") if p.is_file()}
+    assert after == before
+    _git("status", cwd=repo)  # the shared index the real one needs is still there
+
+
+def test_a_directory_replaced_by_a_file_passes_the_pre_check(store, repo):
+    (repo / "d").mkdir()
+    (repo / "d" / "a.txt").write_text("a\n")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "d", cwd=repo)
+    job = _done(store, repo, "rm -rf d && echo file > d")
+    assert apply_many(store, [job.id], dry_run=True)["error"] is None
+    result = apply_many(store, [job.id])
+    assert result["error"] is None and result["unstaged"] == []
+    assert (repo / "d").read_text() == "file\n"
+
+
+def test_a_file_touched_but_unchanged_is_staged_as_the_dry_run_says(store, repo):
+    import os
+    job = _done(store, repo, "echo 'x = 2' > app.py")
+    stat = (repo / "app.py").stat()
+    os.utime(repo / "app.py", ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    assert apply_many(store, [job.id], dry_run=True)["unstaged"] == []
+    result = apply_many(store, [job.id])
+    assert result["unstaged"] == []
+    assert _git("status", "--porcelain", cwd=repo) == "M  app.py"
+
+
+def test_a_locked_index_is_reported_not_taken_for_unstaged_edits(store, repo):
+    job = _done(store, repo, "echo new > new.txt")
+    (repo / ".git" / "index.lock").write_text("")
+    with pytest.raises(JobError, match="index.lock"):
+        apply(store, job.id)
+    (repo / ".git" / "index.lock").unlink()
+    assert not (repo / "new.txt").exists()
+    assert not store.load(job.id).applied
+
+
+def test_a_moved_repository_is_a_readable_refusal(store, repo):
+    a = _done(store, repo, "echo a > a.txt")
+    repo.rename(repo.with_name("moved"))
+    with pytest.raises(JobError, match="no longer exists"):
+        apply(store, a.id)
+    with pytest.raises(JobError, match="no longer exists"):
+        apply_many(store, [a.id])

@@ -500,7 +500,8 @@ def build_server(
         can land without its bad files; a later call without paths applies
         the rest. If the changes touch files with unstaged edits, they're
         applied to the working tree and left unstaged. Refuses, changing
-        nothing, if they don't apply cleanly to the repository as it is now.
+        nothing, if they don't apply cleanly to the repository as it is now
+        (or git cannot write it: a locked index, say, with git's reason).
         Call discard afterwards."""
         with _anticipated():
             files = jobs.apply(store, job_id, paths)
@@ -618,7 +619,9 @@ def build_server(
         without committing: all of them or, if any would not apply, none.
         Every patch is first checked on top of the ones before it, so jobs
         that conflict with each other are found before anything changes;
-        "error" names the job that did not apply and why. "overlaps" lists
+        "error" names the job that did not apply and why. With "applied"
+        empty nothing changed; if the repository changed while the jobs
+        landed, the ones in "applied" are already staged. "overlaps" lists
         each file more than one job touched; "unstaged" the jobs left unstaged
         because they touch files with unstaged edits. dry_run only reports.
         Whole jobs only: for a job partly applied, use apply. Use it after a
