@@ -32,17 +32,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Local & Ephemeral Data
-logs/
-tasks/
+# Local
 .DS_Store
 .env
 *.local.*
-
-# External projects / test clones
-/medicoder/
-migration/**/original/
-
-
-implementation_plan.md 
-initial-plan.md

@@ -1,43 +1,17 @@
+# Settings Polyphony applies when a task targets this repository.
 name: medicoder
 path: /Users/ali/root/Work/Medicoder/medicoder/medicoder
-description: ICD-10 medical coding system using Gemini for taxonomy ranking
-executors:
-  lead: claude
-  primary: agy
-  secondary: cursor
+
+# Gitignored paths a fresh copy lacks. Verified: without all three,
+# the test suite cannot run (docs/evidence/provisioning-spike.md).
+provision:
+  - { path: env/, mode: clone }
+  - { path: datasets/smoke/, mode: clone }
+  - { path: datasets/tuning/, mode: clone }
+
+pool: [agy, cursor, claude]
+
 models:
-  lead:
-    claude:
-      model: "claude-3-7-sonnet-20250219"
-      thinking_level: "high"
-  executors:
-    agy:
-      model: "gemini-3.1-pro-high"
-      thinking_level: "high"
-safety:
-  protected_paths:
-  - database/
-  - '**/database/**'
-  - configs/smoke.yml
-  blocked_commands:
-  - git push
-  - git merge
-  - git add -A
-  - git add .
-  - git add --all
-  - git add -u
-  - git commit -a
-  - git commit -am
-  require_tests_before_stop: true
-  require_approval_for:
-  - full pipeline runs (--config configs/full.yml)
-  - tune_level.py --force-full
-  - external paid API calls
-testing:
-  command: env/bin/python -m unittest discover -s tests -t .
-  interpreter: env/bin/python
-git:
-  automatic_commit: false
-  automatic_push: false
-  block_bulk_add: true
-  block_ai_attribution: true
+  agy: gemini-3.8-flash-high
+  cursor: grok-4.7-high
+  claude: claude-sonnet-5
