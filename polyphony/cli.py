@@ -18,6 +18,7 @@ from polyphony.jobs import (
     discard as discard_job,
     disk_usage,
     gc as gc_jobs,
+    read_report,
 )
 
 
@@ -100,6 +101,18 @@ def discard(store, job_id):
     except (JobNotFound, JobError) as e:
         raise click.ClickException(str(e))
     click.echo(f"Discarded job {job_id}.")
+
+
+@cli.command()
+@click.argument("job_id")
+@click.pass_obj
+def report(store, job_id):
+    """Print the report a finished report-mode job wrote."""
+    try:
+        text = read_report(store, job_id)
+    except (JobNotFound, JobError) as e:
+        raise click.ClickException(str(e))
+    click.echo(text, nl=not text.endswith("\n"))
 
 
 _UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}

@@ -60,6 +60,13 @@ and the job is applied or discarded.
 In review mode the product is `output_tail` (the full text is at `output_path`).
 `files_changed` is empty. `discard` when you have what you need.
 
+For an audit whose findings you want as a document, use `mode="report"` rather
+than `review`, and don't ask for a file in the brief: Polyphony tells the agent to
+write `REPORT.md`. On `succeeded`, read it with `report(job_id)`, paging with
+`offset` while `more` is true. A non-empty `stray_changes` means the agent edited
+other files too; the report can still stand, but `apply` is refused, so save the
+report where the user wants it yourself, then `discard`.
+
 ## 5. When it fails
 
 Read `error` and `output_tail`.

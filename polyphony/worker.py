@@ -12,7 +12,10 @@ import traceback
 from pathlib import Path
 
 from polyphony.executors import EXECUTORS, BaseExecutor, Mode
-from polyphony.jobs import JobStore, claim, prompt, run_check, snapshot
+from polyphony.jobs import (
+    REPORT, REPORT_FILE, JobStore, claim, collect_report, executor_mode, prompt, run_check,
+    snapshot,
+)
 
 
 def run(
@@ -37,7 +40,7 @@ def run(
     output = store.output_path(job.id)
     try:
         result = executors[job.executor]().execute(
-            prompt(job), job.workdir, Mode(job.mode), job.model, job.timeout_seconds,
+            prompt(job), job.workdir, executor_mode(job.mode), job.model, job.timeout_seconds,
             output_path=output, on_start=started,
         )
         # Its group is gone; a recorded id could be reused by the OS and hit by cancel.
@@ -52,6 +55,14 @@ def run(
         if result.success and job.mode == Mode.CODE and job.check_command:
             run_check(store, job)
         job.state = "succeeded" if result.success else "failed"
+        if job.mode == REPORT:
+            collect_report(store, job)
+            if result.success and job.report_path is None:
+                job.state = "failed"
+                job.error = (
+                    f"The executor finished but wrote no {REPORT_FILE} at the repository "
+                    f"root, so there is no report. Its output is in {output}."
+                )
     except Exception as e:
         # A Polyphony bug, not an executor failure. Record it so status shows
         # it, then re-raise so the traceback reaches worker.log.

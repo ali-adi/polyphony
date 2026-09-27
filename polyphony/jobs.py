@@ -23,12 +23,25 @@ from pathlib import Path
 
 from polyphony import ledger
 from polyphony.config import DEFAULT_HOME, ProjectConfig
+from polyphony.executors.base import Mode
 from polyphony.guard import run_git
 from polyphony.workspace import Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
 # A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
+
+# A report job is a read-only audit whose findings are a file rather than
+# stdout, which a caller tends to lose. Writing that file needs edit
+# permission, so the executor runs in its code mode; what keeps it to the
+# report is the instruction, and stray_changes shows whether it listened.
+REPORT = "report"
+REPORT_FILE = "REPORT.md"
+REPORT_INSTRUCTION = (
+    f"Write your complete findings as Markdown to {REPORT_FILE} at the repository "
+    "root. That file is the product of this task, so put everything in it, not only "
+    "in your reply. Change no other file."
+)
 
 
 class JobNotFound(Exception):
@@ -88,6 +101,10 @@ class Job:
     git_dir: str | None = None
     # When the job last became queued, so a worker that never claims it is noticed.
     queued_at: float | None = None
+    # Report mode: where the report was saved (jobs/<id>/report.md), and the files
+    # the executor changed besides REPORT.md, which it was told not to touch.
+    report_path: str | None = None
+    stray_changes: list[str] = field(default_factory=list)
 
     @property
     def applied(self) -> bool:
@@ -109,6 +126,9 @@ class JobStore:
 
     def check_path(self, job_id: str) -> Path:
         return self.path(job_id) / "check.txt"
+
+    def report_path(self, job_id: str) -> Path:
+        return self.path(job_id) / "report.md"
 
     def save(self, job: Job) -> None:
         """Write atomically, so a reader never sees a half-written file."""
@@ -271,6 +291,12 @@ def create_job(
     return job
 
 
+def executor_mode(mode: str) -> Mode:
+    """The mode the executor runs in for a job of `mode`: a report job needs
+    edit permission to write its report, so it is a code-mode run."""
+    return Mode.CODE if mode == REPORT else Mode(mode)
+
+
 def launch(store: JobStore, job: Job) -> None:
     """Start the job's worker, detached from the caller.
 
@@ -303,11 +329,14 @@ def prompt(job: Job) -> str:
     whole task: the original instruction, where it stands, and every piece of
     feedback so far rather than only the latest.
     """
+    task = job.instruction
+    if job.mode == REPORT:
+        task = f"{task}\n\n{REPORT_INSTRUCTION}"
     if not job.feedback:
-        return job.instruction
+        return task
     notes = "\n\n".join(f"{i}. {text}" for i, text in enumerate(job.feedback, 1))
     return (
-        f"{job.instruction}\n\n---\n"
+        f"{task}\n\n---\n"
         f"This is attempt {job.attempt} at the task above, in the same working copy. "
         "The previous attempt's changes are already in the files: build on them, "
         "fix what the feedback points out, and do not start over.\n\n"
@@ -337,10 +366,12 @@ def revise(
     if not feedback.strip():
         raise ValueError("feedback must say what to change.")
 
-    # Keep each attempt's output and check result; the next run writes fresh ones.
-    for current in (store.output_path(job.id), store.check_path(job.id)):
+    # Keep each attempt's output, check result and report; the next run writes fresh ones.
+    for current in (store.output_path(job.id), store.check_path(job.id),
+                    store.report_path(job.id)):
         if current.exists():
-            os.replace(current, current.with_name(f"{current.stem}-{job.attempt}.txt"))
+            os.replace(current, current.with_name(
+                f"{current.stem}-{job.attempt}{current.suffix}"))
     job.feedback.append(feedback.strip())
     job.attempt += 1
     if timeout_seconds is not None:
@@ -351,6 +382,8 @@ def revise(
     job.pid = job.pgid = job.executor_pgid = job.check_pgid = None
     job.started_at = job.finished_at = job.exit_code = job.error = None
     job.check_exit_code = job.check_passed = None
+    job.report_path = None
+    job.stray_changes = []
     # A cancelled attempt is not the job's outcome. The ledger keeps the last
     # entry per job, so the outcome of this attempt replaces it.
     job.outcome = None
@@ -409,6 +442,25 @@ def snapshot(job: Job) -> None:
     names = _jgit(job, ["diff", "--name-only", "-z", f"{job.base_commit}..HEAD"]).stdout
     job.files_changed = [name for name in names.split("\0") if name]
     job.diff_stat = _jgit(job, ["diff", "--stat", f"{job.base_commit}..HEAD"]).stdout.rstrip()
+
+
+def collect_report(store: JobStore, job: Job) -> None:
+    """Save a report job's REPORT.md as jobs/<id>/report.md, after snapshot().
+
+    Only a regular file counts: a symlink could point anywhere on the
+    machine, and report() would hand its contents back. A REPORT.md the
+    repository already tracks counts only if the job changed it, so an old
+    report is never taken for this job's.
+    """
+    job.stray_changes = [f for f in job.files_changed if f != REPORT_FILE]
+    source = Path(job.workdir) / REPORT_FILE
+    if not source.is_file() or source.is_symlink():
+        return
+    tracked = _jgit(job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"], check=False)
+    if tracked.returncode == 0 and REPORT_FILE not in job.files_changed:
+        return
+    shutil.copyfile(source, store.report_path(job.id))
+    job.report_path = str(store.report_path(job.id))
 
 
 def run_check(store: JobStore, job: Job) -> None:
@@ -551,6 +603,39 @@ def _check(res: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
 
 
 DIFF_LIMIT = 60_000
+REPORT_LIMIT = 20_000
+
+
+def read_report(store: JobStore, job_id: str) -> str:
+    """A finished report job's whole report."""
+    job = store.refresh(store.load(job_id))
+    if job.mode != REPORT:
+        raise JobError(f"Job {job.id} is a {job.mode} job; only a report job has a report.")
+    if job.state in ACTIVE:
+        raise JobError(f"Job {job.id} is still {job.state}; its report is not written yet.")
+    if not job.report_path or not Path(job.report_path).is_file():
+        raise JobError(
+            f"Job {job.id} has no report: it wrote no {REPORT_FILE}. "
+            f"Its output is in {store.output_path(job.id)}."
+        )
+    return Path(job.report_path).read_text(errors="replace")
+
+
+def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LIMIT) -> dict:
+    """One page of a report job's report, so a long one can be read in parts
+    rather than cut short."""
+    if offset < 0:
+        raise ValueError("offset must not be negative.")
+    if limit <= 0:
+        raise ValueError("limit must be positive.")
+    text = read_report(store, job_id)
+    return {
+        "job_id": job_id,
+        "total_chars": len(text),
+        "offset": offset,
+        "text": text[offset:offset + limit],
+        "more": offset + limit < len(text),
+    }
 
 
 def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
@@ -580,6 +665,11 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     yet applied goes. Returns the entries of files_changed applied this time.
     """
     job = store.load(job_id)
+    if job.mode == REPORT:
+        raise JobError(
+            f"Job {job.id} is a report job: its product is its report, not changes to "
+            "apply. Read it with report()."
+        )
     if job.state != "succeeded":
         raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
     if not job.files_changed:

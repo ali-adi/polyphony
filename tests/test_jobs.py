@@ -1124,3 +1124,142 @@ def test_refresh_under_the_store_lock_does_not_deadlock(store, repo):
     worker.start()
     worker.join(timeout=10)
     assert done == [0]
+
+
+# --- Report mode: a read-only audit whose findings are a file. ---
+
+
+class ReportExecutor(PromptExecutor):
+    """PromptExecutor that also records the mode it was run in."""
+
+    def build_argv(self, instruction, mode, cwd, model=None):
+        argv = super().build_argv(instruction, mode, cwd, model)
+        argv[2] += f"; echo {mode.value} > ../mode.txt"
+        return argv
+
+
+REPORTING = {"shell": ReportExecutor}
+
+
+def test_report_job_runs_in_code_mode_and_saves_its_report(store, repo):
+    from polyphony.jobs import REPORT_INSTRUCTION, read_report
+    job = _job(store, repo, "printf '# Findings\\n\\nnone\\n' > REPORT.md", mode="report")
+    assert job.check_command is None
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "succeeded", job.error
+    assert (store.path(job.id) / "mode.txt").read_text().strip() == "code"
+    assert REPORT_INSTRUCTION in (store.path(job.id) / "prompt.txt").read_text()
+    assert job.report_path == str(store.report_path(job.id))
+    assert read_report(store, job.id) == "# Findings\n\nnone\n"
+    assert job.files_changed == ["REPORT.md"]
+    assert job.stray_changes == []
+
+
+def test_report_job_records_changes_besides_the_report(store, repo):
+    job = _job(store, repo, "echo r > REPORT.md; echo y > app.py", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "succeeded"
+    assert job.stray_changes == ["app.py"]
+
+
+def test_report_job_that_writes_no_report_fails(store, repo):
+    from polyphony.jobs import JobError, read_report
+    job = _job(store, repo, "echo all good", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed"
+    assert "REPORT.md" in job.error and "output" in job.error
+    assert job.report_path is None
+    assert "all good" in store.output_path(job.id).read_text()
+    with pytest.raises(JobError, match="no report"):
+        read_report(store, job.id)
+
+
+def test_a_failed_report_job_keeps_its_own_error_and_any_report(store, repo):
+    job = _job(store, repo, "echo partial > REPORT.md; exit 3", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.exit_code == 3
+    assert "REPORT.md" not in (job.error or "")
+    assert store.report_path(job.id).read_text() == "partial\n"
+
+
+def test_an_unchanged_tracked_report_is_not_this_jobs(store, repo):
+    (repo / "REPORT.md").write_text("old findings\n")
+    _git("add", "REPORT.md", cwd=repo)
+    _git("commit", "-q", "-m", "old report", cwd=repo)
+    job = _job(store, repo, "echo nothing new", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.report_path is None
+
+    job = _job(store, repo, "echo new findings > REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "succeeded", job.error
+    assert store.report_path(job.id).read_text() == "new findings\n"
+
+
+def test_a_symlinked_report_is_not_read(store, repo, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private\n")
+    job = _job(store, repo, f"ln -s {secret} REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = store.load(job.id)
+    assert job.state == "failed" and job.report_path is None
+    assert not store.report_path(job.id).exists()
+
+
+def test_revising_a_report_job_archives_the_report_and_restates_the_rule(store, repo):
+    from polyphony.jobs import REPORT_INSTRUCTION, read_report
+    script = "if [ -f REPORT.md ]; then echo second > REPORT.md; else echo first > REPORT.md; fi"
+    job = _job(store, repo, script, mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    job = revise(store, job.id, "go deeper")
+    assert job.report_path is None and job.stray_changes == []
+    assert (store.path(job.id) / "report-1.md").read_text() == "first\n"
+    assert not store.report_path(job.id).exists()
+
+    run(store.path(job.id), executors=REPORTING)
+    assert read_report(store, job.id) == "second\n"
+    prompt = (store.path(job.id) / "prompt.txt").read_text()
+    assert REPORT_INSTRUCTION in prompt and "go deeper" in prompt
+    assert prompt.index(REPORT_INSTRUCTION) < prompt.index("go deeper")
+
+
+def test_report_pages_through_the_text(store, repo):
+    from polyphony.jobs import report
+    job = _job(store, repo, "printf 'abcdefghij' > REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    assert report(store, job.id, limit=4) == {
+        "job_id": job.id, "total_chars": 10, "offset": 0, "text": "abcd", "more": True,
+    }
+    last = report(store, job.id, offset=8, limit=4)
+    assert last["text"] == "ij" and last["more"] is False
+    assert report(store, job.id, offset=20)["text"] == ""
+    with pytest.raises(ValueError, match="offset"):
+        report(store, job.id, offset=-1)
+    with pytest.raises(ValueError, match="limit"):
+        report(store, job.id, limit=0)
+
+
+def test_report_refuses_an_active_or_non_report_job(store, repo):
+    from polyphony.jobs import JobError, report
+    active = _job(store, repo, "true", mode="report")
+    with pytest.raises(JobError, match="still queued"):
+        report(store, active.id)
+    code = _job(store, repo, "true")
+    run(store.path(code.id), executors=FAKE)
+    with pytest.raises(JobError, match="only a report job"):
+        report(store, code.id)
+
+
+def test_apply_refuses_a_report_job(store, repo):
+    from polyphony.jobs import JobError, apply
+    job = _job(store, repo, "echo r > REPORT.md", mode="report")
+    run(store.path(job.id), executors=REPORTING)
+    with pytest.raises(JobError, match="report"):
+        apply(store, job.id)
+    assert _git("status", "--porcelain", cwd=repo) == ""
