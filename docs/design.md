@@ -224,6 +224,19 @@ lists what an adapter supports, and the server refuses or skips one that lacks
 the requested mode. opencode's edit-capable agent allows everything without
 asking and has no sandbox, so it gets no `code` mode.
 
+**Secrets are withheld by name, and the check's environment is scrubbed.**
+The overlay copies untracked and gitignored files so the copy matches the
+working tree, which would also hand every agent the repository's `.env`. So
+files whose basename looks like a secret (`SECRET_PATTERNS` in `workspace.py`)
+are left out, including one staged but never committed, and listed in the
+job's `withheld`; `allow_secrets` lets named ones through. Matching is by name,
+not content: a key in `settings.toml` still goes, and a committed `.env` is in
+the clone regardless. Explicit `provision` entries are the user's choice and are
+not filtered. The check runs executor-written code, so it loses
+`*_API_KEY`-style variables by default. The executor does not, because agent
+CLIs authenticate with them; `env_scrub` names variables removed from both, and
+is recorded on the job so the detached worker applies it.
+
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work
 (`evidence/provisioning-spike.md`).

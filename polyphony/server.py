@@ -35,6 +35,10 @@ MAX_WAIT_SECONDS = 240  # below MCP clients' tool-call timeouts
 OUTPUT_TAIL_CHARS = 8000
 CHECK_TAIL_CHARS = 4000
 MODES = [m.value for m in Mode]
+WITHHELD_NOTE = (
+    "These secret-looking files were kept out of the job's copy. If the task needs "
+    "one, list it under allow_secrets in the project config and delegate again."
+)
 
 INSTRUCTIONS = (
     "Polyphony runs a coding task with a separate agent CLI (agy, cursor, or "
@@ -157,6 +161,8 @@ def _summary(store: JobStore, job: Job) -> dict:
         "workdir": job.workdir,
         "elapsed_seconds": round(end - (job.started_at or job.created_at), 1),
     }
+    if job.withheld:  # known from the start, so shown even while queued
+        info.update(withheld=job.withheld, withheld_note=WITHHELD_NOTE)
     if job.state == "queued":
         return info
     # A running job's output is whatever the executor has written so far.

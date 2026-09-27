@@ -752,3 +752,19 @@ def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
     for _ in range(7):
         call(srv, "delegate", instruction="x", repo=str(repo), executor="cursor")
     assert len(store.all()) == 7
+
+
+def test_status_lists_withheld_secrets(server, repo, fake_agy):
+    fake_agy("true")
+    (repo / ".env").write_text("API_KEY=real\n")
+    started = call(server, "delegate", instruction="x", repo=str(repo))
+    assert started["withheld"] == [".env"]
+    assert "allow_secrets" in started["withheld_note"]
+    status = finished(server, started["job_id"])
+    assert status["withheld"] == [".env"]
+
+
+def test_status_has_no_withheld_key_when_nothing_was(server, repo, fake_agy):
+    fake_agy("true")
+    status = finished(server, call(server, "delegate", instruction="x", repo=str(repo))["job_id"])
+    assert "withheld" not in status

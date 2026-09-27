@@ -56,6 +56,11 @@ class ProjectConfig:
     max_parallel: dict[str, int] = field(default_factory=dict)
     # The file this came from; None for the no-config default.
     source: Path | None = None
+    # Globs for secret-looking files the job's copy gets anyway (see
+    # workspace.SECRET_PATTERNS), and for environment variables kept from both
+    # the executor and the check.
+    allow_secrets: list[str] = field(default_factory=list)
+    env_scrub: list[str] = field(default_factory=list)
 
 
 def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
@@ -104,6 +109,13 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
     check_timeout = data.get("check_timeout_minutes", 10)
     if isinstance(check_timeout, bool) or not isinstance(check_timeout, int) or check_timeout <= 0:
         raise ConfigError(f"{file}: 'check_timeout_minutes' must be a positive whole number.")
+    globs = {}
+    for key in ("allow_secrets", "env_scrub"):
+        value = data.get(key) or []
+        # A bare string would otherwise be iterated one character at a time.
+        if not isinstance(value, list) or not all(isinstance(g, str) and g.strip() for g in value):
+            raise ConfigError(f"{file}: '{key}' must be a list of glob patterns.")
+        globs[key] = [g.strip() for g in value]
 
     return ProjectConfig(
         name=str(data["name"]),
@@ -115,6 +127,7 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
         check_timeout_minutes=check_timeout,
         max_parallel=max_parallel,
         source=Path(file),
+        **globs,
     )
 
 

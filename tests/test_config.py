@@ -300,3 +300,24 @@ def test_repo_file_rejects_malformed_check_and_limits(tmp_path, bad):
     (repo / REPO_FILE).write_text(yaml.safe_dump(bad))
     with pytest.raises(ConfigError, match=str(repo / REPO_FILE)):
         find_project(repo, home=tmp_path / "home")
+
+
+def test_allow_secrets_and_env_scrub_load_and_default_to_empty(tmp_path):
+    f = _write(tmp_path / "projects", "demo", {
+        "name": "demo", "path": str(tmp_path),
+        "allow_secrets": [".env.test"], "env_scrub": ["AWS_*"],
+    })
+    cfg = load_project(f)
+    assert cfg.allow_secrets == [".env.test"]
+    assert cfg.env_scrub == ["AWS_*"]
+    bare = load_project(_write(tmp_path / "p2", "demo", {"name": "demo", "path": str(tmp_path)}))
+    assert bare.allow_secrets == [] and bare.env_scrub == []
+
+
+@pytest.mark.parametrize("bad", [{"allow_secrets": ".env"}, {"allow_secrets": [1]},
+                                 {"env_scrub": "AWS_*"}, {"env_scrub": [""]},
+                                 {"env_scrub": {"AWS_*": True}}])
+def test_malformed_secret_settings_name_the_file(tmp_path, bad):
+    f = _write(tmp_path / "projects", "demo", {"name": "demo", "path": str(tmp_path), **bad})
+    with pytest.raises(ConfigError, match=str(f)):
+        load_project(f)

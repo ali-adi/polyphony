@@ -58,6 +58,16 @@ def test_jobs_lists_and_shows_a_job(run, tmp_path, repo):
     assert shown.exit_code == 0
     assert "tidy the imports" in shown.output
     assert job.workdir in shown.output
+    assert "withheld" not in shown.output
+
+
+def test_showing_a_job_lists_withheld_secrets(run, tmp_path, repo):
+    (repo / ".env").write_text("API_KEY=real\n")
+    store = JobStore(tmp_path / "home")
+    job = create_job(store, project=ProjectConfig(name="demo", path=repo),
+                     instruction="x", executor="agy", mode="code")
+    shown = run("jobs", job.id)
+    assert "withheld   .env (see allow_secrets)" in shown.output
 
 
 def test_discard_unknown_job_fails_readably(run):

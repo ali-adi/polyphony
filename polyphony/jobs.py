@@ -7,6 +7,7 @@ so a job started from one MCP client can be checked from another.
 from __future__ import annotations
 
 import fcntl
+import fnmatch
 import json
 import os
 import secrets
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -88,6 +90,11 @@ class Job:
     git_dir: str | None = None
     # When the job last became queued, so a worker that never claims it is noticed.
     queued_at: float | None = None
+    # Lane r2-secrets. Secret-looking files the copy was not given (see
+    # workspace.SECRET_PATTERNS), and the project's env_scrub globs, recorded so
+    # the detached worker can keep those variables from the executor and check.
+    withheld: list[str] = field(default_factory=list)
+    env_scrub: list[str] = field(default_factory=list)
 
     @property
     def applied(self) -> bool:
@@ -241,6 +248,7 @@ def create_job(
         project.path, workdir,
         exclude=tuple(str(e.get("path", "")) for e in project.provision),
         git_dir=store.path(job_id) / "git",
+        allow_secrets=tuple(project.allow_secrets),
     )
     try:
         ws.provision(project.provision)
@@ -266,6 +274,8 @@ def create_job(
         check_command=check if mode == "code" else None,
         check_timeout_seconds=check_timeout_seconds,
         queued_at=time.time(),
+        withheld=ws.withheld,
+        env_scrub=list(project.env_scrub),
     )
     store.save(job)
     return job
@@ -418,7 +428,8 @@ def run_check(store: JobStore, job: Job) -> None:
     Makefile), so it runs in an OS sandbox: it can write only in its copy
     (not the copy's .git) and in a private temp dir, and it has no network
     beyond loopback. Without a sandbox it does not run at all. See
-    _sandbox_argv.
+    _sandbox_argv. Its environment is the server's minus credential-looking
+    variables (CHECK_SCRUB) and the project's env_scrub.
 
     It runs after snapshot(), and the copy is reset to that snapshot
     afterwards, so whatever it writes (caches, coverage files, lockfile
@@ -441,7 +452,8 @@ def run_check(store: JobStore, job: Job) -> None:
                 "macOS, bwrap on Linux).\n"
             )
             return
-        env = dict(os.environ, TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp),
+        env = dict(scrub_env(os.environ, (*CHECK_SCRUB, *job.env_scrub)),
+                   TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp),
                    XDG_CACHE_HOME=str(tmp / "cache"))
         snapshot_head = _jgit(job, ["rev-parse", "HEAD"]).stdout.strip()
         proc = subprocess.Popen(
@@ -472,6 +484,24 @@ def run_check(store: JobStore, job: Job) -> None:
             job.check_pgid = None
             store.save(job)
     _restore(job, snapshot_head)
+
+
+# Environment variables the check never gets, on top of the project's env_scrub.
+# The check runs code the executor may have written, and the sandbox has no
+# network, so it has no use for credentials; a test that needs one can be
+# given it by name in the check command. The executor keeps these (agent CLIs
+# authenticate with them) unless env_scrub names them.
+CHECK_SCRUB = ("*_API_KEY", "*_TOKEN", "*_SECRET", "*_PASSWORD", "*_CREDENTIALS")
+
+
+def scrub_env(env: Mapping[str, str], patterns: Iterable[str]) -> dict[str, str]:
+    """`env` without the variables whose names match any of `patterns`.
+
+    Case-sensitive, as names are: `*_TOKEN` leaves `my_token` alone.
+    """
+    patterns = tuple(patterns)
+    return {k: v for k, v in env.items()
+            if not any(fnmatch.fnmatchcase(k, p) for p in patterns)}
 
 
 def _restore(job: Job, head: str) -> None:
