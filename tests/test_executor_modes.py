@@ -243,3 +243,18 @@ def test_opencode_has_no_code_mode():
 def test_existing_adapters_support_both_modes():
     for name in ("agy", "cursor", "claude", "codex", "gemini"):
         assert set(EXECUTORS[name].modes) == {Mode.REVIEW, Mode.CODE}
+
+
+# Lane: workspace review fixes.
+
+def test_cursor_does_not_flag_a_marker_in_the_agents_own_summary():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    out = ("Added a clear error message when the API reports the account is "
+           "out of usage, and mapped ActionRequiredError to a retry.")
+    assert ex.detect_failure(out) is None
+
+
+def test_cursor_flags_the_trust_prompt_as_the_cli_prints_it():
+    ex = CursorExecutor(binary_path="/usr/local/bin/cursor-agent")
+    out = "\n⚠ Workspace Trust Required\n\n  Cursor Agent can execute code"
+    assert ex.detect_failure(out) is not None

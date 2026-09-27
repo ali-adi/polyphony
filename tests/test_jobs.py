@@ -1376,3 +1376,14 @@ def test_apply_refuses_a_report_job(store, repo):
     with pytest.raises(JobError, match="report"):
         apply(store, job.id)
     assert _git("status", "--porcelain", cwd=repo) == ""
+
+
+# Lane: workspace review fixes.
+
+def test_the_job_home_is_expanded_and_absolute(tmp_path, monkeypatch):
+    """POLYPHONY_HOME=~/.polyphony from an MCP config's env block arrives unexpanded."""
+    from polyphony.jobs import JobStore
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert JobStore(Path("~/.polyphony")).root == tmp_path / ".polyphony"
+    monkeypatch.chdir(tmp_path)
+    assert JobStore(Path("rel")).root == tmp_path / "rel"

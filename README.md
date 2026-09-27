@@ -166,8 +166,13 @@ env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the 
 A repository with no config works too, just with no provisioning and the default
 pool.
 
-The copy never takes `node_modules` from the working tree (nor `env`, `.venv`,
-or the other environments and caches), so a frontend check such as `npm test`
+A provision `path` is one path from the repository root (`./data/` and `data`
+are the same), so provisioning `models` leaves an untracked `src/models/` alone.
+
+The copy never takes `node_modules` from the working tree (nor caches such as
+`__pycache__`, nor environments: an `env`, `venv` or `.venv` directory at the
+repository root, or one anywhere holding `pyvenv.cfg` or `conda-meta/`; a
+`src/env/` of source is copied), so a frontend check such as `npm test`
 fails there unless the project provisions it:
 `provision: [{ path: node_modules, mode: clone }]` gives each job its own copy
 (copy-on-write on APFS, a full copy elsewhere). `mode: link` symlinks yours

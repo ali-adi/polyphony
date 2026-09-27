@@ -256,3 +256,82 @@ def test_a_tracked_secret_is_already_in_the_clone(repo, tmp_path):
     ws = Workspace.create(repo, tmp_path / "ws")
     assert (ws.path / ".env").exists()
     assert ws.withheld == []
+
+
+# Lane: workspace review fixes.
+
+def _untracked(repo, rel, text="x\n"):
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_a_provision_exclude_matches_only_that_repo_path(repo, tmp_path):
+    """Provisioning `models` must not drop an untracked src/models/*.py."""
+    _untracked(repo, "models/weights.bin")
+    _untracked(repo, "src/models/transformer.py")
+    ws = Workspace.create(repo, tmp_path / "ws", exclude=("models",))
+    assert (ws.path / "src" / "models" / "transformer.py").exists()
+    assert not (ws.path / "models").exists()
+
+
+def test_a_provision_exclude_is_normalized(repo, tmp_path):
+    _untracked(repo, "data/big.bin")
+    ws = Workspace.create(repo, tmp_path / "ws", exclude=("./data/",))
+    assert not (ws.path / "data").exists()
+
+
+def test_clone_fallback_replaces_what_a_failed_clonefile_left(repo, tmp_path, monkeypatch):
+    """macOS `cp -Rc` can create dst before clonefile fails; `cp -R` onto it
+    would then copy into dst/<name>."""
+    import os
+    import shutil
+    real_cp = shutil.which("cp")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "cp"
+    fake.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = "-Rc" ]; then mkdir -p "$3"; echo partial > "$3/leftover"; exit 1; fi\n'
+        f'exec {real_cp} "$@"\n'
+    )
+    fake.chmod(0o755)
+    ws = Workspace.create(repo, tmp_path / "ws")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    assert ws.provision([{"path": "env/", "mode": "clone"}]) == ["env/"]
+    assert (ws.path / "env" / "bin" / "marker").exists()
+    assert not (ws.path / "env" / "env").exists()
+    assert not (ws.path / "env" / "leftover").exists()
+
+
+def test_a_relative_destination_is_made_absolute(repo, tmp_path, monkeypatch):
+    """The clone runs from the source's parent and the rest from the cwd; a
+    relative path must mean the same place to both."""
+    monkeypatch.chdir(repo)
+    ws = Workspace.create(repo, "../jobs/x/repo", git_dir="../jobs/x/git")
+    assert ws.path == tmp_path / "jobs" / "x" / "repo"
+    assert (ws.path / "src" / "app.py").exists()
+    assert not (tmp_path.parent / "jobs").exists()
+
+
+def test_a_non_utf8_untracked_name_is_copied(repo, tmp_path):
+    import os
+    name = os.fsdecode(b"caf\xe9.txt")
+    (repo / name).write_text("latin-1 name\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert (ws.path / name).read_text(encoding="utf-8") == "latin-1 name\n"
+
+
+def test_environment_names_are_skipped_only_where_they_are_environments(repo, tmp_path):
+    _untracked(repo, "src/env/server.ts")
+    _untracked(repo, "web/venv/index.ts")
+    _untracked(repo, "tools/venv/pyvenv.cfg", "home = /usr\n")
+    _untracked(repo, "tools/venv/lib/site.py")
+    _untracked(repo, "pkg/node_modules/dep/index.js")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert (ws.path / "src" / "env" / "server.ts").exists()
+    assert (ws.path / "web" / "venv" / "index.ts").exists()
+    assert not (ws.path / "tools" / "venv").exists()
+    assert not (ws.path / "pkg" / "node_modules").exists()
+    assert not (ws.path / "env").exists(), "a top-level env/ is still an environment"
