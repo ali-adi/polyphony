@@ -45,6 +45,11 @@ and name `executor` with it.
    `failed`, `cancelled`, or `died`. `output_tail` shows progress while it runs;
    `cancel` a job that is plainly off track. Carry on with other work between
    calls if there is any.
+3. With more than one job out (several delegates, or `delegate_many`), don't
+   poll each with `status`: `wait(job_ids=[...], wait_seconds=240)` returns as
+   soon as any of them finishes (`until="all"` waits for every one). Handle the
+   `finished` ones, then call `wait` again with only the ids still `active`,
+   since a job already finished ends an `any` wait at once.
 
 ## 4. Review like a pull request
 
