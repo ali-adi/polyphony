@@ -85,7 +85,8 @@ class BaseExecutor(ABC):
         CLI can never block on a full pipe buffer.
 
         The CLI leads its own process group, so a timeout kills everything it
-        started, not just the CLI. on_start receives that group's id, which
+        started, not just the CLI. So does its exit: nothing it started in the
+        background outlives it. on_start receives that group's id, which
         cancel needs because the group is no longer the worker's.
 
         `env` replaces the inherited environment when given; the worker
@@ -122,11 +123,12 @@ class BaseExecutor(ABC):
                         proc.communicate(self.stdin(instruction), timeout=timeout_seconds)
                     except subprocess.TimeoutExpired:
                         timed_out = True
+                    finally:
+                        # On a timeout or an exception, leaving here would otherwise
+                        # wait on the CLI forever. After a normal exit, whatever it
+                        # left in the background (a dev server, a watcher) would keep
+                        # writing to the copy, and the worker then forgets the group.
                         _kill_group(proc.pid)
-                    except BaseException:
-                        # Leaving here would otherwise wait on the CLI forever.
-                        _kill_group(proc.pid)
-                        raise
             except (OSError, subprocess.SubprocessError) as e:
                 # Environment failures are executor failures. Anything else is a
                 # Polyphony bug and must propagate rather than look like one.
