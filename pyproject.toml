@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "polyphony"
 version = "0.3.0.dev0"
-description = "Local-first, CLI-driven multi-agent orchestrator powered by Claude Code, AGY, and Cursor"
+description = "An MCP server that hands isolated coding tasks to agent CLIs (agy, cursor-agent, claude)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ali Adi" }]
-keywords = ["multi-agent", "orchestration", "claude-code", "antigravity", "cursor", "llm-agents", "local-first"]
+keywords = ["mcp", "claude-code", "codex", "antigravity", "cursor", "agents"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -27,8 +27,9 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.0",
-    "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
+    "mcp>=2.2,<3",
+    "pyte>=0.8",
 ]
 
 [project.urls]
@@ -39,20 +40,20 @@ Repository = "https://github.com/ali-adi/polyphony"
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.6.0",
+    "vulture>=2.11",
 ]
 
 [project.scripts]
-polyphony = "orchestrator.cli:cli"
-ai-orch = "orchestrator.cli:cli"
+polyphony = "polyphony.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["orchestrator*", "executors*", "migrate*"]
+include = ["polyphony*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-norecursedirs = ["medicoder", "migration", ".venv", "env"]
+norecursedirs = [".venv", "env"]
 markers = [
     "smoke: spawns real CLI binaries and consumes subscription quota (deselected by default; run with -m smoke)",
 ]
@@ -60,10 +61,11 @@ addopts = "-m 'not smoke'"
 
 [tool.ruff]
 target-version = "py311"
-exclude = [".venv", "env", "medicoder", "migration"]
+exclude = [".venv", "env"]
 
 [tool.ruff.lint]
-# Bug-class rules only for now. F401 (unused imports, 149 findings) and F841
-# (unused locals, 16 findings) are deliberately deferred: most live in the
-# orphan modules a later plan deletes, so fixing them now is wasted work.
-select = ["F821", "F811"]
+select = ["F"]
+
+[tool.vulture]
+paths = ["polyphony", "tests"]
+min_confidence = 80

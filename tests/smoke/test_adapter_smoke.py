@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import pytest
 
-from executors.agy_executor import AgyExecutor
-from executors.base import Mode
-from executors.claude_executor import ClaudeExecutor
-from executors.cursor_executor import CursorExecutor
+from polyphony.executors.agy import AgyExecutor
+from polyphony.executors.base import Mode
+from polyphony.executors.claude import ClaudeExecutor
+from polyphony.executors.cursor import CursorExecutor
 
 SENTINEL = "POLYPHONY_OK"
 PROMPT = f"Reply with exactly this one word and nothing else: {SENTINEL}"

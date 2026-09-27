@@ -1,0 +1,226 @@
+"""One job's workspace: a private clone of the repository.
+
+A clone rather than a git worktree, so the user's repository has nothing
+written to it until they apply a job: no branch, no worktree record, no
+objects. The clone's remote is removed, so an agent working inside it has
+no route to the user's GitHub remote.
+
+The clone starts at HEAD, then takes the working tree as it is now:
+uncommitted edits, new files, and gitignored files. The edits and new files
+are committed in the copy as a snapshot, so the job's diff is only what the
+agent changed, not the user's own work in progress.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from polyphony.guard import run_git
+
+# Never copied from the working tree: environments, caches, and OS litter.
+OVERLAY_SKIP = frozenset({
+    ".git", "env", "venv", ".venv", "__pycache__", "node_modules",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".DS_Store",
+})
+OVERLAY_MAX_BYTES = 50 * 1024 * 1024
+IGNORE_FILE = ".polyphonyignore"
+SNAPSHOT_MESSAGE = "polyphony: working-tree snapshot"
+
+
+class WorkspaceError(Exception):
+    """The workspace could not be created."""
+
+
+class ProvisionError(WorkspaceError):
+    """Raised when a workspace cannot be fully provisioned.
+
+    Always fatal. A partially provisioned workspace produces test failures
+    unrelated to the agent's work, which the calling agent would then chase
+    as real regressions.
+    """
+
+
+@dataclass
+class Workspace:
+    source: Path
+    path: Path
+    skipped: list[str] = field(default_factory=list)
+
+    @classmethod
+    def create(
+        cls, source: str | Path, path: str | Path, exclude: tuple[str, ...] = ()
+    ) -> "Workspace":
+        """Clone `source` at its current HEAD into `path`, then overlay its working tree.
+
+        `exclude` holds repo-relative paths the overlay leaves alone, such as
+        the ones `provision` will materialize itself.
+
+        `--no-hardlinks` copies git's object files rather than sharing them.
+        Shared (hard-linked) objects would let the copy write into the user's
+        repository: git refreshes the timestamps of objects a commit reuses,
+        and an agent writing into an object file would corrupt both.
+        """
+        source_path = Path(source).resolve()
+        dest = Path(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        res = run_git(
+            ["clone", "--no-hardlinks", "--quiet", str(source_path), str(dest)],
+            cwd=str(source_path.parent),
+            timeout=300,
+        )
+        if res.returncode != 0:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise WorkspaceError(f"Could not copy {source_path}: {res.stderr.strip()}")
+        ws = cls(source=source_path, path=dest)
+        if run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=str(dest)).returncode != 0:
+            ws.remove()
+            raise WorkspaceError(f"{source_path} has no commits to work from.")
+        run_git(["remote", "remove", "origin"], cwd=str(dest))
+        try:
+            ws._overlay(exclude)
+        except (WorkspaceError, OSError) as exc:
+            ws.remove()
+            raise WorkspaceError(str(exc)) from exc
+        return ws
+
+    def _overlay(self, exclude: tuple[str, ...]) -> None:
+        """Bring the source's uncommitted state into the copy and snapshot it."""
+        src = str(self.source)
+        patterns = [p.strip().rstrip("/") for p in exclude if p.strip()]
+        ignore_file = self.source / IGNORE_FILE
+        if ignore_file.is_file():
+            patterns += [
+                line.strip().rstrip("/")
+                for line in ignore_file.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+
+        # Edits to tracked files, staged or not, including deletions and binaries.
+        patch = subprocess.run(
+            ["git", "diff", "--binary", "HEAD"], cwd=src, capture_output=True, timeout=120,
+        )
+        if patch.returncode != 0:
+            raise WorkspaceError(f"Could not read uncommitted edits: {patch.stderr.decode().strip()}")
+        if patch.stdout:
+            res = subprocess.run(
+                ["git", "apply", "--binary", "--whitespace=nowarn", "-"],
+                cwd=self.path, input=patch.stdout, capture_output=True,
+            )
+            if res.returncode != 0:
+                raise WorkspaceError(f"Could not copy uncommitted edits: {res.stderr.decode().strip()}")
+
+        # New files, then gitignored ones (listed per directory, so walk those).
+        for flags in (["--others", "--exclude-standard"],
+                      ["--others", "--ignored", "--exclude-standard", "--directory"]):
+            listed = run_git(["ls-files", "-z", *flags], cwd=src, timeout=120)
+            for rel in filter(None, listed.stdout.split("\0")):
+                self._copy_tree(rel.rstrip("/"), patterns)
+
+        run_git(["add", "-A"], cwd=str(self.path))
+        if run_git(["diff", "--cached", "--quiet"], cwd=str(self.path)).returncode != 0:
+            res = run_git(
+                ["-c", "user.name=polyphony", "-c", "user.email=polyphony@localhost",
+                 "commit", "--quiet", "--no-verify", "-m", SNAPSHOT_MESSAGE],
+                cwd=str(self.path),
+            )
+            if res.returncode != 0:
+                raise WorkspaceError(f"Could not snapshot the working tree: {res.stderr.strip()}")
+
+    def _copy_tree(self, rel: str, patterns: list[str]) -> None:
+        """Copy one listed path (a file, or a directory of ignored files) into the copy."""
+        def excluded(r: str) -> bool:
+            parts = Path(r).parts
+            return bool(set(parts) & OVERLAY_SKIP) or any(
+                r == p or r.startswith(p + "/") or fnmatch.fnmatch(r, p)
+                or any(fnmatch.fnmatch(part, p) for part in parts)
+                for p in patterns
+            )
+
+        root = self.source / rel
+        if root.is_dir() and not root.is_symlink():
+            files = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                base = Path(dirpath).relative_to(self.source)
+                dirnames[:] = [d for d in dirnames if not excluded(str(base / d))]
+                files += [str(base / f) for f in filenames]
+        else:
+            files = [rel]
+        for r in files:
+            if excluded(r):
+                continue
+            s, d = self.source / r, self.path / r
+            if not s.is_symlink() and s.is_file() and s.stat().st_size > OVERLAY_MAX_BYTES:
+                self.skipped.append(r)
+                continue
+            if d.exists() or d.is_symlink():
+                continue
+            d.parent.mkdir(parents=True, exist_ok=True)
+            if s.is_symlink():
+                d.symlink_to(os.readlink(s))
+            elif s.is_file():
+                shutil.copy2(s, d)
+
+    def remove(self) -> None:
+        shutil.rmtree(self.path, ignore_errors=True)
+
+    def provision(self, entries: list[dict]) -> list[str]:
+        """Materialize gitignored paths the project declares it needs.
+
+        `clone` uses APFS copy-on-write: near-instant, no disk cost until
+        written, and genuinely isolated. `link` symlinks instead — it is a
+        hole in the isolation boundary, since writes reach the real path,
+        and exists only for paths too large to clone.
+        """
+        provisioned: list[str] = []
+        for entry in entries:
+            rel = str(entry.get("path", "")).strip()
+            mode = str(entry.get("mode", "clone")).strip()
+
+            if not rel:
+                raise ProvisionError("Provision entry is missing a 'path'.")
+            if rel.startswith("/") or ".." in Path(rel).parts:
+                raise ProvisionError(
+                    f"Refusing to provision {rel!r}: paths must be relative to the repo root."
+                )
+
+            src = (self.source / rel).resolve()
+            dst = (self.path / rel).resolve()
+
+            if not src.exists():
+                raise ProvisionError(
+                    f"Cannot provision {rel!r}: {src} does not exist in {self.source}."
+                )
+
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
+                raise ProvisionError(f"Cannot provision {rel!r}: {dst} already exists.")
+
+            if mode == "link":
+                dst.symlink_to(src)
+            elif mode == "clone":
+                res = subprocess.run(
+                    ["cp", "-Rc", str(src), str(dst)],
+                    capture_output=True, text=True,
+                )
+                if res.returncode != 0:
+                    # -c (clonefile) needs APFS; fall back to a plain recursive copy.
+                    res = subprocess.run(
+                        ["cp", "-R", str(src), str(dst)],
+                        capture_output=True, text=True,
+                    )
+                    if res.returncode != 0:
+                        raise ProvisionError(
+                            f"Cannot provision {rel!r}: {res.stderr.strip()}"
+                        )
+            else:
+                raise ProvisionError(
+                    f"Unknown provision mode {mode!r} for {rel!r}; expected 'clone' or 'link'."
+                )
+
+            provisioned.append(rel)
+        return provisioned

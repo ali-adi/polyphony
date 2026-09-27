@@ -4,9 +4,10 @@ import subprocess
 
 import pytest
 
-from executors.agy_executor import AgyExecutor
-from executors.claude_executor import ClaudeExecutor
-from executors.cursor_executor import CursorExecutor
+from polyphony.executors.agy import AgyExecutor
+from polyphony.executors.base import Mode
+from polyphony.executors.claude import ClaudeExecutor
+from polyphony.executors.cursor import CursorExecutor
 
 ADAPTERS = [
     (ClaudeExecutor, "claude"),
@@ -39,7 +40,7 @@ def test_programming_errors_propagate(cls, name, tmp_path, monkeypatch):
     ex = cls(binary_path="/bin/echo")
 
     with pytest.raises(NameError):
-        ex.execute(instruction="hi", cwd=str(tmp_path))
+        ex.execute(instruction="hi", cwd=str(tmp_path), mode=Mode.CODE)
 
 
 @pytest.mark.parametrize("cls,name", ADAPTERS, ids=[n for _, n in ADAPTERS])
@@ -51,6 +52,6 @@ def test_environment_errors_become_failed_results(cls, name, tmp_path, monkeypat
     monkeypatch.setattr(subprocess, "run", missing)
     ex = cls(binary_path="/bin/echo")
 
-    res = ex.execute(instruction="hi", cwd=str(tmp_path))
+    res = ex.execute(instruction="hi", cwd=str(tmp_path), mode=Mode.CODE)
     assert res.success is False
     assert res.error, "a failed result must explain itself"

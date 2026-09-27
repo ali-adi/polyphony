@@ -1,1 +1,0 @@
-"""Polyphony benchmark suite package."""

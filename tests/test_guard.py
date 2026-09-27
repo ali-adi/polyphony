@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from orchestrator.guard import ForbiddenGitCommand, run_git
+from polyphony.guard import ForbiddenGitCommand, run_git
 
 
 def test_plain_push_is_refused(tmp_path):
