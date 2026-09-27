@@ -1708,3 +1708,14 @@ def test_a_task_with_a_nul_byte_is_refused(store, repo):
     with pytest.raises(ValueError, match="NUL"):
         revise(store, job.id, "fix\0this")
     assert store.load(job.id).attempt == 1
+
+
+# Lane: workspace review fixes.
+
+def test_the_job_home_is_expanded_and_absolute(tmp_path, monkeypatch):
+    """POLYPHONY_HOME=~/.polyphony from an MCP config's env block arrives unexpanded."""
+    from polyphony.jobs import JobStore
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert JobStore(Path("~/.polyphony")).root == tmp_path / ".polyphony"
+    monkeypatch.chdir(tmp_path)
+    assert JobStore(Path("rel")).root == tmp_path / "rel"

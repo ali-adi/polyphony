@@ -154,7 +154,10 @@ class Job:
 
 class JobStore:
     def __init__(self, root: Path | None = None):
-        self.root = Path(root) if root is not None else DEFAULT_HOME
+        # Expanded and absolute: POLYPHONY_HOME=~/.polyphony from an MCP
+        # config's env block reaches here unexpanded, and a relative home
+        # would put clones under the server's cwd, often inside the user's repo.
+        self.root = (Path(root) if root is not None else DEFAULT_HOME).expanduser().resolve()
         self.dir = self.root / "jobs"
         self._held = threading.local()
 

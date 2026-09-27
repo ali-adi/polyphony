@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import posixpath
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -35,6 +36,12 @@ OVERLAY_SKIP = frozenset({
     ".git", "env", "venv", ".venv", "__pycache__", "node_modules",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".DS_Store",
 })
+# The names in OVERLAY_SKIP that are also ordinary source directory names
+# (a web app's src/env/server.ts). One of these is skipped only where it is
+# really an environment: a directory at the repo root, where virtualenvs live,
+# or one anywhere holding a virtualenv's pyvenv.cfg or a conda env's
+# conda-meta/. Elsewhere it is the user's source and is copied like any other.
+ENVIRONMENT_NAMES = frozenset({"env", "venv", ".venv"})
 OVERLAY_MAX_BYTES = 50 * 1024 * 1024
 IGNORE_FILE = ".polyphonyignore"
 
@@ -121,7 +128,12 @@ class Workspace:
         and an agent writing into an object file would corrupt both.
         """
         source_path = Path(source).resolve()
-        dest = Path(path)
+        # Absolute, because the clone below runs from the source's parent and
+        # everything after it from the caller's cwd: a relative `path` would
+        # put the clone in one place and look for it in another.
+        dest = Path(path).expanduser().resolve()
+        if git_dir is not None:
+            git_dir = Path(git_dir).expanduser().resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         separate = ["--separate-git-dir", str(git_dir)] if git_dir is not None else []
         res = run_git(
@@ -144,6 +156,10 @@ class Workspace:
         except (WorkspaceError, OSError) as exc:
             ws.remove()
             raise WorkspaceError(str(exc)) from exc
+        except BaseException:
+            # Anything unforeseen still must not leave a half-made clone behind.
+            ws.remove()
+            raise
         if ws.git_dir is not None:
             shutil.copyfile(ws.git_dir / "config", trusted_config(ws.git_dir))
         return ws
@@ -151,7 +167,12 @@ class Workspace:
     def _overlay(self, exclude: tuple[str, ...]) -> None:
         """Bring the source's uncommitted state into the copy and snapshot it."""
         src = str(self.source)
-        patterns = [p.strip().rstrip("/") for p in exclude if p.strip()]
+        # Provision paths name one repo-relative path each, so they match only
+        # that path and what is under it: provisioning `models` must not drop
+        # an untracked src/models/*.py. .polyphonyignore lines are globs,
+        # matched against the path and against each component at any depth.
+        anchored = [normalize_rel(p) for p in exclude if p.strip()]
+        patterns: list[str] = []
         ignore_file = self.source / IGNORE_FILE
         if ignore_file.is_file():
             patterns += [
@@ -165,9 +186,9 @@ class Workspace:
         # so are uncommitted edits to a committed one (real keys filled into a
         # tracked placeholder `.env`): both are excluded by name, and the copy
         # keeps what HEAD has. A deletion carries no secret, so it goes through.
-        edited = run_git(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", "HEAD"],
-                         cwd=src, timeout=120)
-        edited_secrets = [r for r in edited.stdout.split("\0") if r and self._secret(r)]
+        edited = _git_names(
+            ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", "HEAD"], src)
+        edited_secrets = [r for r in edited if self._secret(r)]
         self.withheld += edited_secrets
         patch = subprocess.run(
             ["git", "diff", "--binary", *DIFF_FLAGS, "HEAD", "--",
@@ -187,9 +208,8 @@ class Workspace:
         # New files, then gitignored ones (listed per directory, so walk those).
         for flags in (["--others", "--exclude-standard"],
                       ["--others", "--ignored", "--exclude-standard", "--directory"]):
-            listed = run_git(["ls-files", "-z", *flags], cwd=src, timeout=120)
-            for rel in filter(None, listed.stdout.split("\0")):
-                self._copy_tree(rel.rstrip("/"), patterns)
+            for rel in _git_names(["ls-files", "-z", *flags], src):
+                self._copy_tree(rel.rstrip("/"), patterns, anchored)
         self.withheld = sorted(set(self.withheld))  # the two listings can overlap
 
         run_git(["add", "-A"], cwd=str(self.path))
@@ -202,11 +222,23 @@ class Workspace:
             if res.returncode != 0:
                 raise WorkspaceError(f"Could not snapshot the working tree: {res.stderr.strip()}")
 
-    def _copy_tree(self, rel: str, patterns: list[str]) -> None:
+    def _copy_tree(self, rel: str, patterns: list[str], anchored: list[str]) -> None:
         """Copy one listed path (a file, or a directory of ignored files) into the copy."""
+        def skipped_name(parts: tuple[str, ...], i: int) -> bool:
+            if parts[i] not in OVERLAY_SKIP:
+                return False
+            if parts[i] not in ENVIRONMENT_NAMES:
+                return True
+            d = self.source.joinpath(*parts[:i + 1])
+            return d.is_dir() and (
+                i == 0 or (d / "pyvenv.cfg").is_file() or (d / "conda-meta").is_dir()
+            )
+
         def excluded(r: str) -> bool:
             parts = Path(r).parts
-            return bool(set(parts) & OVERLAY_SKIP) or any(
+            return any(skipped_name(parts, i) for i in range(len(parts))) or any(
+                r == p or r.startswith(p + "/") for p in anchored
+            ) or any(
                 r == p or r.startswith(p + "/") or fnmatch.fnmatch(r, p)
                 or any(fnmatch.fnmatch(part, p) for part in parts)
                 for p in patterns
@@ -303,6 +335,9 @@ class Workspace:
                 )
                 if res.returncode != 0:
                     # -c (clonefile) needs APFS; fall back to a plain recursive copy.
+                    # macOS cp may have made dst before clonefile failed, and
+                    # `cp -R src dst` onto an existing dst copies into dst/<name>.
+                    _unlink(dst)
                     res = subprocess.run(
                         ["cp", "-R", str(src), str(dst)],
                         capture_output=True, text=True,
@@ -318,6 +353,26 @@ class Workspace:
 
             provisioned.append(rel)
         return provisioned
+
+
+def normalize_rel(path: str) -> str:
+    """A repo-relative path in one spelling: `./data/` and `data` are the same
+    path, and a provision entry is compared with git's listings as a string."""
+    rel = posixpath.normpath(path.strip())
+    return "" if rel == "." else rel
+
+
+def _git_names(args: list[str], cwd: str) -> list[str]:
+    """The NUL-separated paths a git listing prints, as str.
+
+    Read as bytes and decoded the way Python decodes file names (os.fsdecode,
+    surrogateescape), since a path git prints need not be UTF-8: an untracked
+    Latin-1 file name would otherwise fail every delegate on the repository.
+    """
+    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True, timeout=120)
+    if res.returncode != 0:
+        raise WorkspaceError(f"git {args[0]} failed: {res.stderr.decode(errors='replace').strip()}")
+    return [os.fsdecode(n) for n in res.stdout.split(b"\0") if n]
 
 
 def trusted_config(git_dir: str | Path) -> Path:

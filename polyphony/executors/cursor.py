@@ -89,17 +89,25 @@ class CursorExecutor(BaseExecutor):
 
     # cursor-agent exits 0 even when it refuses to do the work, reporting the
     # reason on stdout. These are the markers observed in real runs; add to
-    # this list only from evidence, never from guesswork.
+    # this list only from evidence, never from guesswork
+    # (docs/evidence/smoke-results.md).
+    #
+    # Each marker counts only at the start of a line, as the CLI prints it
+    # (after an icon such as the trust prompt's "⚠"): the output also holds
+    # the agent's own summary, and a job that added handling for an "out of
+    # usage" API response must not be failed for saying so.
     _SOFT_FAILURE_MARKERS = (
         "ActionRequiredError",
-        "out of usage",
+        "You're out of usage",
         "Workspace Trust Required",
     )
 
     def detect_failure(self, output: str) -> str | None:
         if not output:
             return None
-        for marker in self._SOFT_FAILURE_MARKERS:
-            if marker in output:
-                return f"cursor-agent reported a failure in its output: {marker}"
+        for line in output.splitlines():
+            text = line.lstrip(" \t⚠️")
+            for marker in self._SOFT_FAILURE_MARKERS:
+                if text.startswith(marker):
+                    return f"cursor-agent reported a failure in its output: {marker}"
         return None
