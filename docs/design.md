@@ -158,6 +158,18 @@ hunk does not apply to the repository as it is now, including over uncommitted
 edits, nothing changes and git's message is passed back. No conflict markers are
 ever written.
 
+What is exported is what `diff` showed. Both read from the base commit to the
+commit `snapshot` recorded (`head_commit`), never the copy's live HEAD, which
+something the executor left running could move after the review. Both spell
+out every output setting (prefixes, context, no color, no external or textconv
+driver), since a user's `diff.noprefix = true` made `git apply` strip a real
+directory and patch a root file of the same name. The overlay's patch of the
+user's uncommitted edits is made the same way. And the copy's git dir gets an
+`info/attributes` of `* !diff`, which outranks any `.gitattributes`: an
+executor that marked its own `.py` files `-diff` made `diff` print "Binary
+files differ" while `apply` staged the hidden change in full. The cost is that
+the user's own `-diff` (say, on a lockfile) is not honoured in `diff` either.
+
 `apply(paths=...)` exports only those files (`git diff -- <paths>`) through the
 same path. A rename is one change with two paths, so naming either side exports
 both. The job records `applied_paths`; a later apply without paths takes the rest,
@@ -270,7 +282,8 @@ are left out, including one staged but never committed, and listed in the
 job's `withheld`; `allow_secrets` lets named ones through. Both match without
 regard to case, since `.ENV` holds keys as surely as `.env`, and on macOS's
 default file system they are the same file. Matching is by name, not content: a key in `settings.toml` still goes, and a committed `.env` is in
-the clone regardless. Explicit `provision` entries are the user's choice and are
+the clone regardless, though as committed: the user's uncommitted edits to it
+(real keys filled into a placeholder) are withheld like an untracked one. Explicit `provision` entries are the user's choice and are
 not filtered. The check runs executor-written code, so it loses
 `*_API_KEY`-style variables by default. The executor does not, because agent
 CLIs authenticate with them; `env_scrub` names variables removed from both, and

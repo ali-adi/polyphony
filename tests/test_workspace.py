@@ -256,3 +256,57 @@ def test_a_tracked_secret_is_already_in_the_clone(repo, tmp_path):
     ws = Workspace.create(repo, tmp_path / "ws")
     assert (ws.path / ".env").exists()
     assert ws.withheld == []
+
+
+# Lane export: the overlay's patch ignores the user's diff config, and a
+# tracked secret's uncommitted edits stay out of the copy.
+
+def _commit_all(repo, message):
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message],
+                   cwd=repo, check=True)
+
+
+@pytest.mark.parametrize("setting", [
+    ("diff.noprefix", "true"), ("diff.external", "false"),
+    ("color.diff", "always"), ("diff.context", "0"),
+])
+def test_the_overlay_ignores_the_users_diff_config(repo, tmp_path, setting):
+    (repo / "src" / "app.py").write_text("a\nb\nc\nd\ne\nf\ng\n", encoding="utf-8")
+    _commit_all(repo, "seven lines")
+    subprocess.run(["git", "config", *setting], cwd=repo, check=True)
+    (repo / "src" / "app.py").write_text("a\nb\nc\nD\ne\nf\ng\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert (ws.path / "src" / "app.py").read_text() == "a\nb\nc\nD\ne\nf\ng\n"
+
+
+def test_uncommitted_edits_to_a_tracked_secret_are_withheld(repo, tmp_path):
+    (repo / ".env").write_text("API_KEY=changeme\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".env"], cwd=repo, check=True)
+    _commit_all(repo, "placeholder env")
+    (repo / ".env").write_text("API_KEY=sk-real\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert (ws.path / ".env").read_text() == "API_KEY=changeme\n"  # what HEAD has
+    assert (ws.path / "src" / "app.py").read_text() == "x = 2\n"
+    assert ws.withheld == [".env"]
+    allowed = Workspace.create(repo, tmp_path / "ws2", allow_secrets=(".env",))
+    assert (allowed.path / ".env").read_text() == "API_KEY=sk-real\n"
+
+
+def test_a_deleted_tracked_secret_is_deleted_in_the_copy(repo, tmp_path):
+    (repo / ".env").write_text("API_KEY=changeme\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".env"], cwd=repo, check=True)
+    _commit_all(repo, "placeholder env")
+    (repo / ".env").unlink()
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert not (ws.path / ".env").exists()
+    assert ws.withheld == []
+
+
+def test_direnv_and_named_dotenv_files_are_withheld(repo, tmp_path):
+    (repo / ".envrc").write_text("export TOKEN=real\n", encoding="utf-8")
+    (repo / "prod.env").write_text("TOKEN=real\n", encoding="utf-8")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    assert ws.withheld == [".envrc", "prod.env"]
+    assert not (ws.path / ".envrc").exists() and not (ws.path / "prod.env").exists()
