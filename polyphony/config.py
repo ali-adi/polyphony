@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from polyphony.executors import EXECUTORS
+from polyphony.workspace import normalize_rel
 
 # Cheapest subscription first: Claude quota is the binding constraint.
 DEFAULT_POOL = ["agy", "cursor", "claude"]
@@ -116,11 +117,12 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
         if not isinstance(value, list) or not all(isinstance(g, str) and g.strip() for g in value):
             raise ConfigError(f"{file}: '{key}' must be a list of glob patterns.")
         globs[key] = [g.strip() for g in value]
+    provision = _provision_entries(file, data.get("provision"))
 
     return ProjectConfig(
         name=str(data["name"]),
         path=Path(data["path"]).expanduser().resolve(),
-        provision=list(data.get("provision") or []),
+        provision=provision,
         pool=pool,
         models={str(k): str(v) for k, v in models.items()},
         check=(check or "").strip() or None,
@@ -129,6 +131,40 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
         source=Path(file),
         **globs,
     )
+
+
+def _provision_entries(file: Path, value: object) -> list[dict]:
+    """The `provision` list, each entry checked and its path normalized.
+
+    Checked here so a malformed entry is a ConfigError naming the file, not
+    an AttributeError in create_job. Normalized because the path is compared
+    as a string with git's listings (the overlay's exclude) and passed to
+    `git clean -e`: `./data` or `data/` would match nothing there, so the
+    overlay would copy it before provisioning, or clean would delete a link.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError(f"{file}: 'provision' must be a list of {{path, mode}} entries.")
+    entries = []
+    for entry in value:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise ConfigError(
+                f"{file}: provision entry {entry!r} must be a mapping with a 'path', "
+                "such as { path: node_modules, mode: clone }."
+            )
+        rel = normalize_rel(entry["path"])
+        if not rel or rel.startswith("/") or rel == ".." or rel.startswith("../"):
+            raise ConfigError(
+                f"{file}: provision path {entry['path']!r} must be a path inside the repository."
+            )
+        mode = entry.get("mode", "clone")
+        if mode not in ("clone", "link"):
+            raise ConfigError(
+                f"{file}: provision mode {mode!r} for {rel!r} must be 'clone' or 'link'."
+            )
+        entries.append({**entry, "path": rel, "mode": mode})
+    return entries
 
 
 def find_project(

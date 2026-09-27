@@ -17,13 +17,13 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | Tool | What it does |
 |---|---|
 | `executors(repo?)` | The pool in preference order: whether each CLI is available, its modes, its active jobs against its limit, and its last cached quota check |
-| `delegate(instruction?, repo, executor?, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it) |
+| `delegate(instruction?, repo, executor?, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a job in a fresh copy of the repo. Returns a `job_id` at once, and in `skipped` any executors it passed over. `check` overrides the project's check command (`""` skips it). `timeout_minutes` (default 30) is at most 1440 |
 | `delegate_many(instruction?, repo, executors, mode?, timeout_minutes?, check?, brief_path?, models?)` | The same brief to several executors, one job each, to compare diffs. Spends quota on every one |
 | `status(job_id, wait_seconds?)` | State and the tail of the agent's output so far; once finished, also changed files, diff stat, and the check's result and output tail. Can block up to 240s |
 | `wait(job_ids, until?, wait_seconds?)` | Block until `any` (default) or `all` of several jobs finish, up to 240s: one call instead of `status` on each. Returns `done`, the `finished` and `active` ids, and `jobs`: finished ones in full as `status` gives them, active ones only as id, state, executor, and elapsed time. With `any`, an already finished job counts, so pass only the ids still awaited |
 | `diff(job_id)` | The job's full diff |
 | `apply(job_id, paths?)` | Stage the changes in your repo, uncommitted. `paths` takes only some files; a later call without it applies the rest. Refuses without touching anything on conflict |
-| `apply_many(job_ids, dry_run?)` | Apply several whole jobs in order, all or none: each patch is checked on top of the ones before it, on scratch copies of the index, before anything lands. Returns `applied`, `not_applied`, `overlaps` (file: jobs), `unstaged`, `dry_run`, and `error` naming the job that would not apply. `dry_run` only reports |
+| `apply_many(job_ids, dry_run?)` | Apply several whole jobs in order, all or none: each patch is checked on top of the ones before it, on scratch copies of the index, before anything lands. Returns `applied`, `not_applied`, `overlaps` (file: jobs), `unstaged`, `dry_run`, and `error` naming the job that would not apply. If the repository changes while the jobs land, `error` can come with some jobs already in `applied`. `dry_run` only reports |
 | `revise(job_id, feedback, timeout_minutes?)` | Run the job's agent again in the same copy, on top of its last attempt, with your feedback. `diff` and `apply` then cover all attempts. Refused once any of it is applied |
 | `discard(job_id)` | Delete the job's copy and record |
 | `cancel(job_id)` | Kill a running job |
@@ -33,7 +33,9 @@ plan or a team Cursor seat does, so mechanical work goes to those instead.
 | `report(job_id, offset?, limit?)` | A finished `report`-mode job's report, `limit` (default 20000) characters from `offset`, with `total_chars` and `more` for paging |
 
 `mode` is `code` (the agent may edit) or `review` (read-only). Each maps onto the
-CLI's own permission mode. Nothing runs with permission checks bypassed.
+CLI's own permission mode. No executor is run with its sandbox turned off, but
+not every `code` mode asks before running commands: cursor's is `-f --sandbox
+enabled`, which allows any command inside cursor's own sandbox without asking.
 
 `mode="report"` is an audit whose findings are a file: the agent is told to write
 them as Markdown to `REPORT.md` at the copy's root and change nothing else. It
@@ -41,10 +43,13 @@ runs in the CLI's `code` mode, since writing a file needs edit permission, so a
 review-only executor can't take it. The report is saved as the job's
 `report.md`; `status` shows `report_path`, `report_chars`, and `stray_changes`
 (files changed besides `REPORT.md`), and `report` reads it. A run that writes no
-`REPORT.md` fails. So does one whose `REPORT.md` is a symlink, or is a file your
-repository already tracks that the job left unchanged: an old report is never
-passed off as the new one. If you track a `REPORT.md`, the agent has to rewrite
-it. No check runs, and `apply` and `apply_many` refuse a report job.
+`REPORT.md` fails. So does one whose `REPORT.md` is a symlink or a hard link, or
+is one that was already there and the run left unchanged (one your repository
+has, or an earlier attempt's before a `revise`): an old report is never passed
+off as the new one. If your working tree has a `REPORT.md`, the agent has to
+rewrite it; a gitignored one is left out of the job's copy. Only the first 5 MB
+of a report are kept (`status` then shows `report_truncated`). No check runs,
+and `apply` and `apply_many` refuse a report job.
 
 With no `executor` named, `delegate` takes the first one in the project's `pool`
 that is installed, supports the mode, is below its limit of active jobs, and is
@@ -58,16 +63,20 @@ shows the tail. In `code` mode, once the agent succeeds, the check command (the
 project's `check`, or `delegate`'s) runs in the job's copy, and `status` reports
 whether it passed. A failing check does not fail the job; you decide. The check
 runs sandboxed (`sandbox-exec` on macOS, `bwrap` on Linux): it can write only in
-the copy and a private `$TMPDIR`, with no network beyond loopback. Without a
-sandbox it does not run.
+the copy and a private `$TMPDIR`, with no network beyond loopback. On Linux that
+network rule does not cover Unix sockets, so `/run`, `/var/run`, `/tmp` and
+`/var/tmp` are hidden from it (Docker, D-Bus, ssh-agent, tmux and X11 sockets
+live there), and it gets its own PID namespace, so it cannot see or signal your
+processes. A Unix socket elsewhere, such as under your home directory, is
+still reachable. Without a sandbox it does not run.
 
 A long brief can be cut short when passed inline, so `delegate` and
 `delegate_many` also take `brief_path`: a UTF-8 file of at most 100 KB (relative
-paths are from the repo). It is copied into the job at once as `brief.md`, and
+paths are from the `repo` directory as given). It is copied into the job at once as `brief.md`, and
 the agent is told `instruction`, a blank line, then the brief; either may be
 left out, not both. The whole task (instruction, brief, and report mode's
-request) must stay under 120 KB, and `revise` refuses feedback that would take
-it over: agy, cursor, gemini and opencode get the task as one command-line
+request) must stay under 120 KB and hold no NUL byte, and `revise` refuses
+feedback that would break either: agy, cursor, gemini and opencode get the task as one command-line
 argument, which Linux caps at 128 KiB. `status` reports `instruction_chars`, `instruction_sha256`,
 and `instruction_tail` (the last 200 characters) of that task, before any
 `revise` feedback, so you can check it arrived whole. `model` overrides the
@@ -91,15 +100,22 @@ edit-capable agent allows every tool, shell included, without asking.
   git objects. The clone has no remote, so the agent has no route to GitHub.
 - The clone's git directory sits beside the copy, not in it, and Polyphony's own
   git commands there ignore anything the agent planted: hooks, config, and
-  `.git` or `commondir` pointers to other repositories.
+  `.git` or `commondir` pointers to other repositories. A symlink anywhere in
+  that git directory (an `index` or `objects` pointing into your repository,
+  say) fails the job rather than letting git write through it.
 - Nothing lands until you call `apply`, and `apply` only stages. You commit.
   It applies a patch, so the job's internal commit never enters your history.
 - Secret-looking files the copy would otherwise take from your working tree
-  (untracked or gitignored `.env`, `.env.*` but not `.env.example`, private keys,
-  `.netrc`, `.npmrc`, `credentials.json`, and so on; `SECRET_PATTERNS` in
-  `workspace.py`) are withheld, at any depth and in any case (`.ENV` too), and
-  `status` lists them as `withheld`. A secret you have committed is in the
-  clone regardless.
+  (untracked or gitignored `.env`, `.env.*` but not `.env.example`, `*.env`,
+  `.envrc`, private keys, `.netrc`, `.npmrc`, `credentials.json`, and so on;
+  `SECRET_PATTERNS` in `workspace.py`) are withheld, at any depth and in any
+  case (`.ENV` too), and `status` lists them as `withheld`. A secret you have
+  committed is in the clone regardless, but only as committed: your
+  uncommitted edits to it are withheld too.
+- `diff` shows exactly what `apply` stages: both read the commit the job's run
+  ended on, not whatever the copy holds later, and neither follows your git
+  diff settings (`diff.noprefix`, `diff.external`, ...) or the agent's
+  `.gitattributes`.
 - The check does not see credential-looking environment variables (`*_API_KEY`,
   `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`). The agent keeps them,
   since its CLI may authenticate with one; `env_scrub` removes others from both.
@@ -166,8 +182,13 @@ env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the 
 A repository with no config works too, just with no provisioning and the default
 pool.
 
-The copy never takes `node_modules` from the working tree (nor `env`, `.venv`,
-or the other environments and caches), so a frontend check such as `npm test`
+A provision `path` is one path from the repository root (`./data/` and `data`
+are the same), so provisioning `models` leaves an untracked `src/models/` alone.
+
+The copy never takes `node_modules` from the working tree (nor caches such as
+`__pycache__`, nor environments: an `env`, `venv` or `.venv` directory at the
+repository root, or one anywhere holding `pyvenv.cfg` or `conda-meta/`; a
+`src/env/` of source is copied), so a frontend check such as `npm test`
 fails there unless the project provisions it:
 `provision: [{ path: node_modules, mode: clone }]` gives each job its own copy
 (copy-on-write on APFS, a full copy elsewhere). `mode: link` symlinks yours

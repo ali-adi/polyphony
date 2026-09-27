@@ -814,7 +814,7 @@ def test_a_brief_alone_is_the_task_and_a_relative_path_is_from_the_repo(store, r
     (repo / "docs").mkdir()
     (repo / "docs" / "brief.md").write_text("only the brief\n")
     srv = _server(store, tmp_path)
-    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="docs/brief.md",
+    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="brief.md",
                    executor="agy")
     job = store.load(started["job_id"])
     assert job.instruction == "only the brief\n"
@@ -1174,3 +1174,57 @@ def test_status_and_instructions_point_at_wait(server):
     tools = {t.name: t for t in anyio.run(server.list_tools)}
     assert "use wait" in tools["status"].description
     assert "call the wait tool" in INSTRUCTIONS
+
+
+# --- Lane reportapi: argument edges, and status reading only files' ends. ---
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_relative_brief_path_is_from_the_repo_directory_given(store, repo, tmp_path):
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "brief.md").write_text("the package's brief\n")
+    (repo / "brief.md").write_text("the root's brief\n")
+    srv = _server(store, tmp_path)
+    started = call(srv, "delegate", repo=str(repo / "pkg"), brief_path="brief.md",
+                   executor="agy")
+    assert store.load(started["job_id"]).instruction == "the package's brief\n"
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_timeout_minutes_is_at_most_a_day(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    assert "at most 1440" in refused(srv, "delegate", instruction="x", repo=str(repo),
+                                     timeout_minutes=50000)
+    assert "at most 1440" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
+                                     executors=["agy"], timeout_minutes=1441)
+    assert "at most 1440" in refused(srv, "revise", job_id="nope", feedback="x",
+                                     timeout_minutes=50000)
+    call(srv, "delegate", instruction="x", repo=str(repo), timeout_minutes=1440)
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_nul_byte_in_the_task_is_refused_up_front(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    assert "NUL" in refused(srv, "delegate", instruction="a\0b", repo=str(repo))
+    (repo / "brief.md").write_text("a\0b\n")
+    assert "NUL" in refused(srv, "delegate", repo=str(repo), brief_path="brief.md")
+    assert store.all() == []
+
+
+def test_status_reads_only_the_end_of_output_and_report(server, repo, fake_agy, monkeypatch):
+    from pathlib import Path
+    fake_agy("printf '# Audit\\n\\nall clear\\n' > REPORT.md; seq 1 20000")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo), mode="report")["job_id"]
+    assert finished(server, job_id)["state"] == "succeeded"
+    read_text = Path.read_text
+
+    def whole_file(self, *a, **kw):
+        assert self.name not in ("output.txt", "report.md", "check.txt"), f"read all of {self}"
+        return read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", whole_file)
+    status = call(server, "status", job_id=job_id)
+    assert status["report_chars"] == len("# Audit\n\nall clear\n")
+    assert status["output_tail"].endswith("19999\n20000\n")
+    assert len(status["output_tail"]) == 8000
+    assert "report_truncated" not in status

@@ -74,8 +74,10 @@ one `apply` at a time: it checks every patch on top of the ones before it and
 applies all or none, so two jobs that conflict are found before either lands.
 Run it with `dry_run=true` first to see `overlaps` (files more than one job
 touched: read those hunks together) and `unstaged` (jobs that will land unstaged
-over the user's own edits). On `error`, nothing changed: it names the job that
-does not fit. Call `apply_many` again without it, then apply that one's work by
+over the user's own edits). On `error`, it names the job that does not fit; if
+`applied` is empty, nothing changed, and otherwise the jobs in `applied` are
+already staged (the repository changed while it ran), so leave them out next
+time. Call `apply_many` again without the failing job, then apply that one's work by
 hand or delegate it again on top (its copy never sees the other jobs, so
 `revise` cannot fix a conflict with them). Not for `delegate_many` results, which are alternatives: apply one.
 
@@ -87,9 +89,9 @@ In review mode the product is `output_tail` (the full text is at `output_path`).
 
 For an audit whose findings you want as a document, use `mode="report"` rather
 than `review`, and don't ask for a file in the brief: Polyphony tells the agent to
-write `REPORT.md`. If the repository already tracks a `REPORT.md`, tell the
+write `REPORT.md`. If the repository already has a `REPORT.md`, tell the
 agent to overwrite it: one left unchanged is not taken as the report, and the
-job fails. On `succeeded`, read it with `report(job_id)`, paging with
+job fails. The same holds on `revise`: the agent must rewrite the report. On `succeeded`, read it with `report(job_id)`, paging with
 `offset` while `more` is true. A non-empty `stray_changes` means the agent edited
 other files too; the report can still stand, but `apply` is refused, so save the
 report where the user wants it yourself, then `discard`.
@@ -107,5 +109,6 @@ Read `error` and `output_tail`.
   attempts, so review it all again. If the second attempt is also wrong,
   `discard` and do the task yourself.
 - **Missing secret**: `withheld` in `status` lists secret-looking files (`.env`,
-  keys) kept out of the copy. If the failure comes from one being missing, tell
+  keys) kept out of the copy; a committed one is there, but without the user's
+  uncommitted edits to it. If the failure comes from one being missing, tell
   the user; only they should add it to `allow_secrets` in the project config.

@@ -73,7 +73,9 @@ store lock only if that attempt is still current. So a job cancelled while
 queued and then revised can't be run by both its old worker and its new one.
 A queued job that no worker claims within a minute (the server stopped
 between creating and launching it) is marked `died`, so it stops holding a
-job slot. The lock is reentrant per thread, because `delegate` holds it while
+job slot. The minute counts from `launch`, not from creating the job, so a
+`delegate_many` whose later copies are slow doesn't get its first job marked
+`died` while that job's worker waits for the lock. The lock is reentrant per thread, because `delegate` holds it while
 counting jobs and counting refreshes them.
 
 **The worker double-forks.** The server is long-lived. If it were the worker's
@@ -81,7 +83,16 @@ parent, a worker that died would linger as a zombie, `os.kill(pid, 0)` would kee
 succeeding, and `died` would never be detected. `launch()` waits on an
 intermediate process that exits at once, so the real worker is reparented to
 init. The worker, the executor, and the check each lead their own process
-group; the job records all three and `cancel` kills them all. On macOS,
+group; the job records all three and `cancel` kills them all: SIGTERM, then
+SIGKILL for any group still alive two seconds later, since the worker that
+enforced the timeout is gone by then. `cancel` reads and records the job under
+the store lock, and every save the worker makes goes through `save_running`,
+which under the same lock refuses once the job is no longer its running
+attempt. So a worker that claims or finishes during a `cancel` can't turn a
+cancelled job back into a succeeded one, nor a cancel overwrite a finished
+result. When `refresh` finds a worker dead, it kills the executor and check
+groups it left, which would otherwise run on with no timeout, beside a
+revise's new executor. On macOS,
 signalling a group that is still being reaped briefly returns `EPERM` before
 `ESRCH`, so treating `EPERM` as alive only delays `died` by a poll, and `cancel`
 ignores it.
@@ -93,7 +104,8 @@ because it is what explains a non-zero exit and would clutter a review's
 output. Both are files rather than pipes, so no buffer can fill and block the
 CLI. How often the file grows depends on the CLI's own buffering. The executor
 starts a new session, so a timeout kills everything it started, not only the
-CLI. That puts it outside the worker's group, so the worker records the
+CLI, and so does its exit: a dev server or watcher it left in the background
+would otherwise keep writing to the copy. That puts it outside the worker's group, so the worker records the
 executor's group in `job.json` for `cancel`. A `cancel` in the
 instant between the executor starting and that record being written still
 misses the executor.
@@ -124,7 +136,12 @@ Polyphony runs there goes through `copy_git`, which first puts back the config
 saved when the copy was made, removes `commondir` and object alternates,
 rewrites the copy's `.git` pointer, and passes the git dir and work tree
 explicitly with hooks and fsmonitor off. Files are unlinked before being
-rewritten, since the agent may have made them symlinks. What the executor
+rewritten, since the agent may have made them symlinks. Git writes through
+symlinks of its own: its lockfile code resolves a symlinked `index` and
+renames the new one over the target, and a symlinked `objects` or `refs/heads`
+takes new objects and refs wherever it points. Both were reproduced writing
+into the user's repository. Git never makes a symlink in a git dir, so
+`copy_git` refuses to run when it finds one anywhere there, and the job fails. What the executor
 itself runs is still bounded only by its CLI's own sandbox: an agent with an
 unrestricted shell can write wherever the user can, including a global
 `core.hooksPath` directory.
@@ -143,20 +160,54 @@ The check runs code the executor may have written (a test, a `conftest.py`, a
 the host. It runs under `sandbox-exec` on macOS or `bwrap` on Linux: writes only
 in the copy (not its `.git`) and a private `$TMPDIR` under the job, no network
 beyond loopback, and on macOS no LaunchServices or Apple events, either of which
-could start a process outside the sandbox. A link-mode path resolves to the
+could start a process outside the sandbox. On Linux, `--unshare-net` stops IP
+but not a Unix socket with a path, which is a file that a read-only mount does
+not protect from connect(); a check was shown reaching a host socket that way,
+and the Docker socket or the session bus (`systemd-run --user`) would start a
+process outside the sandbox. So bwrap mounts empty tmpfs over `/run`,
+`/var/run`, `/tmp` and `/var/tmp` and binds the job dir and link-mode targets
+back read-only, and uses `--unshare-all` and `--new-session`: its own PID
+namespace keeps it from reading the server's `/proc/<pid>/environ` (credentials
+included) or signalling the user's processes, and its own session keeps it from
+pushing keystrokes into a terminal. A socket outside those dirs (under `$HOME`,
+say) is still reachable; hiding `$HOME` would break most toolchains. A link-mode path resolves to the
 user's own files, so it is read-only to the check. With no sandbox available
 the check does not run, and `check.txt` says why. Running it after the snapshot,
 then resetting the copy to that snapshot, keeps what it writes (caches, coverage
 files, lockfile updates) out of the diff, a revised attempt's included. A failing check still leaves the job `succeeded`: the executor did
 its part, and whether the work is worth fixing or applying is the lead's call.
-The check gets its own process group, killed on timeout, and the job records
-that group so `cancel` kills it too.
+The check gets its own process group, killed on timeout and when it exits, and
+the job records that group so `cancel` kills it too. On Linux `bwrap` also
+gives it its own pid namespace (`--unshare-pid`), so a process it daemonizes
+with `setsid` out of that group still dies when the check does, instead of
+writing into the copy after it was reset. `sandbox-exec` has no equivalent.
 
 **`apply` is a patch.** The job's changes are exported with
-`git diff --binary` and staged with `git apply --index`, which is atomic. If any
+`git diff --binary` and staged with `git apply --index`. If any
 hunk does not apply to the repository as it is now, including over uncommitted
 edits, nothing changes and git's message is passed back. No conflict markers are
-ever written.
+ever written. `git apply` is not atomic once it starts writing: it removes every
+file it rewrites first, and a write that then fails (a file where a directory
+still holds an ignored file) leaves those removals behind. So `apply` copies the
+working-tree state of every path the patch touches into the job's directory
+beforehand and puts it back after any failed `git apply`. Before applying it
+refreshes the index's stat data (`update-index -q --refresh`, as `git status`
+does), so a file touched but unchanged is not taken for an unstaged edit. It
+falls back to the working tree alone only when the patch's files do have
+unstaged edits; any other `--index` failure, such as a locked index, is
+reported with git's reason.
+
+What is exported is what `diff` showed. Both read from the base commit to the
+commit `snapshot` recorded (`head_commit`), never the copy's live HEAD, which
+something the executor left running could move after the review. Both spell
+out every output setting (prefixes, context, no color, no external or textconv
+driver), since a user's `diff.noprefix = true` made `git apply` strip a real
+directory and patch a root file of the same name. The overlay's patch of the
+user's uncommitted edits is made the same way. And the copy's git dir gets an
+`info/attributes` of `* !diff`, which outranks any `.gitattributes`: an
+executor that marked its own `.py` files `-diff` made `diff` print "Binary
+files differ" while `apply` staged the hidden change in full. The cost is that
+the user's own `-diff` (say, on a lockfile) is not honoured in `diff` either.
 
 `apply(paths=...)` exports only those files (`git diff -- <paths>`) through the
 same path. A rename is one change with two paths, so naming either side exports
@@ -173,7 +224,9 @@ current content of every file a job touches. A job whose files agree in both
 and whose patch fits goes on both, as `apply --index` would stage it; one that
 fits only the working-tree index would land unstaged, as `apply` falls back to.
 Blobs go to a scratch object directory that borrows the repository's objects as
-an alternate, so the pre-check writes nothing to the repository. Only if every
+an alternate, and the scratch indexes are written whole (`core.splitIndex`
+off, the split index's shared file copied alongside), so the pre-check writes
+nothing to the repository. Only if every
 patch fits does each go through `apply` itself, so the ledger and
 `applied_paths` stay as they would be; if one fails then anyway (the repository
 changed meanwhile), it stops and says which landed. It takes whole jobs only:
@@ -203,7 +256,8 @@ and the ledger is read as each job's last line.
 
 **A brief file is copied into the job's instruction.** Long inline instructions
 were cut short on the way in, so `brief_path` names a file instead. It is read
-once, at delegate time (at most 100 KB, UTF-8, relative to the repo), and the
+once, at delegate time (at most 100 KB, UTF-8, relative to the `repo` directory
+the caller gave, which may be below the top level), and the
 instruction, a blank line, and its text are stored together as the job's
 `instruction`: `prompt()` and every `revise` then restate the whole task from
 `job.json` alone, and later edits to the file reach no queued or revised job.
@@ -270,7 +324,8 @@ are left out, including one staged but never committed, and listed in the
 job's `withheld`; `allow_secrets` lets named ones through. Both match without
 regard to case, since `.ENV` holds keys as surely as `.env`, and on macOS's
 default file system they are the same file. Matching is by name, not content: a key in `settings.toml` still goes, and a committed `.env` is in
-the clone regardless. Explicit `provision` entries are the user's choice and are
+the clone regardless, though as committed: the user's uncommitted edits to it
+(real keys filled into a placeholder) are withheld like an untracked one. Explicit `provision` entries are the user's choice and are
 not filtered. The check runs executor-written code, so it loses
 `*_API_KEY`-style variables by default. The executor does not, because agent
 CLIs authenticate with them; `env_scrub` names variables removed from both, and
@@ -284,11 +339,20 @@ permission), the prompt asks for `REPORT.md` and nothing else, and the worker
 copies it out as the job's `report.md`. Other edits are listed as
 `stray_changes` rather than prevented, since no CLI can grant write access to
 one file. A symlinked `REPORT.md` is not read, since it could point at any
-file on the machine. A tracked `REPORT.md` the job left unchanged is not taken
-as the report either, so an old report is never returned as the new one; the
-cost is that an agent writing exactly the tracked text fails the job. That is
-kept, rather than accepting any `REPORT.md` present, because a stale report
-passed off as fresh is worse than a rerun.
+file on the machine, nor a hard-linked one, which could be any file the user
+owns; it is opened without following links and checked on the open file. A
+`REPORT.md` already there is not taken as the report either: the worker records
+its inode, size and change times before each attempt, and one this attempt did
+not touch is refused, as is a tracked one the job left unchanged. That covers a
+report in the repository, and an earlier attempt's after `revise`. A gitignored
+`REPORT.md`, which the overlay would otherwise bring over from the working tree,
+is removed from a report job's copy at create, so the agent does not build on
+it. So an old report is never returned as the new one; the cost is that an
+agent must rewrite one it finds. That is kept, rather than accepting any
+`REPORT.md` present, because a stale report passed off as fresh is worse than a
+rerun. The saved report is capped at 5 MB (`REPORT_MAX_BYTES`) and its length
+recorded, and `status` reads only the end of `output.txt` and the check output,
+so an executor cannot make the long-lived server load gigabytes.
 
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work

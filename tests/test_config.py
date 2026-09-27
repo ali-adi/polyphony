@@ -35,7 +35,7 @@ def test_load_full_project(tmp_path):
     cfg = load_project(f)
     assert cfg.name == "demo"
     assert cfg.path == repo.resolve()
-    assert cfg.provision == [{"path": "env/", "mode": "clone"}]
+    assert cfg.provision == [{"path": "env", "mode": "clone"}]
     assert cfg.pool == ["cursor", "agy"]
     assert cfg.models == {"cursor": "composer-2.5"}
 
@@ -99,9 +99,9 @@ def test_real_medicoder_config_provisions_what_its_tests_need():
     """Verified by the provisioning spike: without all three, tests fail."""
     cfg = load_project(PROJECTS_DIR / "medicoder" / "project.yaml")
     assert cfg.provision == [
-        {"path": "env/", "mode": "clone"},
-        {"path": "datasets/smoke/", "mode": "clone"},
-        {"path": "datasets/tuning/", "mode": "clone"},
+        {"path": "env", "mode": "clone"},
+        {"path": "datasets/smoke", "mode": "clone"},
+        {"path": "datasets/tuning", "mode": "clone"},
     ]
 
 
@@ -321,3 +321,31 @@ def test_malformed_secret_settings_name_the_file(tmp_path, bad):
     f = _write(tmp_path / "projects", "demo", {"name": "demo", "path": str(tmp_path), **bad})
     with pytest.raises(ConfigError, match=str(f)):
         load_project(f)
+
+
+# Lane: workspace review fixes.
+
+@pytest.mark.parametrize("provision", [
+    ["node_modules"],
+    "node_modules",
+    [{"mode": "clone"}],
+    [{"path": "../outside"}],
+    [{"path": "/abs"}],
+    [{"path": "."}],
+    [{"path": "data", "mode": "copy"}],
+])
+def test_malformed_provision_entries_name_the_file(tmp_path, provision):
+    f = _write(tmp_path / "projects", "demo",
+               {"name": "demo", "path": str(tmp_path), "provision": provision})
+    with pytest.raises(ConfigError, match=str(f)):
+        load_project(f)
+
+
+def test_provision_paths_are_normalized(tmp_path):
+    f = _write(tmp_path / "projects", "demo", {
+        "name": "demo", "path": str(tmp_path),
+        "provision": [{"path": "./data/"}, {"path": "a//b/", "mode": "link"}],
+    })
+    assert load_project(f).provision == [
+        {"path": "data", "mode": "clone"}, {"path": "a/b", "mode": "link"},
+    ]

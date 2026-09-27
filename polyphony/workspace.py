@@ -14,13 +14,16 @@ Secret-looking files (SECRET_PATTERNS) are the exception: an untracked or
 gitignored `.env` is where a repository keeps its API keys, and copying it
 would hand them to every agent. They are withheld unless the project's
 `allow_secrets` names them. A tracked one is in HEAD, so the clone has it
-regardless; withholding covers only what the overlay would add.
+regardless; withholding covers only what the overlay would add, which
+includes the user's uncommitted edits to it (real keys filled into a
+committed placeholder `.env`): the copy keeps the committed version.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
+import posixpath
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -33,16 +36,24 @@ OVERLAY_SKIP = frozenset({
     ".git", "env", "venv", ".venv", "__pycache__", "node_modules",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".DS_Store",
 })
+# The names in OVERLAY_SKIP that are also ordinary source directory names
+# (a web app's src/env/server.ts). One of these is skipped only where it is
+# really an environment: a directory at the repo root, where virtualenvs live,
+# or one anywhere holding a virtualenv's pyvenv.cfg or a conda env's
+# conda-meta/. Elsewhere it is the user's source and is copied like any other.
+ENVIRONMENT_NAMES = frozenset({"env", "venv", ".venv"})
 OVERLAY_MAX_BYTES = 50 * 1024 * 1024
 IGNORE_FILE = ".polyphonyignore"
 
-# Untracked or gitignored files the overlay withholds, matched on the basename
-# at any depth and ignoring case (patterns here are lower case): dotenv files, private keys and keystores, and the credential
+# Untracked or gitignored files the overlay withholds, and tracked ones whose
+# uncommitted edits it withholds, matched on the basename
+# at any depth and ignoring case (patterns here are lower case): dotenv files
+# (`prod.env`, direnv's `.envrc`), private keys and keystores, and the credential
 # files of package managers and cloud SDKs. Only the private half of an SSH key
 # pair matches (id_rsa, not id_rsa.pub). Templates meant to be copied, like
 # .env.example, hold no real values and are let through (SECRET_TEMPLATES).
 SECRET_PATTERNS = (
-    ".env", ".env.*",
+    ".env", ".env.*", "*.env", ".envrc",
     "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     ".netrc", ".npmrc", ".pypirc",
@@ -50,6 +61,24 @@ SECRET_PATTERNS = (
 )
 SECRET_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template", ".env.dist"})
 SNAPSHOT_MESSAGE = "polyphony: working-tree snapshot"
+
+# Every diff whose output is fed to `git apply` or shown to the lead names each
+# output setting itself, so the user's config (global, or the repository's own)
+# cannot change it: diff.noprefix would make `git apply` strip a real
+# directory and patch the wrong file; diff.external, a textconv
+# driver or color.diff=always would print something that is not a patch;
+# diff.context=0 makes a patch that does not apply; diff.relative or
+# diff.submodule=log would leave paths or gitlinks out.
+DIFF_FLAGS = (
+    "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative",
+    "--src-prefix=a/", "--dst-prefix=b/", "-U3", "--submodule=short", "--find-renames",
+)
+# Written as the job's git dir's info/attributes, which outranks every
+# .gitattributes in the tree: the executor could otherwise mark its own text
+# changes `-diff` (or `binary`) and diff() would show "Binary files differ"
+# where the lead needs hunks, while apply (--binary) still carries them in
+# full. Unspecified means git decides by content, as it does for any file.
+NEUTRAL_ATTRIBUTES = "* !diff\n"
 
 
 class WorkspaceError(Exception):
@@ -99,7 +128,12 @@ class Workspace:
         and an agent writing into an object file would corrupt both.
         """
         source_path = Path(source).resolve()
-        dest = Path(path)
+        # Absolute, because the clone below runs from the source's parent and
+        # everything after it from the caller's cwd: a relative `path` would
+        # put the clone in one place and look for it in another.
+        dest = Path(path).expanduser().resolve()
+        if git_dir is not None:
+            git_dir = Path(git_dir).expanduser().resolve()
         dest.parent.mkdir(parents=True, exist_ok=True)
         separate = ["--separate-git-dir", str(git_dir)] if git_dir is not None else []
         res = run_git(
@@ -122,6 +156,10 @@ class Workspace:
         except (WorkspaceError, OSError) as exc:
             ws.remove()
             raise WorkspaceError(str(exc)) from exc
+        except BaseException:
+            # Anything unforeseen still must not leave a half-made clone behind.
+            ws.remove()
+            raise
         if ws.git_dir is not None:
             shutil.copyfile(ws.git_dir / "config", trusted_config(ws.git_dir))
         return ws
@@ -129,7 +167,12 @@ class Workspace:
     def _overlay(self, exclude: tuple[str, ...]) -> None:
         """Bring the source's uncommitted state into the copy and snapshot it."""
         src = str(self.source)
-        patterns = [p.strip().rstrip("/") for p in exclude if p.strip()]
+        # Provision paths name one repo-relative path each, so they match only
+        # that path and what is under it: provisioning `models` must not drop
+        # an untracked src/models/*.py. .polyphonyignore lines are globs,
+        # matched against the path and against each component at any depth.
+        anchored = [normalize_rel(p) for p in exclude if p.strip()]
+        patterns: list[str] = []
         ignore_file = self.source / IGNORE_FILE
         if ignore_file.is_file():
             patterns += [
@@ -139,15 +182,17 @@ class Workspace:
             ]
 
         # Edits to tracked files, staged or not, including deletions and binaries.
-        # A file staged but never committed is in this diff too, so a staged
-        # secret is excluded from it by name.
-        added = run_git(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD"],
-                        cwd=src, timeout=120)
-        staged_secrets = [r for r in added.stdout.split("\0") if r and self._secret(r)]
-        self.withheld += staged_secrets
+        # A secret-looking file staged but never committed is in this diff, and
+        # so are uncommitted edits to a committed one (real keys filled into a
+        # tracked placeholder `.env`): both are excluded by name, and the copy
+        # keeps what HEAD has. A deletion carries no secret, so it goes through.
+        edited = _git_names(
+            ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", "HEAD"], src)
+        edited_secrets = [r for r in edited if self._secret(r)]
+        self.withheld += edited_secrets
         patch = subprocess.run(
-            ["git", "diff", "--binary", "HEAD", "--",
-             *(f":(exclude,literal){r}" for r in staged_secrets)],
+            ["git", "diff", "--binary", *DIFF_FLAGS, "HEAD", "--",
+             *(f":(exclude,literal){r}" for r in edited_secrets)],
             cwd=src, capture_output=True, timeout=120,
         )
         if patch.returncode != 0:
@@ -163,9 +208,8 @@ class Workspace:
         # New files, then gitignored ones (listed per directory, so walk those).
         for flags in (["--others", "--exclude-standard"],
                       ["--others", "--ignored", "--exclude-standard", "--directory"]):
-            listed = run_git(["ls-files", "-z", *flags], cwd=src, timeout=120)
-            for rel in filter(None, listed.stdout.split("\0")):
-                self._copy_tree(rel.rstrip("/"), patterns)
+            for rel in _git_names(["ls-files", "-z", *flags], src):
+                self._copy_tree(rel.rstrip("/"), patterns, anchored)
         self.withheld = sorted(set(self.withheld))  # the two listings can overlap
 
         run_git(["add", "-A"], cwd=str(self.path))
@@ -178,11 +222,23 @@ class Workspace:
             if res.returncode != 0:
                 raise WorkspaceError(f"Could not snapshot the working tree: {res.stderr.strip()}")
 
-    def _copy_tree(self, rel: str, patterns: list[str]) -> None:
+    def _copy_tree(self, rel: str, patterns: list[str], anchored: list[str]) -> None:
         """Copy one listed path (a file, or a directory of ignored files) into the copy."""
+        def skipped_name(parts: tuple[str, ...], i: int) -> bool:
+            if parts[i] not in OVERLAY_SKIP:
+                return False
+            if parts[i] not in ENVIRONMENT_NAMES:
+                return True
+            d = self.source.joinpath(*parts[:i + 1])
+            return d.is_dir() and (
+                i == 0 or (d / "pyvenv.cfg").is_file() or (d / "conda-meta").is_dir()
+            )
+
         def excluded(r: str) -> bool:
             parts = Path(r).parts
-            return bool(set(parts) & OVERLAY_SKIP) or any(
+            return any(skipped_name(parts, i) for i in range(len(parts))) or any(
+                r == p or r.startswith(p + "/") for p in anchored
+            ) or any(
                 r == p or r.startswith(p + "/") or fnmatch.fnmatch(r, p)
                 or any(fnmatch.fnmatch(part, p) for part in parts)
                 for p in patterns
@@ -279,6 +335,9 @@ class Workspace:
                 )
                 if res.returncode != 0:
                     # -c (clonefile) needs APFS; fall back to a plain recursive copy.
+                    # macOS cp may have made dst before clonefile failed, and
+                    # `cp -R src dst` onto an existing dst copies into dst/<name>.
+                    _unlink(dst)
                     res = subprocess.run(
                         ["cp", "-R", str(src), str(dst)],
                         capture_output=True, text=True,
@@ -296,6 +355,26 @@ class Workspace:
         return provisioned
 
 
+def normalize_rel(path: str) -> str:
+    """A repo-relative path in one spelling: `./data/` and `data` are the same
+    path, and a provision entry is compared with git's listings as a string."""
+    rel = posixpath.normpath(path.strip())
+    return "" if rel == "." else rel
+
+
+def _git_names(args: list[str], cwd: str) -> list[str]:
+    """The NUL-separated paths a git listing prints, as str.
+
+    Read as bytes and decoded the way Python decodes file names (os.fsdecode,
+    surrogateescape), since a path git prints need not be UTF-8: an untracked
+    Latin-1 file name would otherwise fail every delegate on the repository.
+    """
+    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True, timeout=120)
+    if res.returncode != 0:
+        raise WorkspaceError(f"git {args[0]} failed: {res.stderr.decode(errors='replace').strip()}")
+    return [os.fsdecode(n) for n in res.stdout.split(b"\0") if n]
+
+
 def trusted_config(git_dir: str | Path) -> Path:
     """Where the config Polyphony set up for a job's git dir is kept."""
     return Path(f"{git_dir}.trusted-config")
@@ -311,10 +390,19 @@ def copy_git(
     include.path, hooksPath) and in hooks, and follows a `.git` file or a
     `commondir` file to another repository, where a commit would write into
     the user's own objects. So before every command: the trusted config is
-    put back, commondir and alternates are removed, the copy's `.git`
+    put back, commondir and alternates are removed, info/attributes is
+    rewritten (NEUTRAL_ATTRIBUTES), the copy's `.git`
     pointer is rewritten, and git gets the git dir and work tree explicitly,
     with hooks and fsmonitor off. Replaced files are unlinked rather than
     written through, since the executor may have made them symlinks.
+
+    Git itself writes through symlinks it finds in the git dir: its lockfile
+    code resolves a symlinked `index` and renames the new one over the
+    target, and a symlinked `objects` (or `objects/ab`, `refs/heads`, ...)
+    takes new objects and refs wherever it points, such as the user's own
+    repository. Git never makes a symlink there, so any symlink anywhere in
+    the git dir is refused rather than repaired: the job fails loudly instead
+    of guessing which of its files are still its own.
 
     A job from before separate git dirs has its git dir inside the copy;
     it gets the flags, but has no trusted config to restore.
@@ -322,12 +410,25 @@ def copy_git(
     gd, wt = Path(git_dir), Path(work_tree)
     if gd.is_symlink():
         raise WorkspaceError(f"{gd} has been replaced by a symlink; refusing to run git there.")
+    planted = _first_symlink(gd)
+    if planted is not None:
+        raise WorkspaceError(
+            f"{planted} in the job's git dir is a symlink, which git would write through; "
+            "refusing to run git there."
+        )
     trusted = trusted_config(gd)
     if trusted.is_file() and not trusted.is_symlink():
         _unlink(gd / "config")
         shutil.copyfile(trusted, gd / "config")
     _unlink(gd / "commondir")
     _unlink(gd / "objects" / "info" / "alternates")
+    info = gd / "info"
+    if gd.is_dir():
+        if info.is_symlink() or not info.is_dir():
+            _unlink(info)
+        info.mkdir(exist_ok=True)
+        _unlink(info / "attributes")
+        (info / "attributes").write_text(NEUTRAL_ATTRIBUTES)
     if not gd.is_relative_to(wt):
         pointer = wt / ".git"
         wanted = f"gitdir: {gd}\n"
@@ -339,6 +440,20 @@ def copy_git(
          "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args],
         cwd=str(wt), timeout=timeout,
     )
+
+
+def _first_symlink(git_dir: Path) -> Path | None:
+    """The first symlink found under `git_dir`, or None.
+
+    os.walk does not follow symlinked directories, and lists them among the
+    directories, so a symlinked `objects` is caught before anything under it.
+    """
+    for root, dirs, files in os.walk(git_dir):
+        for name in (*dirs, *files):
+            path = Path(root, name)
+            if path.is_symlink():
+                return path
+    return None
 
 
 def _unlink(path: Path) -> None:
