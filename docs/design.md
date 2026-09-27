@@ -186,6 +186,19 @@ nothing, and each line carries the job's attempt count. The one job with two
 lines is a cancelled attempt that is then revised: `revise` clears the outcome,
 and the ledger is read as each job's last line.
 
+**A brief file is copied into the job's instruction.** Long inline instructions
+were cut short on the way in, so `brief_path` names a file instead. It is read
+once, at delegate time (at most 200 KB, UTF-8, relative to the repo), and the
+instruction, a blank line, and its text are stored together as the job's
+`instruction`: `prompt()` and every `revise` then restate the whole task from
+`job.json` alone, and later edits to the file reach no queued or revised job.
+`brief.md` keeps the brief by itself for reading, and `brief_path` is kept for
+display only. `status` gives the stored task's length, SHA-256, and last 200
+characters so the lead can confirm it arrived whole. agy, cursor, gemini, and
+opencode take the prompt as one argv string, which Linux caps at 128 KiB, so on
+Linux a task over that fails with "Argument list too long" there; claude and
+codex read it on stdin.
+
 **Old jobs are removed only on request.** `polyphony gc --older-than` has no
 default and never runs on its own. A finished job may hold work nobody has
 applied, and deleting that silently is worse than the disk it uses. Sizes count

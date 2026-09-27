@@ -1194,3 +1194,46 @@ def test_a_job_json_from_before_the_secrets_fields_still_loads(store, repo):
     f.write_text(json.dumps(data))
     loaded = store.load(job.id)
     assert loaded.withheld == [] and loaded.env_scrub == []
+
+
+# --- Lane r2-brief: a task given as a brief file. ---
+
+
+def test_a_brief_is_copied_and_joined_to_the_instruction(store, repo, tmp_path):
+    from polyphony.jobs import prompt, read_brief
+    f = tmp_path / "brief.md"
+    f.write_text("line one\nline two\n")
+    job = _job(store, repo, "Lead in.", brief=read_brief(str(f), repo))
+    f.write_text("changed")
+    assert job.instruction == "Lead in.\n\nline one\nline two\n"
+    assert prompt(store.load(job.id)) == job.instruction
+    assert store.brief_copy_path(job.id).read_text() == "line one\nline two\n"
+    assert store.load(job.id).brief_path == str(f.resolve())
+
+
+def test_a_brief_without_an_instruction_is_the_whole_task(store, repo, tmp_path):
+    from polyphony.jobs import read_brief
+    f = tmp_path / "brief.md"
+    f.write_text("brief only")
+    assert _job(store, repo, "", brief=read_brief(str(f), repo)).instruction == "brief only"
+
+
+def test_read_brief_takes_a_relative_path_from_the_base(repo):
+    from polyphony.jobs import read_brief
+    (repo / "b.md").write_text("hi")
+    assert read_brief("b.md", repo) == ((repo / "b.md").resolve(), "hi")
+
+
+def test_a_job_without_a_brief_has_no_brief_file(store, repo):
+    job = _job(store, repo, "true")
+    assert job.brief_path is None
+    assert not store.brief_copy_path(job.id).exists()
+
+
+def test_a_job_record_from_before_briefs_still_loads(store, repo):
+    job = _job(store, repo, "true")
+    f = store.path(job.id) / "job.json"
+    record = json.loads(f.read_text())
+    del record["brief_path"]
+    f.write_text(json.dumps(record))
+    assert store.load(job.id).brief_path is None

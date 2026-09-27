@@ -7,6 +7,7 @@ Polyphony bug, which the SDK reports as a generic crash and logs here.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import time
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from polyphony.workspace import WorkspaceError
 MAX_WAIT_SECONDS = 240  # below MCP clients' tool-call timeouts
 OUTPUT_TAIL_CHARS = 8000
 CHECK_TAIL_CHARS = 4000
+INSTRUCTION_TAIL_CHARS = 200
 MODES = [m.value for m in Mode]
 WITHHELD_NOTE = (
     "These secret-looking files were kept out of the job's copy. If the task needs "
@@ -75,6 +77,28 @@ def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
         raise ValueError("timeout_minutes must be positive.")
     if check and mode != "code":
         raise ValueError("check runs only in code mode; review mode edits nothing.")
+
+
+def _task(instruction: str, brief_path: str | None, root: Path) -> tuple[Path, str] | None:
+    """The brief, read and checked, if one was named; refuses a delegate with no task.
+
+    Before any executor is chosen or copy made, so a bad path costs nothing.
+    """
+    if brief_path:
+        return jobs.read_brief(brief_path, root)
+    if not instruction.strip():
+        raise ValueError("Give the task as instruction, brief_path, or both.")
+    return None
+
+
+def _model(model: str | None, what: str = "model") -> str | None:
+    """A model the caller named, or None for the project's. Blank is a mistake,
+    not a request for the default: the default is what leaving it out gives."""
+    if model is None:
+        return None
+    if not model.strip():
+        raise ValueError(f"{what} is blank; name a model, or leave it out for the project's.")
+    return model.strip()
 
 
 def _check_named(
@@ -160,9 +184,15 @@ def _summary(store: JobStore, job: Job) -> dict:
         "repo": job.repo,
         "workdir": job.workdir,
         "elapsed_seconds": round(end - (job.started_at or job.created_at), 1),
+        # So the caller can confirm the whole task arrived. Revise feedback is not included.
+        "instruction_chars": len(job.instruction),
+        "instruction_sha256": hashlib.sha256(job.instruction.encode()).hexdigest(),
+        "instruction_tail": job.instruction[-INSTRUCTION_TAIL_CHARS:],
     }
     if job.withheld:  # known from the start, so shown even while queued
         info.update(withheld=job.withheld, withheld_note=WITHHELD_NOTE)
+    if job.brief_path:
+        info["brief_path"] = job.brief_path
     if job.state == "queued":
         return info
     # A running job's output is whatever the executor has written so far.
@@ -206,18 +236,21 @@ def build_server(
                 or ProjectConfig(name=root.name, path=root))
 
     def create(project: ProjectConfig, instruction: str, executor: str, mode: str,
-               timeout_minutes: int, check: str | None) -> Job:
-        """check None uses the project's command; "" runs none."""
+               timeout_minutes: int, check: str | None,
+               brief: tuple[Path, str] | None = None, model: str | None = None) -> Job:
+        """check None uses the project's command; "" runs none. model None
+        uses the project's for the executor."""
         return jobs.create_job(
             store,
             project=project,
             instruction=instruction,
             executor=executor,
             mode=mode,
-            model=project.models.get(executor),
+            model=model or project.models.get(executor),
             timeout_seconds=timeout_minutes * 60,
             check=project.check if check is None else (check.strip() or None),
             check_timeout_seconds=project.check_timeout_minutes * 60,
+            brief=brief,
         )
 
     def launched(job: Job) -> Job:
@@ -225,8 +258,10 @@ def build_server(
         return store.refresh(store.load(job.id))
 
     def start(project: ProjectConfig, instruction: str, executor: str, mode: str,
-              timeout_minutes: int, check: str | None) -> Job:
-        return launched(create(project, instruction, executor, mode, timeout_minutes, check))
+              timeout_minutes: int, check: str | None,
+              brief: tuple[Path, str] | None = None, model: str | None = None) -> Job:
+        return launched(create(project, instruction, executor, mode, timeout_minutes, check,
+                               brief, model))
 
     def quota_state(name: str) -> dict | None:
         entry = usage_cache.cached(name)
@@ -274,12 +309,15 @@ def build_server(
 
     @server.tool()
     def delegate(
-        instruction: str,
+        instruction: str = "",
+        *,
         repo: str,
         executor: str | None = None,
         mode: str = "code",
         timeout_minutes: int = 30,
         check: str | None = None,
+        brief_path: str | None = None,
+        model: str | None = None,
     ) -> dict:
         """Start a task with another agent CLI in a private copy of repo,
         returning a job_id at once. mode "code" lets the agent edit files;
@@ -289,33 +327,51 @@ def build_server(
         were passed over. check is a shell command run in the copy once the
         agent succeeds (code mode only), overriding the repository's
         configured one; "" skips it. Nothing reaches the repository until you
-        call apply. Follow up with status."""
+        call apply. Follow up with status.
+
+        brief_path names a UTF-8 file (at most 200 KB; relative to repo) whose
+        text follows instruction, after a blank line, as the task; use it for
+        any long brief, which can be cut short when passed inline. It is
+        copied at once, so later edits to the file don't reach the job. Give
+        instruction, brief_path, or both. instruction_chars and
+        instruction_tail in the result show the task arrived whole. model
+        overrides the repository's model for the executor that runs, so name
+        executor with it."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
-            project = project_for(_toplevel(repo))
+            model = _model(model)
+            root = _toplevel(repo)
+            brief = _task(instruction, brief_path, root)
+            project = project_for(root)
             with store.lock():
                 chosen, skipped = _choose(
                     executor, project, executors, active_counts(store),
                     lambda name: out_of_quota(usage_cache.report(name)), Mode(mode),
                 )
-                job = start(project, instruction, chosen, mode, timeout_minutes, check)
+                job = start(project, instruction, chosen, mode, timeout_minutes, check,
+                            brief, model)
             return {**_summary(store, job), "skipped": skipped}
 
     @server.tool()
     def delegate_many(
-        instruction: str,
+        instruction: str = "",
+        *,
         repo: str,
         executors: list[str],
         mode: str = "code",
         timeout_minutes: int = 30,
         check: str | None = None,
+        brief_path: str | None = None,
+        models: dict[str, str] | None = None,
     ) -> dict:
         """Start the same task with each named executor at once, one job per
         executor, each in its own copy of repo. This spends quota on every
         executor named, so use it only for a risky change where comparing two
         diffs is worth that; apply at most one and discard the rest. Starts
         nothing unless every executor is available and below its limit of
-        active jobs. check works as in delegate."""
+        active jobs. check and brief_path work as in delegate; every job gets
+        the same brief. models maps an executor named here to the model it
+        should use instead of the repository's."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
             if not executors:
@@ -323,7 +379,16 @@ def build_server(
             repeated = sorted({n for n in executors if executors.count(n) > 1})
             if repeated:
                 raise ValueError(f"Executor(s) named more than once: {', '.join(repeated)}.")
-            project = project_for(_toplevel(repo))
+            models = models or {}
+            stray = [n for n in models if n not in executors]
+            if stray:
+                raise ValueError(
+                    f"models names executor(s) not in executors: {', '.join(stray)}."
+                )
+            models = {n: _model(m, f"models[{n!r}]") for n, m in models.items()}
+            root = _toplevel(repo)
+            brief = _task(instruction, brief_path, root)
+            project = project_for(root)
             with store.lock():
                 running = active_counts(store)
                 for name in executors:
@@ -332,8 +397,8 @@ def build_server(
                 created: list[Job] = []
                 try:
                     for n in executors:
-                        created.append(
-                            create(project, instruction, n, mode, timeout_minutes, check))
+                        created.append(create(project, instruction, n, mode, timeout_minutes,
+                                              check, brief, models.get(n)))
                 except BaseException:
                     for job in created:
                         shutil.rmtree(store.path(job.id), ignore_errors=True)
