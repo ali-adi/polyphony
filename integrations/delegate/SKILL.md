@@ -72,3 +72,6 @@ Read `error` and `output_tail`.
   keeps its previous changes, the check runs again, and the diff covers both
   attempts, so review it all again. If the second attempt is also wrong,
   `discard` and do the task yourself.
+- **Missing secret**: `withheld` in `status` lists secret-looking files (`.env`,
+  keys) kept out of the copy. If the failure comes from one being missing, tell
+  the user; only they should add it to `allow_secrets` in the project config.

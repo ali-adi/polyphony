@@ -69,6 +69,8 @@ def jobs(store, job_id):
             value = getattr(job, key)
             if value not in (None, ""):
                 click.echo(f"{key:<10} {value}")
+        if job.withheld:
+            click.echo(f"{'withheld':<10} {', '.join(job.withheld)} (see allow_secrets)")
         if job.applied_paths:
             click.echo(f"{'applied':<10} {', '.join(job.applied_paths)}")
         click.echo(f"{'task':<10} {job.instruction}")

@@ -9,6 +9,12 @@ The clone starts at HEAD, then takes the working tree as it is now:
 uncommitted edits, new files, and gitignored files. The edits and new files
 are committed in the copy as a snapshot, so the job's diff is only what the
 agent changed, not the user's own work in progress.
+
+Secret-looking files (SECRET_PATTERNS) are the exception: an untracked or
+gitignored `.env` is where a repository keeps its API keys, and copying it
+would hand them to every agent. They are withheld unless the project's
+`allow_secrets` names them. A tracked one is in HEAD, so the clone has it
+regardless; withholding covers only what the overlay would add.
 """
 
 from __future__ import annotations
@@ -29,6 +35,20 @@ OVERLAY_SKIP = frozenset({
 })
 OVERLAY_MAX_BYTES = 50 * 1024 * 1024
 IGNORE_FILE = ".polyphonyignore"
+
+# Untracked or gitignored files the overlay withholds, matched on the basename
+# at any depth: dotenv files, private keys and keystores, and the credential
+# files of package managers and cloud SDKs. Only the private half of an SSH key
+# pair matches (id_rsa, not id_rsa.pub). Templates meant to be copied, like
+# .env.example, hold no real values and are let through (SECRET_TEMPLATES).
+SECRET_PATTERNS = (
+    ".env", ".env.*",
+    "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    ".netrc", ".npmrc", ".pypirc",
+    "credentials.json", "service-account*.json",
+)
+SECRET_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template", ".env.dist"})
 SNAPSHOT_MESSAGE = "polyphony: working-tree snapshot"
 
 
@@ -51,11 +71,14 @@ class Workspace:
     path: Path
     git_dir: Path | None = None
     skipped: list[str] = field(default_factory=list)
+    # Secret-looking paths the overlay left out (see SECRET_PATTERNS), repo-relative.
+    withheld: list[str] = field(default_factory=list)
+    allow_secrets: tuple[str, ...] = ()
 
     @classmethod
     def create(
         cls, source: str | Path, path: str | Path, exclude: tuple[str, ...] = (),
-        git_dir: str | Path | None = None,
+        git_dir: str | Path | None = None, allow_secrets: tuple[str, ...] = (),
     ) -> "Workspace":
         """Clone `source` at its current HEAD into `path`, then overlay its working tree.
 
@@ -65,6 +88,10 @@ class Workspace:
         `git_dir` puts the clone's git directory there instead of in `path`,
         out of the executor's workspace; see copy_git. Its config as set up
         here is saved as the trusted one.
+
+        `allow_secrets` holds globs, matched against the repo-relative path
+        or the basename, for secret-looking files the copy should get anyway
+        (a test suite's `.env.test`, say). The rest are listed in `withheld`.
 
         `--no-hardlinks` copies git's object files rather than sharing them.
         Shared (hard-linked) objects would let the copy write into the user's
@@ -81,7 +108,8 @@ class Workspace:
             timeout=300,
         )
         ws = cls(source=source_path, path=dest,
-                 git_dir=Path(git_dir) if git_dir is not None else None)
+                 git_dir=Path(git_dir) if git_dir is not None else None,
+                 allow_secrets=tuple(allow_secrets))
         if res.returncode != 0:
             ws.remove()
             raise WorkspaceError(f"Could not copy {source_path}: {res.stderr.strip()}")
@@ -111,8 +139,16 @@ class Workspace:
             ]
 
         # Edits to tracked files, staged or not, including deletions and binaries.
+        # A file staged but never committed is in this diff too, so a staged
+        # secret is excluded from it by name.
+        added = run_git(["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD"],
+                        cwd=src, timeout=120)
+        staged_secrets = [r for r in added.stdout.split("\0") if r and self._secret(r)]
+        self.withheld += staged_secrets
         patch = subprocess.run(
-            ["git", "diff", "--binary", "HEAD"], cwd=src, capture_output=True, timeout=120,
+            ["git", "diff", "--binary", "HEAD", "--",
+             *(f":(exclude,literal){r}" for r in staged_secrets)],
+            cwd=src, capture_output=True, timeout=120,
         )
         if patch.returncode != 0:
             raise WorkspaceError(f"Could not read uncommitted edits: {patch.stderr.decode().strip()}")
@@ -130,6 +166,7 @@ class Workspace:
             listed = run_git(["ls-files", "-z", *flags], cwd=src, timeout=120)
             for rel in filter(None, listed.stdout.split("\0")):
                 self._copy_tree(rel.rstrip("/"), patterns)
+        self.withheld = sorted(set(self.withheld))  # the two listings can overlap
 
         run_git(["add", "-A"], cwd=str(self.path))
         if run_git(["diff", "--cached", "--quiet"], cwd=str(self.path)).returncode != 0:
@@ -163,6 +200,9 @@ class Workspace:
         for r in files:
             if excluded(r):
                 continue
+            if self._secret(r):
+                self.withheld.append(r)
+                continue
             s, d = self.source / r, self.path / r
             if not s.is_symlink() and s.is_file() and s.stat().st_size > OVERLAY_MAX_BYTES:
                 self.skipped.append(r)
@@ -174,6 +214,17 @@ class Workspace:
                 d.symlink_to(os.readlink(s))
             elif s.is_file():
                 shutil.copy2(s, d)
+
+    def _secret(self, rel: str) -> bool:
+        """Whether the overlay withholds `rel`: its basename looks like a
+        secret, and no allow_secrets glob names it."""
+        name = Path(rel).name
+        if name in SECRET_TEMPLATES or not any(
+            fnmatch.fnmatchcase(name, p) for p in SECRET_PATTERNS
+        ):
+            return False
+        return not any(fnmatch.fnmatchcase(rel, p) or fnmatch.fnmatchcase(name, p)
+                       for p in self.allow_secrets)
 
     def remove(self) -> None:
         shutil.rmtree(self.path, ignore_errors=True)

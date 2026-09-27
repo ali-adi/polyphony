@@ -72,6 +72,7 @@ class BaseExecutor(ABC):
         timeout_seconds: int = 1800,
         output_path: Path | None = None,
         on_start: Callable[[int], None] | None = None,
+        env: dict[str, str] | None = None,
     ) -> ExecutorResult:
         """Run the CLI once.
 
@@ -84,6 +85,9 @@ class BaseExecutor(ABC):
         The CLI leads its own process group, so a timeout kills everything it
         started, not just the CLI. on_start receives that group's id, which
         cancel needs because the group is no longer the worker's.
+
+        `env` replaces the inherited environment when given; the worker
+        passes one with the project's env_scrub variables removed.
         """
         if not self.is_available():
             return ExecutorResult(
@@ -102,6 +106,7 @@ class BaseExecutor(ABC):
                 with subprocess.Popen(
                     argv,
                     cwd=cwd,
+                    env=env,
                     stdin=subprocess.PIPE,
                     stdout=out,
                     stderr=err,

@@ -67,6 +67,14 @@ edit-capable agent allows every tool, shell included, without asking.
   `.git` or `commondir` pointers to other repositories.
 - Nothing lands until you call `apply`, and `apply` only stages. You commit.
   It applies a patch, so the job's internal commit never enters your history.
+- Secret-looking files the copy would otherwise take from your working tree
+  (untracked or gitignored `.env`, `.env.*` but not `.env.example`, private keys,
+  `.netrc`, `.npmrc`, `credentials.json`, and so on; `SECRET_PATTERNS` in
+  `workspace.py`) are withheld, at any depth, and `status` lists them as
+  `withheld`. A secret you have committed is in the clone regardless.
+- The check does not see credential-looking environment variables (`*_API_KEY`,
+  `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`). The agent keeps them,
+  since its CLI may authenticate with one; `env_scrub` removes others from both.
 - Polyphony refuses `git push` before spawning git.
 - Jobs run in a detached process and survive the client disconnecting. State is
   in `~/.polyphony/jobs/`, so any MCP client can check any job.
@@ -123,6 +131,8 @@ check: .venv/bin/pytest -q          # run in the copy after a code job succeeds
 check_timeout_minutes: 10           # default 10
 max_parallel:                       # active jobs per executor, across all projects (default: no limit)
   agy: 2
+allow_secrets: [.env.test]          # withheld secret-looking files the copy gets anyway (path or basename globs)
+env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the check
 ```
 
 A repository with no config works too, just with no provisioning and the default

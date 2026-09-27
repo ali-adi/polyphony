@@ -1124,3 +1124,73 @@ def test_refresh_under_the_store_lock_does_not_deadlock(store, repo):
     worker.start()
     worker.join(timeout=10)
     assert done == [0]
+
+
+# --- Secrets: withheld files, and environment variables kept from the agent and the check. ---
+
+
+def test_a_job_records_the_secrets_its_copy_withheld(store, repo):
+    (repo / ".env").write_text("API_KEY=real\n")
+    (repo / ".env.example").write_text("API_KEY=\n")
+    job = _job(store, repo, "true")
+    assert job.withheld == [".env"]
+    assert not (Path(job.workdir) / ".env").exists()
+    assert (Path(job.workdir) / ".env.example").exists()
+    assert store.load(job.id).withheld == [".env"]
+
+
+def test_allow_secrets_from_the_project_reach_the_copy(store, repo):
+    (repo / ".env").write_text("API_KEY=real\n")
+    project = ProjectConfig(name="demo", path=repo, allow_secrets=[".env"])
+    job = create_job(store, project=project, instruction="true", executor="shell", mode="code")
+    assert job.withheld == []
+    assert (Path(job.workdir) / ".env").exists()
+
+
+def test_env_scrub_keeps_variables_from_the_executor(store, repo, fake_agy, monkeypatch):
+    monkeypatch.setenv("SCRUB_ME_PLEASE", "hidden")
+    monkeypatch.setenv("KEEP_ME", "visible")
+    fake_agy("env")
+    project = ProjectConfig(name="demo", path=repo, env_scrub=["SCRUB_ME_*"])
+    job = create_job(store, project=project, instruction="x", executor="agy", mode="code")
+    run(store.path(job.id))
+    out = store.output_path(job.id).read_text()
+    assert store.load(job.id).state == "succeeded", out
+    assert "KEEP_ME=visible" in out
+    assert "SCRUB_ME_PLEASE" not in out
+
+
+def test_the_executor_keeps_its_credentials_by_default(store, repo, fake_agy, monkeypatch):
+    monkeypatch.setenv("AGY_API_KEY", "needed")
+    fake_agy("env")
+    job = _job(store, repo, "x", executor="agy")
+    run(store.path(job.id))
+    assert "AGY_API_KEY=needed" in store.output_path(job.id).read_text()
+
+
+def test_the_check_loses_credential_variables_but_keeps_path(store, repo, monkeypatch):
+    monkeypatch.setenv("FOO_API_KEY", "k")
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("DB_PASSWORD", "p")
+    monkeypatch.setenv("foo_api_key", "lower")  # names are matched case-sensitively
+    monkeypatch.setenv("EXTRA_SCRUB", "e")
+    project = ProjectConfig(name="demo", path=repo, env_scrub=["EXTRA_*"])
+    job = create_job(store, project=project, instruction="true", executor="shell",
+                     mode="code", check="env")
+    run(store.path(job.id), executors=FAKE)
+    assert store.load(job.id).check_passed is True
+    seen = store.check_path(job.id).read_text()
+    for gone in ("FOO_API_KEY", "GH_TOKEN", "DB_PASSWORD", "EXTRA_SCRUB"):
+        assert f"{gone}=" not in seen, gone
+    assert "foo_api_key=lower" in seen
+    assert "PATH=" in seen
+
+
+def test_a_job_json_from_before_the_secrets_fields_still_loads(store, repo):
+    job = _job(store, repo, "true")
+    f = store.path(job.id) / "job.json"
+    data = json.loads(f.read_text())
+    del data["withheld"], data["env_scrub"]
+    f.write_text(json.dumps(data))
+    loaded = store.load(job.id)
+    assert loaded.withheld == [] and loaded.env_scrub == []

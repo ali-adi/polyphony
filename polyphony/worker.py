@@ -12,7 +12,7 @@ import traceback
 from pathlib import Path
 
 from polyphony.executors import EXECUTORS, BaseExecutor, Mode
-from polyphony.jobs import JobStore, claim, prompt, run_check, snapshot
+from polyphony.jobs import JobStore, claim, prompt, run_check, scrub_env, snapshot
 
 
 def run(
@@ -39,6 +39,7 @@ def run(
         result = executors[job.executor]().execute(
             prompt(job), job.workdir, Mode(job.mode), job.model, job.timeout_seconds,
             output_path=output, on_start=started,
+            env=scrub_env(os.environ, job.env_scrub) if job.env_scrub else None,
         )
         # Its group is gone; a recorded id could be reused by the OS and hit by cancel.
         job.executor_pgid = None
