@@ -13,8 +13,8 @@ from pathlib import Path
 
 from polyphony.executors import EXECUTORS, BaseExecutor, Mode
 from polyphony.jobs import (
-    REPORT, REPORT_FILE, JobStore, claim, collect_report, executor_mode, prompt, run_check,
-    scrub_env, snapshot,
+    REPORT, REPORT_FILE, JobStore, claim, collect_report, executor_mode, prompt,
+    report_fingerprint, run_check, scrub_env, snapshot,
 )
 
 
@@ -38,6 +38,9 @@ def run(
         store.save(job)
 
     output = store.output_path(job.id)
+    if job.mode == REPORT:  # so a REPORT.md already there is not taken for this attempt's
+        job.report_before = report_fingerprint(job)
+        store.save(job)
     try:
         result = executors[job.executor]().execute(
             prompt(job), job.workdir, executor_mode(job.mode), job.model, job.timeout_seconds,

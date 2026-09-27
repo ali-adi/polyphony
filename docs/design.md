@@ -203,7 +203,8 @@ and the ledger is read as each job's last line.
 
 **A brief file is copied into the job's instruction.** Long inline instructions
 were cut short on the way in, so `brief_path` names a file instead. It is read
-once, at delegate time (at most 100 KB, UTF-8, relative to the repo), and the
+once, at delegate time (at most 100 KB, UTF-8, relative to the `repo` directory
+the caller gave, which may be below the top level), and the
 instruction, a blank line, and its text are stored together as the job's
 `instruction`: `prompt()` and every `revise` then restate the whole task from
 `job.json` alone, and later edits to the file reach no queued or revised job.
@@ -284,11 +285,20 @@ permission), the prompt asks for `REPORT.md` and nothing else, and the worker
 copies it out as the job's `report.md`. Other edits are listed as
 `stray_changes` rather than prevented, since no CLI can grant write access to
 one file. A symlinked `REPORT.md` is not read, since it could point at any
-file on the machine. A tracked `REPORT.md` the job left unchanged is not taken
-as the report either, so an old report is never returned as the new one; the
-cost is that an agent writing exactly the tracked text fails the job. That is
-kept, rather than accepting any `REPORT.md` present, because a stale report
-passed off as fresh is worse than a rerun.
+file on the machine, nor a hard-linked one, which could be any file the user
+owns; it is opened without following links and checked on the open file. A
+`REPORT.md` already there is not taken as the report either: the worker records
+its inode, size and change times before each attempt, and one this attempt did
+not touch is refused, as is a tracked one the job left unchanged. That covers a
+report in the repository, and an earlier attempt's after `revise`. A gitignored
+`REPORT.md`, which the overlay would otherwise bring over from the working tree,
+is removed from a report job's copy at create, so the agent does not build on
+it. So an old report is never returned as the new one; the cost is that an
+agent must rewrite one it finds. That is kept, rather than accepting any
+`REPORT.md` present, because a stale report passed off as fresh is worse than a
+rerun. The saved report is capped at 5 MB (`REPORT_MAX_BYTES`) and its length
+recorded, and `status` reads only the end of `output.txt` and the check output,
+so an executor cannot make the long-lived server load gigabytes.
 
 **Provisioning failure is fatal.** A partly provisioned copy runs, then
 fails tests for reasons unrelated to the agent's work
