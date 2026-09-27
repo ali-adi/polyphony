@@ -153,10 +153,19 @@ The check gets its own process group, killed on timeout, and the job records
 that group so `cancel` kills it too.
 
 **`apply` is a patch.** The job's changes are exported with
-`git diff --binary` and staged with `git apply --index`, which is atomic. If any
+`git diff --binary` and staged with `git apply --index`. If any
 hunk does not apply to the repository as it is now, including over uncommitted
 edits, nothing changes and git's message is passed back. No conflict markers are
-ever written.
+ever written. `git apply` is not atomic once it starts writing: it removes every
+file it rewrites first, and a write that then fails (a file where a directory
+still holds an ignored file) leaves those removals behind. So `apply` copies the
+working-tree state of every path the patch touches into the job's directory
+beforehand and puts it back after any failed `git apply`. Before applying it
+refreshes the index's stat data (`update-index -q --refresh`, as `git status`
+does), so a file touched but unchanged is not taken for an unstaged edit. It
+falls back to the working tree alone only when the patch's files do have
+unstaged edits; any other `--index` failure, such as a locked index, is
+reported with git's reason.
 
 `apply(paths=...)` exports only those files (`git diff -- <paths>`) through the
 same path. A rename is one change with two paths, so naming either side exports
@@ -173,7 +182,9 @@ current content of every file a job touches. A job whose files agree in both
 and whose patch fits goes on both, as `apply --index` would stage it; one that
 fits only the working-tree index would land unstaged, as `apply` falls back to.
 Blobs go to a scratch object directory that borrows the repository's objects as
-an alternate, so the pre-check writes nothing to the repository. Only if every
+an alternate, and the scratch indexes are written whole (`core.splitIndex`
+off, the split index's shared file copied alongside), so the pre-check writes
+nothing to the repository. Only if every
 patch fits does each go through `apply` itself, so the ledger and
 `applied_paths` stay as they would be; if one fails then anyway (the repository
 changed meanwhile), it stops and says which landed. It takes whole jobs only:

@@ -74,8 +74,10 @@ one `apply` at a time: it checks every patch on top of the ones before it and
 applies all or none, so two jobs that conflict are found before either lands.
 Run it with `dry_run=true` first to see `overlaps` (files more than one job
 touched: read those hunks together) and `unstaged` (jobs that will land unstaged
-over the user's own edits). On `error`, nothing changed: it names the job that
-does not fit. Call `apply_many` again without it, then apply that one's work by
+over the user's own edits). On `error`, it names the job that does not fit; if
+`applied` is empty, nothing changed, and otherwise the jobs in `applied` are
+already staged (the repository changed while it ran), so leave them out next
+time. Call `apply_many` again without the failing job, then apply that one's work by
 hand or delegate it again on top (its copy never sees the other jobs, so
 `revise` cannot fix a conflict with them). Not for `delegate_many` results, which are alternatives: apply one.
 

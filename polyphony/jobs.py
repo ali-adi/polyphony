@@ -7,6 +7,7 @@ so a job started from one MCP client can be checked from another.
 from __future__ import annotations
 
 import fcntl
+import filecmp
 import fnmatch
 import json
 import os
@@ -772,9 +773,15 @@ def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
 def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[str]:
     """Stage a succeeded job's changes in the repository, without committing.
 
-    The only operation that writes to the user's repository. `git apply` is
-    atomic: if any hunk does not apply to the repository as it is now,
-    including over uncommitted edits, nothing is changed.
+    The only operation that writes to the user's repository. If any hunk
+    does not apply to the repository as it is now, including over
+    uncommitted edits, `git apply` changes nothing. A write that fails part
+    way (a file where a directory still holds an ignored file) does leave
+    git's earlier removals behind, so every file the patch touches is saved
+    first and put back then: either way, a refusal leaves the repository as
+    it was. Only when the --index apply fails over the patch's files having
+    unstaged edits does it go to the working tree alone, unstaged; any other
+    failure (a locked index, say) is reported with git's own reason.
 
     `paths` limits it to some of the job's files; without it, everything not
     yet applied goes. Returns the entries of files_changed applied this time.
@@ -790,19 +797,35 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     if not job.files_changed:
         raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
     files, pathspecs = _select(job, paths)
+    _require_repo(job.repo)
 
     patch = _export(store, job, pathspecs)
-    res = run_git(["apply", "--index", str(patch)], cwd=job.repo)
-    unstaged = False
-    if res.returncode != 0 and run_git(["apply", "--check", str(patch)], cwd=job.repo).returncode == 0:
-        # The job started from the working tree, so a file the user had edited but not staged
-        # no longer matches the index. Apply to the working tree only, leaving staging to them.
-        res = run_git(["apply", str(patch)], cwd=job.repo)
-        unstaged = res.returncode == 0
+    covered = _covered(job, pathspecs)
+    # `apply --index` compares stat data, not content, so a file saved or touched without
+    # changing would pass for an unstaged edit. Refresh it first, as git status does.
+    run_git(["update-index", "-q", "--refresh"], cwd=job.repo)
+    lost: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="saved-", dir=store.path(job.id)) as keep:
+        saved = _save(Path(job.repo), covered, Path(keep))
+        res = run_git(["apply", "--index", str(patch)], cwd=job.repo)
+        unstaged = False
+        if res.returncode != 0:
+            lost = _put_back(Path(job.repo), saved)
+            if (not lost and _unstaged_edits(job.repo, covered)
+                    and run_git(["apply", "--check", str(patch)], cwd=job.repo).returncode == 0):
+                # The job started from the working tree, so a file the user had edited but
+                # not staged no longer matches the index. Apply to the working tree only,
+                # leaving staging to them.
+                res = run_git(["apply", str(patch)], cwd=job.repo)
+                unstaged = res.returncode == 0
+                if not unstaged:
+                    lost = _put_back(Path(job.repo), saved)
     if res.returncode != 0:
+        changed = (f"git stopped part way, and these could not be put back as they were: "
+                   f"{', '.join(lost)}" if lost else "nothing was changed")
         raise JobError(
             f"Job {job.id} does not apply cleanly to the repository as it is now; "
-            f"nothing was changed:\n{res.stderr.strip()}"
+            f"{changed}:\n{res.stderr.strip()}"
         )
     job.applied_unstaged = unstaged
     job.applied_paths += files
@@ -824,6 +847,99 @@ def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
     return patch
 
 
+def _require_repo(repo: str) -> None:
+    """Refuse readably when the repository has been moved or deleted since the
+    job was made: git run in a missing directory raises FileNotFoundError,
+    which reaches the lead only as a bare tool failure."""
+    if not Path(repo).is_dir():
+        raise JobError(f"The repository {repo} no longer exists (moved or deleted?); "
+                       "nothing was applied.")
+
+
+def _covered(job: Job, pathspecs: list[str]) -> list[str]:
+    """Every path the exported patch touches: all the job touched, or those
+    `pathspecs` name (literal, so each also covers anything under it)."""
+    touched = _touched(job)
+    if not pathspecs:
+        return touched
+    return [p for p in touched if any(p == s or p.startswith(s + "/") for s in pathspecs)]
+
+
+def _unstaged_edits(repo: str, paths: list[str]) -> bool:
+    """Whether any of `paths` differs between the working tree and the index."""
+    res = run_git(["--literal-pathspecs", "diff", "--no-ext-diff", "--quiet", "--", *paths],
+                  cwd=repo)
+    return res.returncode == 1
+
+
+def _save(repo: Path, paths: list[str], into: Path) -> list[tuple[str, str, str, int]]:
+    """What each of `paths` is in the working tree now, for _put_back.
+
+    git apply removes every file it rewrites before writing any, and stops
+    at the first write that fails, leaving those removals behind, the only
+    copy of an unstaged edit included. So each file's bytes are copied into
+    `into` first. A path under a symlink is left out: git apply never writes
+    beyond one, and putting back must not either.
+    """
+    saved = []
+    for n, rel in enumerate(paths):
+        parts = rel.split("/")
+        if any(repo.joinpath(*parts[:i]).is_symlink() for i in range(1, len(parts))):
+            continue
+        path = repo / rel
+        if path.is_symlink():
+            saved.append((rel, "link", os.readlink(path), 0))
+        elif path.is_dir():
+            saved.append((rel, "dir", "", 0))
+        elif path.is_file():
+            copy = into / str(n)
+            shutil.copyfile(path, copy)
+            saved.append((rel, "file", str(copy), path.stat().st_mode & 0o777))
+        elif not path.exists():
+            saved.append((rel, "absent", "", 0))
+    return saved
+
+
+def _put_back(repo: Path, saved: list[tuple[str, str, str, int]]) -> list[str]:
+    """Return every path _save recorded to what it was, and list those that
+    could not be. What git created goes first, deepest first, then the
+    directories it removed, then the files; a path already as it was is not
+    touched."""
+    def clear(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            path.rmdir()  # only empty: one git made, for a file of its own
+        elif os.path.lexists(path):
+            path.unlink()
+
+    rank = {"absent": 0, "dir": 1, "file": 2, "link": 2}
+    lost = []
+    for rel, kind, value, mode in sorted(
+        saved, key=lambda s: (rank[s[1]], -s[0].count("/") if s[1] == "absent" else s[0].count("/"))
+    ):
+        path = repo / rel
+        try:
+            if kind == "absent":
+                clear(path)
+            elif kind == "dir":
+                if not path.is_dir() or path.is_symlink():
+                    clear(path)
+                    path.mkdir(parents=True)
+            elif kind == "link":
+                if not path.is_symlink() or os.readlink(path) != value:
+                    clear(path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(value, path)
+            elif (path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o777 != mode
+                  or not filecmp.cmp(value, path, shallow=False)):
+                clear(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(value, path)
+                os.chmod(path, mode)
+        except OSError:
+            lost.append(rel)
+    return lost
+
+
 def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> dict:
     """Apply several succeeded jobs to one repository in order, or none of them.
 
@@ -841,7 +957,9 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     applied and not_applied (job ids), overlaps (each file more than one job
     touches, with those jobs), unstaged (jobs that land, or would land,
     unstaged because they touch files with unstaged edits), dry_run, and
-    error (None, or which job did not apply and why).
+    error (None, or which job did not apply and why). An error with applied
+    empty changed nothing; one after the pre-check passed (the repository
+    changed meanwhile) comes with the jobs already staged in applied.
     """
     if not job_ids:
         raise ValueError("Name at least one job.")
@@ -869,6 +987,7 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     if len(repos) > 1:
         raise JobError(f"The jobs are for different repositories ({', '.join(repos)}); "
                        "apply_many applies to one.")
+    _require_repo(repos[0])
 
     touched = {job.id: _touched(job) for job in batch}
     by_path: dict[str, list[str]] = {}
@@ -942,14 +1061,26 @@ def _precheck(
         if index.exists():
             shutil.copyfile(index, staged)
             shutil.copyfile(index, tree)
+            # A split index (core.splitIndex) keeps most entries in a sharedindex.* file that
+            # git looks for next to the index it reads, so those come along. Writing with
+            # splitIndex off keeps each scratch index whole, so git neither writes new shared
+            # index files into the repository's .git nor expires the one its index needs.
+            for shared in index.parent.glob("sharedindex.*"):
+                shutil.copyfile(shared, Path(tmp) / shared.name)
         base_env = dict(os.environ, GIT_OBJECT_DIRECTORY=str(Path(tmp) / "objects"),
                         GIT_ALTERNATE_OBJECT_DIRECTORIES=objects)
         (Path(tmp) / "objects").mkdir()
 
         def git(index_file: Path, args: list[str]) -> subprocess.CompletedProcess:
-            return run_git(args, cwd=repo, env=dict(base_env, GIT_INDEX_FILE=str(index_file)))
+            return run_git(["-c", "core.splitIndex=false", *args], cwd=repo,
+                           env=dict(base_env, GIT_INDEX_FILE=str(index_file)))
 
         every = sorted({p for paths in touched.values() for p in paths})
+        # A directory a job replaces with a file is not a file update-index can read (a
+        # submodule's is: it records the submodule's commit). Its tracked files are in
+        # `every` on their own, so leaving the directory out loses nothing.
+        every = [p for p in every if not (Path(repo, p).is_dir() and not Path(repo, p).is_symlink()
+                                          and not Path(repo, p, ".git").exists())]
         res = git(tree, ["update-index", "--add", "--remove", "--", *every])
         if res.returncode != 0:
             return [], f"Could not read the working tree's state: {res.stderr.strip()}"
