@@ -1,9 +1,3 @@
-"""Delegated jobs: one executor run in a private copy of the repository, tracked on disk.
-
-State lives in ~/.polyphony/jobs/<id>/ rather than in any client's session,
-so a job started from one MCP client can be checked from another.
-"""
-
 from __future__ import annotations
 
 import fcntl
@@ -31,23 +25,12 @@ from polyphony.guard import run_git
 from polyphony.workspace import DIFF_FLAGS, Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
-# agy takes the whole prompt as one argv string, which
-# Linux caps at 128 KiB (MAX_ARG_STRLEN); over it the executor cannot even start.
-# The prompt limit stays under that, and a brief under the prompt limit leaves
-# room for the instruction, report mode's request, and revise feedback.
+# agy takes the whole prompt as one argv string; Linux caps one argument at 128 KiB (MAX_ARG_STRLEN).
 MAX_PROMPT_BYTES = 120 * 1024
-# A brief is read whole into the job record and the executor's prompt.
 MAX_BRIEF_BYTES = 100 * 1024
-# A queued job whose worker has not claimed it by now never will (launch waits ~1s).
 QUEUE_GRACE_SECONDS = 60
-# Lane lifecycle. How long cancel lets a process group shut down on SIGTERM
-# before it sends SIGKILL; the tool call waits this long at most.
 CANCEL_GRACE_SECONDS = 2
 
-# A report job is a read-only audit whose findings are a file rather than
-# stdout, which a caller tends to lose. Writing that file needs edit
-# permission, so agy runs as in code mode; what keeps it to the
-# report is the instruction, and stray_changes shows whether it listened.
 CODE = "code"
 REPORT = "report"
 MODES = (CODE, REPORT)
@@ -64,12 +47,11 @@ class JobNotFound(Exception):
 
 
 class JobError(Exception):
-    """A request the job's current state cannot satisfy."""
+    pass
 
 
 class JobDisowned(JobError):
-    """The worker's job was cancelled (or marked died) under it: the record
-    is no longer the worker's to write. See save_running."""
+    pass
 
 
 @dataclass
@@ -94,60 +76,32 @@ class Job:
     error: str | None = None
     files_changed: list[str] = field(default_factory=list)
     diff_stat: str = ""
-    # Working-tree files too large to copy into the job (over OVERLAY_MAX_BYTES).
     overlay_skipped: list[str] = field(default_factory=list)
-    # Set when the latest apply had to leave its changes unstaged (they touch files with
-    # unstaged edits).
     applied_unstaged: bool = False
-    # The check command, run in the copy after a code-mode executor succeeds.
     check_command: str | None = None
     check_timeout_seconds: int = 600
     check_exit_code: int | None = None
-    check_passed: bool | None = None  # None: not run
-    check_pgid: int | None = None  # the check's own process group, for cancel
-    # "applied", "discarded" or "cancelled" once written to the ledger, so it is written once.
+    check_passed: bool | None = None
+    check_pgid: int | None = None
     outcome: str | None = None
-    # The executor leads its own process group (so a timeout can kill all it
-    # started), which the worker's group no longer covers. cancel kills both.
     executor_pgid: int | None = None
-    # Feedback from each revise, oldest first. attempt counts runs in this copy.
     feedback: list[str] = field(default_factory=list)
     attempt: int = 1
-    # Entries of files_changed already applied, so a later apply takes only the rest.
     applied_paths: list[str] = field(default_factory=list)
-    # The copy's git dir, kept outside the executor's workspace (see copy_git).
-    # None for a job from before that, whose git dir is inside the copy.
     git_dir: str | None = None
-    # When the job last became queued, so a worker that never claims it is noticed.
     queued_at: float | None = None
-    # Lane r2-secrets. Secret-looking files the copy was not given (see
-    # workspace.SECRET_PATTERNS), and the project's env_scrub globs, recorded so
-    # the detached worker can keep those variables from the executor and check.
     withheld: list[str] = field(default_factory=list)
     env_scrub: list[str] = field(default_factory=list)
-    # Lane r2-brief. The brief file the task came from, resolved, for display
-    # only: its text was copied into `instruction` and brief.md at create.
     brief_path: str | None = None
-    # Report mode: where the report was saved (jobs/<id>/report.md), and the files
-    # the executor changed besides REPORT.md, which it was told not to touch.
     report_path: str | None = None
     stray_changes: list[str] = field(default_factory=list)
-    # Lane export. The commit snapshot() made (or found) in the copy: diff and
-    # apply read base_commit..head_commit, never the copy's live HEAD, which
-    # anything left running in the copy could move after the lead reviewed it.
-    # None for a job from before this, which reads HEAD.
     head_commit: str | None = None
-    # Lane reportapi. REPORT.md as the worker found it before this attempt ran
-    # (report_fingerprint), so collect_report takes only a file the attempt wrote;
-    # the saved report's length, so status never reads it; and whether it was cut
-    # at REPORT_MAX_BYTES.
     report_before: list[int] | None = None
     report_chars: int | None = None
     report_truncated: bool = False
 
     @property
     def applied(self) -> bool:
-        """Whether any of the job has reached the repository."""
         return bool(self.applied_paths)
 
 
@@ -156,9 +110,7 @@ _JOB_FIELDS = {f.name for f in fields(Job)}
 
 class JobStore:
     def __init__(self, root: Path | None = None):
-        # Expanded and absolute: POLYPHONY_HOME=~/.polyphony from an MCP
-        # config's env block reaches here unexpanded, and a relative home
-        # would put clones under the server's cwd, often inside the user's repo.
+        # An MCP config's env block passes POLYPHONY_HOME=~/... unexpanded.
         self.root = (Path(root) if root is not None else DEFAULT_HOME).expanduser().resolve()
         self.dir = self.root / "jobs"
         self._held = threading.local()
@@ -174,15 +126,11 @@ class JobStore:
 
     def brief_copy_path(self, job_id: str) -> Path:
         return self.path(job_id) / "brief.md"
+
     def report_path(self, job_id: str) -> Path:
         return self.path(job_id) / "report.md"
 
     def save(self, job: Job) -> None:
-        """Write atomically, so a reader never sees a half-written file.
-
-        The temp file is per process and thread: two writers sharing one name
-        could each replace the other's, and the second os.replace would fail.
-        """
         d = self.path(job.id)
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / f"job.json.{os.getpid()}-{threading.get_ident()}.tmp"
@@ -194,7 +142,6 @@ class JobStore:
         if not f.exists():
             raise JobNotFound(f"No job {job_id!r} in {self.dir}.")
         data = json.loads(f.read_text())
-        # Records from before agy-only carry fields Job no longer has.
         return Job(**{k: v for k, v in data.items() if k in _JOB_FIELDS})
 
     def all(self) -> list[Job]:
@@ -205,13 +152,6 @@ class JobStore:
 
     @contextmanager
     def lock(self):
-        """Held from counting active jobs until the new job is
-        recorded, so two servers can't both take its last slot, and while a
-        job changes hands between states (claim, refresh, revise).
-
-        Reentrant within a thread: delegate holds it while refresh takes it,
-        and flock on a second descriptor would wait on its own process.
-        """
         if getattr(self._held, "depth", 0):
             self._held.depth += 1
             try:
@@ -229,25 +169,19 @@ class JobStore:
                 self._held.depth = 0
 
     def refresh(self, job: Job) -> Job:
-        """Mark a job whose worker vanished without recording a result, or
-        never claimed it (the server stopped between create_job and launch)."""
         if job.state == "running" and job.pid and not _alive(job.pid):
             error = "The worker process exited without recording a result."
         elif job.state == "queued" and _stuck(job):
             error = "The job's worker never started."
         else:
             return job
-        with self.lock():  # the worker claims under this lock, so it can't start now
-            current = self.load(job.id)  # it may have moved on since `job` was read
+        with self.lock():
+            current = self.load(job.id)
             if current.state != job.state or current.attempt != job.attempt:
                 return current
             if current.state == "queued" and not _stuck(current):
                 return current
             if current.state == "running":
-                # The executor and the check lead their own groups, so they outlive
-                # the worker, and only the worker enforced their timeouts. Left
-                # running they would keep editing the copy under a revise's new
-                # executor, or under discard's rmtree.
                 _signal_groups((current.executor_pgid, current.check_pgid), signal.SIGKILL)
                 current.executor_pgid = current.check_pgid = None
             current.state = "died"
@@ -258,8 +192,6 @@ class JobStore:
 
 
 def active_count(store: JobStore) -> int:
-    """Queued and running jobs across every project. Each job is refreshed
-    first, so a dead worker doesn't hold a slot."""
     return sum(j.state in ACTIVE for j in map(store.refresh, store.all()))
 
 
@@ -268,12 +200,6 @@ def _stuck(job: Job) -> bool:
 
 
 def claim(store: JobStore, job_id: str, attempt: int) -> Job | None:
-    """Move a queued job to running for the worker launched for `attempt`.
-
-    None if it is not that worker's to run: cancelled before it started, or
-    revised since, when a newer worker owns the next attempt. Under the
-    store lock, so revise, refresh and a late worker can't interleave.
-    """
     with store.lock():
         job = store.load(job_id)
         if job.state != "queued" or job.attempt != attempt:
@@ -287,14 +213,6 @@ def claim(store: JobStore, job_id: str, attempt: int) -> Job | None:
 
 
 def save_running(store: JobStore, job: Job) -> None:
-    """The worker's save: write its copy of a running job, unless the job is
-    no longer that worker's, and raise JobDisowned then instead.
-
-    The worker holds the record in memory for the whole run. Saving it
-    blindly would overwrite a cancel that landed meanwhile, so a job reported
-    and recorded as cancelled would end up succeeded. Under the store lock,
-    where cancel and refresh write too.
-    """
     with store.lock():
         try:
             current = store.load(job.id)
@@ -339,14 +257,6 @@ def new_job_id() -> str:
 
 
 def read_brief(path: str, base: Path) -> tuple[Path, str]:
-    """The brief file's resolved path and text, or a ValueError saying what is wrong.
-
-    A long instruction can be cut short on its way through a client, so a
-    caller writes it to a file instead. A relative path is taken from `base`,
-    the repo directory the caller gave, not the server's working directory,
-    which the caller cannot see. Read once, at delegate time: the job keeps a copy, so editing
-    the file afterwards changes neither a queued job nor a revision.
-    """
     file = (base / Path(path).expanduser()).resolve()
     if not file.exists():
         raise ValueError(f"brief_path {path!r}: no such file ({file}).")
@@ -354,7 +264,7 @@ def read_brief(path: str, base: Path) -> tuple[Path, str]:
         raise ValueError(f"brief_path {path!r}: {file} is not a regular file.")
     try:
         with file.open("rb") as f:
-            data = f.read(MAX_BRIEF_BYTES + 1)  # no more, however large the file
+            data = f.read(MAX_BRIEF_BYTES + 1)
     except OSError as e:
         raise ValueError(f"brief_path {path!r}: cannot read it: {e.strerror or e}.") from e
     if len(data) > MAX_BRIEF_BYTES:
@@ -372,13 +282,6 @@ def read_brief(path: str, base: Path) -> tuple[Path, str]:
 
 
 def check_prompt(text: str) -> None:
-    """Refuse a prompt too long for an executor that takes it as one argument,
-    or one holding a NUL byte, which no argv string can carry.
-
-    Checked when the job is created and on each revise, rather than left to
-    fail at launch with "Argument list too long" or "embedded null byte",
-    which the job would report as a Polyphony worker error.
-    """
     if "\0" in text:
         raise ValueError(
             "The task contains a NUL byte (in the instruction, brief or feedback), "
@@ -394,7 +297,6 @@ def check_prompt(text: str) -> None:
 
 
 def with_brief(instruction: str, brief: str | None) -> str:
-    """The task as the executor gets it: the instruction, a blank line, the brief."""
     if brief is None:
         return instruction
     return f"{instruction}\n\n{brief}" if instruction.strip() else brief
@@ -411,15 +313,6 @@ def create_job(
     check_timeout_seconds: int = 600,
     brief: tuple[Path, str] | None = None,
 ) -> Job:
-    """Copy the repository, provision the copy, and record the job as queued.
-
-    A check only makes sense after edits, so report mode drops it.
-
-    `brief` is read_brief's result. Its text is joined to the instruction and
-    stored as the job's instruction, so prompt() and every revision see the
-    whole task from job.json alone; brief.md keeps the brief by itself for a
-    person to read.
-    """
     job_id = new_job_id()
     workdir = store.path(job_id) / "repo"
     ws = Workspace.create(
@@ -465,14 +358,6 @@ def create_job(
 
 
 def _drop_untracked_report(ws: Workspace, base_commit: str) -> None:
-    """Remove a REPORT.md the copy has but its base commit lacks.
-
-    That is a gitignored one the overlay brought over from the working tree:
-    an old report, which the agent should not build on or be mistaken for
-    having written. Being ignored, removing it changes nothing in the diff.
-    A REPORT.md in the base commit stays, and counts only if rewritten (see
-    collect_report).
-    """
     stale = ws.path / REPORT_FILE
     if not (stale.is_symlink() or stale.is_file()):
         return
@@ -482,15 +367,6 @@ def _drop_untracked_report(ws: Workspace, base_commit: str) -> None:
 
 
 def launch(store: JobStore, job: Job) -> None:
-    """Start the job's worker, detached from the caller.
-
-    The worker double-forks (see polyphony.worker), so the process started
-    here exits almost at once. Waiting on it means no zombie is left behind
-    in a long-lived server, where it would make a dead worker look alive.
-
-    The grace a worker has to claim the job (QUEUE_GRACE_SECONDS) counts from
-    here, not from create_job.
-    """
     job_dir = store.path(job.id)
     with store.lock():
         current = store.load(job.id)
@@ -515,17 +391,10 @@ def launch(store: JobStore, job: Job) -> None:
 
 
 def task_text(instruction: str, mode: str) -> str:
-    """A first attempt's prompt: the instruction, plus report mode's request."""
     return f"{instruction}\n\n{REPORT_INSTRUCTION}" if mode == REPORT else instruction
 
 
 def prompt(job: Job) -> str:
-    """What the executor is told on this attempt.
-
-    The executor keeps no memory between runs, so a revision restates the
-    whole task: the original instruction, where it stands, and every piece of
-    feedback so far rather than only the latest.
-    """
     task = task_text(job.instruction, job.mode)
     if not job.feedback:
         return task
@@ -542,11 +411,6 @@ def prompt(job: Job) -> str:
 def revise(
     store: JobStore, job_id: str, feedback: str, timeout_seconds: int | None = None
 ) -> Job:
-    """Queue another attempt in the job's copy, on top of what the last one left.
-
-    base_commit stays put, so diff and apply cover every attempt together.
-    The caller launches the worker, as after create_job.
-    """
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is still {job.state}; wait for it or cancel it first.")
@@ -563,11 +427,9 @@ def revise(
         raise JobError(f"Job {job.id} no longer has its copy of the repository to revise.")
     if not feedback.strip():
         raise ValueError("feedback must say what to change.")
-    # Every attempt restates all feedback so far, so the prompt only grows.
     check_prompt(prompt(replace(job, feedback=[*job.feedback, feedback.strip()],
                                 attempt=job.attempt + 1)))
 
-    # Keep each attempt's output, check result and report; the next run writes fresh ones.
     for current in (store.output_path(job.id), store.check_path(job.id),
                     store.report_path(job.id)):
         if current.exists():
@@ -579,7 +441,6 @@ def revise(
         job.timeout_seconds = timeout_seconds
     job.state = "queued"
     job.queued_at = time.time()
-    # Old process groups may belong to other processes by now; cancel must not signal them.
     job.pid = job.pgid = job.executor_pgid = job.check_pgid = None
     job.started_at = job.finished_at = job.exit_code = job.error = None
     job.check_exit_code = job.check_passed = None
@@ -587,33 +448,16 @@ def revise(
     job.stray_changes = []
     job.report_chars = None
     job.report_truncated = False
-    # A cancelled attempt is not the job's outcome. The ledger keeps the last
-    # entry per job, so the outcome of this attempt replaces it.
     job.outcome = None
     store.save(job)
     return job
 
 
 def cancel(store: JobStore, job_id: str) -> Job:
-    """Stop a queued or running job, killing its executor with it.
-
-    Read, signalled and recorded under the store lock, where claim and the
-    worker's saves (save_running) happen too. So a job claimed meanwhile has
-    its groups recorded by the time they are read here, a job that finished
-    meanwhile keeps its result, and a worker still alive after the signal
-    cannot overwrite "cancelled".
-
-    SIGTERM first, so a CLI can shut down cleanly; the worker dies of it.
-    Nothing else would ever escalate, since the worker was what enforced the
-    timeout, so any group still alive CANCEL_GRACE_SECONDS later gets
-    SIGKILL. That wait is outside the lock and ends as soon as the groups do.
-    Then the job's folder goes; the ledger keeps its outcome.
-    """
     with store.lock():
         job = store.load(job_id)
         if job.state not in ACTIVE:
             return job
-        # The worker first, so it stops before it sees the executor die.
         groups = [g for g in (job.pgid, job.executor_pgid, job.check_pgid) if g]
         _signal_groups(groups, signal.SIGTERM)
         job.state = "cancelled"
@@ -643,24 +487,12 @@ def notify(job: Job) -> None:
 
 
 def _record(store: JobStore, job: Job, outcome: str) -> None:
-    """Save the job's outcome and write it to the ledger, once per job."""
     job.outcome = outcome
     store.save(job)
     ledger.record(store.root, job, outcome)
 
 
 def snapshot(job: Job) -> None:
-    """Commit the executor's work in the copy and record what changed.
-
-    Plain `git add -A` skips gitignored clone-mode paths on its own. A
-    link-mode path is a symlink, which a directory pattern like `env/` does
-    not ignore, so each one is unstaged explicitly. An exclude pathspec
-    can't do this: git exits 1 when an excluded path is also ignored.
-
-    The commit lives only in the job's private copy. apply turns it into a
-    patch, so its message and author never reach the repository's history.
-    Its id is recorded as head_commit, which diff and apply read from.
-    """
     _jgit(job, ["add", "-A"])
     for path in job.link_paths:
         _jgit(job, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", "--", path])
@@ -671,7 +503,7 @@ def snapshot(job: Job) -> None:
             "commit", "--no-verify", "-q", "-m", f"polyphony job {job.id}",
         ])
     job.head_commit = _jgit(job, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
-    # -z, so a path git would C-quote (non-ASCII, quotes, newlines) keeps its real name.
+    # -z: git C-quotes non-ASCII, quote and newline paths otherwise.
     names = _jgit(job, ["diff", "--name-only", "-z", _range(job)]).stdout
     job.files_changed = [name for name in names.split("\0") if name]
     job.diff_stat = _jgit(job, ["diff", "--stat", "--no-color", _range(job)]).stdout.rstrip()
@@ -685,7 +517,6 @@ def pending_changes(job: Job) -> list[str]:
 
 
 def _range(job: Job) -> str:
-    """What the job changed, as a revision range: base_commit to the snapshot."""
     return f"{job.base_commit}..{job.head_commit or 'HEAD'}"
 
 
@@ -695,42 +526,23 @@ def _fingerprint(st: os.stat_result) -> list[int]:
 
 
 def report_fingerprint(job: Job) -> list[int] | None:
-    """REPORT.md in the job's copy as it stands, or None if there is none.
-
-    The worker records it before each attempt runs, so collect_report can tell
-    a report this attempt wrote from one already there: an earlier attempt's,
-    or one the repository had.
-    """
     try:
         return _fingerprint(os.lstat(Path(job.workdir) / REPORT_FILE))
     except OSError:
         return None
 
 
-# A report is read in 20,000-character pages; far past this, it is not a report.
 REPORT_MAX_BYTES = 5 * 1024 * 1024
 
 
 def collect_report(store: JobStore, job: Job) -> None:
-    """Save a report job's REPORT.md as jobs/<id>/report.md, after snapshot().
-
-    Only a regular file with one link counts: a symlink could point anywhere
-    on the machine, and a hard link could be another file on it, whose
-    contents report() would hand back. It is opened without following a
-    symlink and checked on the open file, so it cannot be swapped between the
-    check and the read. It counts only if this attempt wrote it (see
-    report_fingerprint), and a REPORT.md the repository already tracks only
-    if the job changed it, so an old report is never taken for this job's.
-    At most REPORT_MAX_BYTES are kept, so the executor cannot fill the disk
-    or the server's memory with it.
-    """
     job.stray_changes = [f for f in job.files_changed if f != REPORT_FILE]
     try:
-        # O_NONBLOCK, so a FIFO named REPORT.md cannot hang the open.
+        # O_NONBLOCK: opening a FIFO named REPORT.md would otherwise hang.
         fd = os.open(Path(job.workdir) / REPORT_FILE,
                      os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
-        return  # none, or a symlink
+        return
     with os.fdopen(fd, "rb") as f:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
@@ -750,26 +562,6 @@ def collect_report(store: JobStore, job: Job) -> None:
 
 
 def run_check(store: JobStore, job: Job) -> None:
-    """Run the job's check command in its copy, output to check.txt.
-
-    The check runs code the executor may have written (a test, a conftest, a
-    Makefile), so it runs in an OS sandbox: it can write only in its copy
-    (not the copy's .git) and in a private temp dir, it has no network
-    beyond loopback, and on Linux it cannot reach the host's Unix sockets in
-    /run or /tmp or see the host's processes. Without a sandbox it does not
-    run at all. See
-    _sandbox_argv. Its environment is the server's minus credential-looking
-    variables (CHECK_SCRUB) and the project's env_scrub.
-
-    It runs after snapshot(), and the copy is reset to that snapshot
-    afterwards, so whatever it writes (caches, coverage files, lockfile
-    updates) stays out of the diff, including a revised attempt's. It gets
-    its own process group so a timeout can kill everything it started, and
-    records that group so cancel can too. On Linux it also gets its own pid
-    namespace, so what it daemonizes out of that group dies with it too. A
-    failed check leaves the job's state alone: the executor did succeed, and
-    whether the work is still worth applying is the caller's call.
-    """
     tmp = store.path(job.id) / "tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -794,7 +586,7 @@ def run_check(store: JobStore, job: Job) -> None:
         )
         job.check_pgid = proc.pid
         try:
-            save_running(store, job)  # in the try, so a cancelled job's check is killed
+            save_running(store, job)
             job.check_exit_code = proc.wait(timeout=job.check_timeout_seconds)
             job.check_passed = job.check_exit_code == 0
         except subprocess.TimeoutExpired:
@@ -807,7 +599,6 @@ def run_check(store: JobStore, job: Job) -> None:
             out.write(f"\n--- check timed out after {job.check_timeout_seconds}s; "
                       f"its process group was killed ---\n")
         finally:
-            # Anything it left running in the background would keep writing to the copy.
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -817,39 +608,22 @@ def run_check(store: JobStore, job: Job) -> None:
     _restore(job, snapshot_head)
 
 
-# Environment variables the check never gets, on top of the project's env_scrub.
-# The check runs code the executor may have written, and the sandbox has no
-# network, so it has no use for credentials; a test that needs one can be
-# given it by name in the check command. The executor keeps these (agent CLIs
-# authenticate with them) unless env_scrub names them.
 CHECK_SCRUB = ("*_API_KEY", "*_TOKEN", "*_SECRET", "*_PASSWORD", "*_CREDENTIALS")
 
 
 def scrub_env(env: Mapping[str, str], patterns: Iterable[str]) -> dict[str, str]:
-    """`env` without the variables whose names match any of `patterns`.
-
-    Case-sensitive, as names are: `*_TOKEN` leaves `my_token` alone.
-    """
     patterns = tuple(patterns)
     return {k: v for k, v in env.items()
             if not any(fnmatch.fnmatchcase(k, p) for p in patterns)}
 
 
 def _restore(job: Job, head: str) -> None:
-    """Put the copy back to the snapshot, dropping whatever the check wrote.
-
-    Ignored files stay (snapshot never picks them up). Link-mode paths are
-    untracked symlinks, so they are kept out of the clean by name.
-    """
     _jgit(job, ["reset", "--hard", "-q", head])
     keep = [arg for path in job.link_paths for arg in ("-e", f"/{path}")]
     _jgit(job, ["clean", "-f", "-d", "-q", *keep])
 
 
-# macOS sandbox profile for the check. Writes are allowed only under WORKDIR
-# (minus its .git) and TMP; network only on loopback. LaunchServices and Apple
-# events are denied because either can start a process outside the sandbox
-# (`open -a Terminal x.command`, `osascript`).
+# LaunchServices and Apple events can start a process outside the sandbox (`open -a`, `osascript`).
 _SEATBELT_PROFILE = """\
 (version 1)
 (allow default)
@@ -872,25 +646,6 @@ _SEATBELT_PROFILE = """\
 
 
 def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
-    """The command prefix that confines the check, or None if there is no sandbox.
-
-    Paths are resolved, because the sandboxes match real paths (/tmp is
-    /private/tmp on macOS), and a link-mode symlink in the copy resolves to
-    the user's own files, which stay read-only.
-
-    On Linux a fresh network namespace blocks IP, but a Unix socket with a
-    path is a file, and a read-only mount does not stop connect(): through
-    the Docker socket, the session bus (`systemd-run --user`), tmux or X11,
-    the check could start a process outside the sandbox. So empty tmpfs
-    mounts hide the dirs where such sockets live (/run, /var/run, /tmp,
-    /var/tmp), and the job dir and link-mode targets are bound back
-    read-only over them. A socket elsewhere (under $HOME, say) is still
-    reachable. The check also gets its own PID namespace, so it can neither
-    signal the user's processes nor read their environment through /proc,
-    and its own IPC, UTS and session, so it cannot push keystrokes into a
-    terminal. When the check's shell exits, or bwrap is killed, the kernel
-    kills everything else in that PID namespace.
-    """
     work = Path(os.path.realpath(job.workdir))
     tmp = Path(os.path.realpath(tmp))
     gitdir = Path(os.path.realpath(job.git_dir)) if job.git_dir else work / ".git"
@@ -906,12 +661,9 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
         exe = shutil.which("bwrap")
         if exe is None:
             return None
-        # A symlinked /var/run points into /run, which is already hidden; a
-        # tmpfs cannot be mounted on a symlink.
+        # bwrap cannot mount a tmpfs on a symlink, and /var/run's target /run is already hidden.
         hidden = [d for d in ("/run", "/var/run", "/tmp", "/var/tmp")
                   if os.path.isdir(d) and not os.path.islink(d)]
-        # Read back from the user's repo, not the copy, whose symlinks the
-        # executor controls and could point at a socket dir.
         linked = [os.path.realpath(Path(job.repo) / p) for p in job.link_paths]
         return [exe, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
                 *(arg for d in hidden for arg in ("--tmpfs", d)),
@@ -924,7 +676,6 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
 
 
 def _jgit(job: Job, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    """git in the job's copy, only ever through copy_git."""
     res = copy_git(args, job.git_dir or Path(job.workdir) / ".git", job.workdir)
     return _check(res) if check else res
 
@@ -940,7 +691,6 @@ REPORT_LIMIT = 20_000
 
 
 def read_report(store: JobStore, job_id: str) -> str:
-    """A finished report job's whole report."""
     job = store.refresh(store.load(job_id))
     if job.mode != REPORT:
         raise JobError(f"Job {job.id} is a {job.mode} job; only a report job has a report.")
@@ -951,14 +701,11 @@ def read_report(store: JobStore, job_id: str) -> str:
             f"Job {job.id} has no report: it wrote no {REPORT_FILE}. "
             f"Its output is in {store.output_path(job.id)}."
         )
-    # Bounded, for a report saved before collect_report capped its size.
     with open(job.report_path, "rb") as f:
         return f.read(REPORT_MAX_BYTES).decode("utf-8", errors="replace")
 
 
 def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LIMIT) -> dict:
-    """One page of a report job's report, so a long one can be read in parts
-    rather than cut short."""
     if offset < 0:
         raise ValueError("offset must not be negative.")
     if limit <= 0:
@@ -974,13 +721,6 @@ def report(store: JobStore, job_id: str, offset: int = 0, limit: int = REPORT_LI
 
 
 def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
-    """The job's changes against the commit it started from.
-
-    Exactly what apply would export: the snapshot's commit, not the copy's
-    HEAD, rendered with DIFF_FLAGS so the user's diff config cannot hide or
-    reshape it, and with the executor's .gitattributes overruled (see
-    workspace.NEUTRAL_ATTRIBUTES).
-    """
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is still {job.state}.")
@@ -996,22 +736,6 @@ def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
 
 
 def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple[list[str], Job]:
-    """Stage a succeeded job's changes in the repository, without committing.
-
-    The only operation that writes to the user's repository. If any hunk
-    does not apply to the repository as it is now, including over
-    uncommitted edits, `git apply` changes nothing. A write that fails part
-    way (a file where a directory still holds an ignored file) does leave
-    git's earlier removals behind, so every file the patch touches is saved
-    first and put back then: either way, a refusal leaves the repository as
-    it was. Only when the --index apply fails over the patch's files having
-    unstaged edits does it go to the working tree alone, unstaged; any other
-    failure (a locked index, say) is reported with git's own reason.
-
-    `paths` limits it to some of the job's files; without it, everything not
-    yet applied goes. Returns the entries of files_changed applied this time,
-    and the job. Once all of it is applied, the job's folder goes.
-    """
     job = store.load(job_id)
     if job.mode == REPORT:
         raise JobError(
@@ -1027,8 +751,7 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple
 
     patch = _export(store, job, pathspecs)
     covered = _covered(job, pathspecs)
-    # `apply --index` compares stat data, not content, so a file saved or touched without
-    # changing would pass for an unstaged edit. Refresh it first, as git status does.
+    # `apply --index` compares stat data, so a touched but unchanged file looks like an unstaged edit.
     run_git(["update-index", "-q", "--refresh"], cwd=job.repo)
     lost: list[str] = []
     with tempfile.TemporaryDirectory(prefix="saved-", dir=store.path(job.id)) as keep:
@@ -1039,9 +762,6 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple
             lost = _put_back(Path(job.repo), saved)
             if (not lost and _unstaged_edits(job.repo, covered)
                     and run_git(["apply", "--check", str(patch)], cwd=job.repo).returncode == 0):
-                # The job started from the working tree, so a file the user had edited but
-                # not staged no longer matches the index. Apply to the working tree only,
-                # leaving staging to them.
                 res = run_git(["apply", str(patch)], cwd=job.repo)
                 unstaged = res.returncode == 0
                 if not unstaged:
@@ -1064,13 +784,6 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple
 
 
 def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
-    """Write the job's changes to its changes.patch, only `pathspecs` if any, and return it.
-
-    Binary, so an image or other non-text file survives the trip. Literal
-    pathspecs, so a file named like a glob exports only itself. From the
-    snapshot's commit, which diff() showed, and with DIFF_FLAGS, so the
-    user's diff config cannot change which file `git apply` patches.
-    """
     patch = store.path(job.id) / "changes.patch"
     _jgit(job, ["--literal-pathspecs", "diff", "--binary", *DIFF_FLAGS, f"--output={patch}",
                 _range(job), "--", *pathspecs])
@@ -1078,17 +791,12 @@ def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
 
 
 def _require_repo(repo: str) -> None:
-    """Refuse readably when the repository has been moved or deleted since the
-    job was made: git run in a missing directory raises FileNotFoundError,
-    which reaches the lead only as a bare tool failure."""
     if not Path(repo).is_dir():
         raise JobError(f"The repository {repo} no longer exists (moved or deleted?); "
                        "nothing was applied.")
 
 
 def _covered(job: Job, pathspecs: list[str]) -> list[str]:
-    """Every path the exported patch touches: all the job touched, or those
-    `pathspecs` name (literal, so each also covers anything under it)."""
     touched = _touched(job)
     if not pathspecs:
         return touched
@@ -1096,21 +804,12 @@ def _covered(job: Job, pathspecs: list[str]) -> list[str]:
 
 
 def _unstaged_edits(repo: str, paths: list[str]) -> bool:
-    """Whether any of `paths` differs between the working tree and the index."""
     res = run_git(["--literal-pathspecs", "diff", "--no-ext-diff", "--quiet", "--", *paths],
                   cwd=repo)
     return res.returncode == 1
 
 
 def _save(repo: Path, paths: list[str], into: Path) -> list[tuple[str, str, str, int]]:
-    """What each of `paths` is in the working tree now, for _put_back.
-
-    git apply removes every file it rewrites before writing any, and stops
-    at the first write that fails, leaving those removals behind, the only
-    copy of an unstaged edit included. So each file's bytes are copied into
-    `into` first. A path under a symlink is left out: git apply never writes
-    beyond one, and putting back must not either.
-    """
     saved = []
     for n, rel in enumerate(paths):
         parts = rel.split("/")
@@ -1131,13 +830,9 @@ def _save(repo: Path, paths: list[str], into: Path) -> list[tuple[str, str, str,
 
 
 def _put_back(repo: Path, saved: list[tuple[str, str, str, int]]) -> list[str]:
-    """Return every path _save recorded to what it was, and list those that
-    could not be. What git created goes first, deepest first, then the
-    directories it removed, then the files; a path already as it was is not
-    touched."""
     def clear(path: Path) -> None:
         if path.is_dir() and not path.is_symlink():
-            path.rmdir()  # only empty: one git made, for a file of its own
+            path.rmdir()
         elif os.path.lexists(path):
             path.unlink()
 
@@ -1174,27 +869,6 @@ def apply_many(
     store: JobStore, job_ids: list[str], dry_run: bool = False,
     paths: dict[str, list[str]] | None = None,
 ) -> dict:
-    """Apply several succeeded jobs to one repository in order, or none of them.
-
-    Applying a fan-out one job at a time finds a conflict between two jobs
-    only when the second is reached, with the first already in the
-    repository. Here every patch is first applied, in order, to throwaway
-    copies of the repository's index and of its working tree's state (see
-    _precheck), so the second job is checked on top of the first before
-    anything changes. Then each goes through apply, so the ledger,
-    applied_paths and applied_unstaged stay exactly as one apply leaves them.
-
-    `paths` maps a job id to the only files of that job to apply, as apply's
-    paths do. A job partly applied already is refused (use apply for the
-    rest of it). Refusals raise, changing nothing. What the pre-check
-    or the apply itself finds is returned instead, next to the report:
-    applied and not_applied (job ids), overlaps (each file more than one job
-    touches, with those jobs), unstaged (jobs that land, or would land,
-    unstaged because they touch files with unstaged edits), dry_run, and
-    error (None, or which job did not apply and why). An error with applied
-    empty changed nothing; one after the pre-check passed (the repository
-    changed meanwhile) comes with the jobs already staged in applied.
-    """
     if not job_ids:
         raise ValueError("Name at least one job.")
     repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
@@ -1209,7 +883,6 @@ def apply_many(
         if job.state != "succeeded":
             raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
         if job.mode == REPORT:
-            # apply refuses it, so letting it through would stop the run part way.
             raise JobError(f"Job {job.id} is a report job: it has no changes to apply; "
                            "leave it out and read it with report().")
         if not job.files_changed:
@@ -1246,7 +919,7 @@ def apply_many(
     if result["error"] or dry_run:
         return result
 
-    result["unstaged"] = []  # from here on, what apply actually did
+    result["unstaged"] = []
     for job in batch:
         try:
             _, applied = apply(store, job.id, paths.get(job.id))
@@ -1264,7 +937,6 @@ def apply_many(
 
 
 def _touched(job: Job) -> list[str]:
-    """Every path the job's diff touches, both sides of a rename included."""
     names = _jgit(job, ["diff", "--name-only", "--no-renames", "-z", _range(job)]).stdout
     return [name for name in names.split("\0") if name]
 
@@ -1273,21 +945,6 @@ def _precheck(
     store: JobStore, repo: str, batch: list[Job], patches: dict[str, Path],
     touched: dict[str, list[str]],
 ) -> tuple[list[str], str | None]:
-    """Apply each patch in turn to scratch copies of the repository's state,
-    as apply would: the jobs that would land unstaged, and the first failure.
-
-    Two temporary index files stand in for the repository. One is a copy of
-    its index; the other starts as that copy and takes the working tree's
-    current content of every file a job touches, so it stands for the
-    working tree. apply's `git apply --index` needs a file's index and
-    working-tree content to agree, and the patch to fit: then the patch goes
-    on both. Otherwise apply falls back to the working tree alone, leaving
-    the change unstaged, which here means the second index alone.
-
-    `git apply --cached` and `update-index` write blobs, so git is pointed
-    at a scratch object directory that borrows the repository's objects as
-    an alternate: the repository's index, objects and files are only read.
-    """
     store.root.mkdir(parents=True, exist_ok=True)
     located = _check(run_git(
         ["rev-parse", "--path-format=absolute", "--git-path", "objects", "--git-path", "index"],
@@ -1299,10 +956,7 @@ def _precheck(
         if index.exists():
             shutil.copyfile(index, staged)
             shutil.copyfile(index, tree)
-            # A split index (core.splitIndex) keeps most entries in a sharedindex.* file that
-            # git looks for next to the index it reads, so those come along. Writing with
-            # splitIndex off keeps each scratch index whole, so git neither writes new shared
-            # index files into the repository's .git nor expires the one its index needs.
+            # core.splitIndex keeps entries in a sharedindex.* file that git reads from beside the index.
             for shared in index.parent.glob("sharedindex.*"):
                 shutil.copyfile(shared, Path(tmp) / shared.name)
         base_env = dict(os.environ, GIT_OBJECT_DIRECTORY=str(Path(tmp) / "objects"),
@@ -1314,9 +968,7 @@ def _precheck(
                            env=dict(base_env, GIT_INDEX_FILE=str(index_file)))
 
         every = sorted({p for paths in touched.values() for p in paths})
-        # A directory a job replaces with a file is not a file update-index can read (a
-        # submodule's is: it records the submodule's commit). Its tracked files are in
-        # `every` on their own, so leaving the directory out loses nothing.
+        # update-index cannot read a directory as a file, except a submodule's (it records the commit).
         every = [p for p in every if not (Path(repo, p).is_dir() and not Path(repo, p).is_symlink()
                                           and not Path(repo, p, ".git").exists())]
         res = git(tree, ["update-index", "--add", "--remove", "--", *every])
@@ -1342,19 +994,13 @@ def _precheck(
 
 
 def _select(job: Job, paths: list[str] | None) -> tuple[list[str], list[str]]:
-    """The files_changed entries an apply covers, and the pathspecs that export them.
-
-    A rename is one change with two paths, and files_changed may list either
-    or both. Either side is accepted, and both are exported, so a partial
-    apply never adds the new file while leaving the old one behind.
-    """
     partner = _renames(job)
     if paths is None:
         files = [f for f in job.files_changed if f not in job.applied_paths]
         if not files:
             raise JobError(f"Job {job.id} is already applied in full.")
         if not job.applied_paths:
-            return files, []  # the whole diff, exactly as the job made it
+            return files, []
         wanted = set(files)
     else:
         if not paths:
@@ -1377,7 +1023,6 @@ def _select(job: Job, paths: list[str] | None) -> tuple[list[str], list[str]]:
 
 
 def _renames(job: Job) -> dict[str, str]:
-    """Map each side of every file the job renamed to the other side."""
     out = _jgit(
         job, ["diff", "--name-status", "-z", "--find-renames", _range(job)]
     ).stdout.split("\0")
@@ -1394,8 +1039,6 @@ def _renames(job: Job) -> dict[str, str]:
 
 
 def discard(store: JobStore, job_id: str) -> None:
-    """Delete a finished job: its copy and its record. The ledger keeps its
-    outcome, as "discarded" unless it was already applied or cancelled."""
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is {job.state}; cancel it before discarding.")
@@ -1416,12 +1059,6 @@ AUTO_GC_SECONDS = 7 * 86400
 
 
 def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> list[GcRecord]:
-    """Delete finished jobs that ended more than `older_than_seconds` ago.
-
-    delegate runs it with AUTO_GC_SECONDS, so a job left unresolved for a
-    week does not hold its copy forever. A job that never recorded an end
-    is aged from its creation.
-    """
     now = time.time()
 
     def expired(job: Job) -> bool:
@@ -1432,15 +1069,13 @@ def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> lis
     for job in store.all():
         if not expired(store.refresh(job)):
             continue
-        size = disk_usage(store.path(job.id))  # slow on a big copy, so outside the lock
+        size = disk_usage(store.path(job.id))
         if not dry_run:
-            # revise holds this lock while it requeues a job, so the job is read
-            # again under it: one revised since store.all() is now active, and kept.
             with store.lock():
                 try:
                     job = store.refresh(store.load(job.id))
                 except JobNotFound:
-                    continue  # discarded meanwhile
+                    continue
                 if not expired(job):
                     continue
                 if job.outcome is None:
@@ -1451,12 +1086,6 @@ def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> lis
 
 
 def disk_usage(path: Path) -> int:
-    """Apparent size of the files under `path`, not following symlinks.
-
-    Link-mode paths are symlinks to the user's own files, so following them
-    would count bytes that deleting the job never frees. Clone-mode copies
-    share blocks with their source until written, so this is an upper bound.
-    """
     total = 0
     for dirpath, dirnames, filenames in os.walk(path):
         for name in dirnames + filenames:

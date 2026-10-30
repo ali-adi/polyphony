@@ -1,5 +1,3 @@
-"""The outcome ledger: one line per job outcome, kept after the job is discarded."""
-
 import json
 
 import pytest

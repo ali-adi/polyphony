@@ -1,5 +1,3 @@
-"""The MCP tools, called in-process exactly as a client would call them."""
-
 import hashlib
 import json
 import subprocess
@@ -25,9 +23,7 @@ def _git(*args, cwd):
     ).stdout.strip()
 
 
-class Checks:
-    """A stand-in for agy_usage, so no test ever runs a real usage check."""
-
+class StubUsageCheck:
     def __init__(self, report=None):
         self.report, self.calls = report or {"ok": True, "limits": []}, 0
 
@@ -38,7 +34,7 @@ class Checks:
 
 @pytest.fixture
 def server(store, tmp_path):
-    return build_server(store=store, projects_dir=tmp_path / "no-projects", usage_check=Checks())
+    return build_server(store=store, projects_dir=tmp_path / "no-projects", usage_check=StubUsageCheck())
 
 
 def call(server, tool, **args):
@@ -51,7 +47,6 @@ def call(server, tool, **args):
 
 
 def refused(server, tool, **args) -> str:
-    """Call a tool that must fail with a readable, anticipated error (not a crash)."""
     with pytest.raises(ToolError) as e:
         call(server, tool, **args)
     assert e.type is ToolError, f"crashed instead of refusing: {e.value!r}"
@@ -224,7 +219,7 @@ def test_jobs_lists_recent_jobs(server, repo, fake_agy):
 
 def test_usage_tool_reports_what_agy_prints(store, tmp_path, fake_agy):
     fake_agy("printf 'Gemini Models\\tWeekly Limit Remaining\\t50%%\\tOct 1\\n'")
-    server = build_server(store=store, projects_dir=tmp_path / "none")  # the real agy_usage
+    server = build_server(store=store, projects_dir=tmp_path / "none")
     assert call(server, "usage") == {"usage": {"ok": True, "limits": [
         {"models": "Gemini Models", "window": "Weekly Limit", "remaining_percent": 50.0,
          "resets_at": "Oct 1"},
@@ -233,7 +228,7 @@ def test_usage_tool_reports_what_agy_prints(store, tmp_path, fake_agy):
 
 def test_usage_tool_reports_a_failed_check(server, store, tmp_path):
     srv = build_server(store=store, projects_dir=tmp_path / "none",
-                       usage_check=Checks({"ok": False, "error": "no"}))
+                       usage_check=StubUsageCheck({"ok": False, "error": "no"}))
     assert call(srv, "usage") == {"usage": {"ok": False, "error": "no"}}
 
 
@@ -253,7 +248,7 @@ def test_project_check_applies_and_delegate_overrides_it(store, repo, fake_agy, 
     projects = tmp_path / "projects" / "demo"
     projects.mkdir(parents=True)
     (projects / "project.yaml").write_text(f"name: demo\npath: {repo}\ncheck: exit 4\n")
-    srv = build_server(store=store, projects_dir=tmp_path / "projects", usage_check=Checks())
+    srv = build_server(store=store, projects_dir=tmp_path / "projects", usage_check=StubUsageCheck())
     fake_agy("true")
 
     from_project = call(srv, "delegate", instruction="x", repo=str(repo))["job_id"]
@@ -335,8 +330,6 @@ def test_revise_refusals(server, repo, fake_agy, store, wait_for):
     assert "No job" in refused(server, "revise", job_id="nope", feedback="x")
 
 
-# --- Quota, the concurrency cap, and the project's model. ---
-
 ARGON = "gemini-4-argon-high"
 RESET = "2026-10-01T02:17:05Z"
 
@@ -353,15 +346,13 @@ ARGON_LOW = _limits("Gemini 4 Argon", 1.0)
 
 @pytest.fixture
 def no_launch(monkeypatch):
-    """Record jobs without starting a worker, which would run the real CLI
-    named by the job. A queued job holds a slot like a running one."""
     from polyphony import jobs
     monkeypatch.setattr(jobs, "launch", lambda store, job: None)
 
 
 def _server(store, tmp_path, checks=None, **kw):
     return build_server(store=store, projects_dir=tmp_path / "projects",
-                        usage_check=checks or Checks(), **kw)
+                        usage_check=checks or StubUsageCheck(), **kw)
 
 
 def _project(tmp_path, repo, **data):
@@ -372,7 +363,7 @@ def _project(tmp_path, repo, **data):
 
 @pytest.mark.usefixtures("no_launch")
 def test_a_model_out_of_quota_is_refused_with_its_reset_time(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks(ARGON_LOW))
+    srv = _server(store, tmp_path, StubUsageCheck(ARGON_LOW))
     msg = refused(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
     assert ARGON in msg and "Gemini 4 Argon Weekly Limit" in msg and RESET in msg
     assert store.all() == []
@@ -380,7 +371,7 @@ def test_a_model_out_of_quota_is_refused_with_its_reset_time(store, repo, tmp_pa
 
 @pytest.mark.usefixtures("no_launch")
 def test_a_model_in_another_group_is_allowed_while_argon_is_low(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks(ARGON_LOW))
+    srv = _server(store, tmp_path, StubUsageCheck(ARGON_LOW))
     started = call(srv, "delegate", instruction="x", repo=str(repo))
     assert started["model"] == DEFAULT_MODELS["code"]
     assert "quota_unknown" not in started
@@ -390,7 +381,7 @@ def test_a_model_in_another_group_is_allowed_while_argon_is_low(store, repo, tmp
 @pytest.mark.parametrize("remaining, allowed", [(5.0, False), (5.1, True)])
 @pytest.mark.usefixtures("no_launch")
 def test_the_quota_floor_is_five_percent(store, repo, tmp_path, remaining, allowed):
-    srv = _server(store, tmp_path, Checks(_limits("Gemini Models", remaining)))
+    srv = _server(store, tmp_path, StubUsageCheck(_limits("Gemini Models", remaining)))
     if allowed:
         call(srv, "delegate", instruction="x", repo=str(repo))
         assert len(store.all()) == 1
@@ -401,7 +392,7 @@ def test_the_quota_floor_is_five_percent(store, repo, tmp_path, remaining, allow
 
 @pytest.mark.usefixtures("no_launch")
 def test_a_broken_usage_check_lets_the_job_through(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks({"ok": False, "error": "agy is down"}))
+    srv = _server(store, tmp_path, StubUsageCheck({"ok": False, "error": "agy is down"}))
     started = call(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
     assert started["quota_unknown"] == "agy is down"
     assert len(store.all()) == 1
@@ -409,7 +400,7 @@ def test_a_broken_usage_check_lets_the_job_through(store, repo, tmp_path):
 
 @pytest.mark.usefixtures("no_launch")
 def test_usage_reports_are_cached_across_delegates_and_servers(store, repo, tmp_path):
-    checks = Checks()
+    checks = StubUsageCheck()
     call(_server(store, tmp_path, checks), "delegate", instruction="x", repo=str(repo))
     call(_server(store, tmp_path, checks), "delegate", instruction="y", repo=str(repo))
     assert checks.calls == 1
@@ -418,7 +409,7 @@ def test_usage_reports_are_cached_across_delegates_and_servers(store, repo, tmp_
 
 @pytest.mark.usefixtures("no_launch")
 def test_usage_is_checked_again_after_the_ttl(store, repo, tmp_path):
-    checks = Checks()
+    checks = StubUsageCheck()
     srv = _server(store, tmp_path, checks, usage_ttl=0)
     call(srv, "delegate", instruction="x", repo=str(repo))
     call(srv, "delegate", instruction="y", repo=str(repo))
@@ -427,7 +418,7 @@ def test_usage_is_checked_again_after_the_ttl(store, repo, tmp_path):
 
 @pytest.mark.usefixtures("no_launch")
 def test_usage_tool_refreshes_the_cache_that_delegate_reads(store, repo, tmp_path):
-    checks = Checks(ARGON_LOW)
+    checks = StubUsageCheck(ARGON_LOW)
     srv = _server(store, tmp_path, checks)
     assert call(srv, "usage") == {"usage": ARGON_LOW}
     assert RESET in refused(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
@@ -436,7 +427,7 @@ def test_usage_tool_refreshes_the_cache_that_delegate_reads(store, repo, tmp_pat
 
 @pytest.mark.usefixtures("no_launch")
 def test_revise_is_gated_by_quota_too(store, repo, tmp_path):
-    checks = Checks()
+    checks = StubUsageCheck()
     srv = _server(store, tmp_path, checks, usage_ttl=0)
     job_id = call(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)["job_id"]
     job = store.load(job_id)
@@ -533,7 +524,7 @@ def test_project_config_sets_the_model_per_mode(store, repo, tmp_path):
     assert call(srv, "delegate", instruction="x", repo=str(repo), mode="report",
                 model="picked")["model"] == "picked"
 
-    gated = _server(store, tmp_path, Checks(ARGON_LOW), usage_ttl=0)
+    gated = _server(store, tmp_path, StubUsageCheck(ARGON_LOW), usage_ttl=0)
     assert ARGON in refused(gated, "delegate", instruction="x", repo=str(repo), mode="report")
     call(gated, "delegate", instruction="x", repo=str(repo))
 
@@ -551,7 +542,7 @@ def test_project_files_are_read_from_the_stores_home(store, repo, fake_agy):
     f = store.root / "projects" / "demo" / "project.yaml"
     f.parent.mkdir(parents=True)
     f.write_text(f"name: demo\npath: {repo}\nmodels: {{code: from-home}}\n")
-    srv = build_server(store=store, usage_check=Checks())
+    srv = build_server(store=store, usage_check=StubUsageCheck())
     started = call(srv, "delegate", instruction="x", repo=str(repo))
     assert started["model"] == "from-home"
     finished(srv, started["job_id"])
@@ -560,7 +551,7 @@ def test_project_files_are_read_from_the_stores_home(store, repo, fake_agy):
 @pytest.mark.parametrize("config", ["models: [code\n", "models: {agy: m1}\n"])
 def test_malformed_repo_file_is_refused_readably(store, repo, config):
     (repo / ".polyphony.yaml").write_text(config)
-    srv = build_server(store=store, usage_check=Checks())
+    srv = build_server(store=store, usage_check=StubUsageCheck())
     assert ".polyphony.yaml" in refused(srv, "delegate", instruction="x", repo=str(repo))
     assert store.all() == []
 
@@ -586,9 +577,6 @@ def test_apply_refuses_paths_the_job_did_not_change(server, repo, fake_agy):
     assert finished(server, job_id)["state"] == "succeeded"
     assert "typo.py" in refused(server, "apply", job_id=job_id, paths=["typo.py"])
     assert _git("status", "--porcelain", cwd=repo) == ""
-
-
-# --- How the lanes' tools work together. ---
 
 
 def test_a_revision_streams_into_a_fresh_output(server, repo, fake_agy, store, wait_for):
@@ -646,11 +634,8 @@ def test_status_has_no_withheld_key_when_nothing_was(server, repo, fake_agy):
     assert "withheld" not in status
 
 
-# --- Lane r2-brief: the task from a file, confirming it arrived whole, and a model per call. ---
-
-
+# The fake agy keeps its prompt (given as -p=<text>) and its argv beside the copy.
 def _record_prompt(fake_agy):
-    """The fake agy keeps its prompt (given as -p=<text>) and its argv beside the copy."""
     fake_agy('for a in "$@"; do case "$a" in -p=*) printf "%s" "${a#-p=}" > ../prompt.txt;; '
              'esac; done; echo "$@" > ../argv.txt')
 
@@ -676,10 +661,9 @@ def test_delegate_with_a_brief_file_gives_the_executor_the_whole_task(
     assert finished(server, job_id)["state"] == "succeeded"
     assert (store.path(job_id) / "prompt.txt").read_text() == full
 
-    # A revision restates the brief as copied, not as the file reads now.
     call(server, "revise", job_id=job_id, feedback="again")
     status = finished(server, job_id)
-    assert status["instruction_chars"] == len(full)  # feedback is not counted
+    assert status["instruction_chars"] == len(full)
     assert (store.path(job_id) / "prompt.txt").read_text().startswith(full + "\n\n---\n")
 
 
@@ -768,13 +752,12 @@ def test_a_task_too_long_for_one_argument_is_refused(store, repo, tmp_path):
     srv = _server(store, tmp_path)
     over = "x" * (MAX_PROMPT_BYTES + 1)
     assert "limit" in refused(srv, "delegate", instruction=over, repo=str(repo))
-    # A brief under its own limit still counts toward the task's, with the instruction.
     brief = tmp_path / "brief.md"
     brief.write_bytes(b"b" * MAX_BRIEF_BYTES)
     long_lead = "i" * (MAX_PROMPT_BYTES - MAX_BRIEF_BYTES)
     assert "limit" in refused(srv, "delegate", instruction=long_lead, repo=str(repo),
                               brief_path=str(brief))
-    # Bytes, not characters: what the kernel counts.
+    # The kernel counts bytes, not characters.
     assert "limit" in refused(srv, "delegate", repo=str(repo),
                               instruction="\u00e9" * (MAX_PROMPT_BYTES // 2 + 1))
     assert store.all() == []
@@ -797,11 +780,8 @@ def test_revise_is_refused_once_feedback_would_pass_the_limit(server, repo, fake
     finished(server, job_id)
     assert "limit" in refused(server, "revise", job_id=job_id, feedback="f" * 2000)
     job = store.load(job_id)
-    assert job.attempt == 1 and job.feedback == []  # nothing was queued
+    assert job.attempt == 1 and job.feedback == []
     call(server, "revise", job_id=job_id, feedback="short")
-
-
-# --- Report mode: an audit whose findings are REPORT.md, read with report(). ---
 
 
 def test_report_mode_delegate_status_report(server, repo, fake_agy, store):
@@ -875,8 +855,6 @@ def test_a_check_in_report_mode_is_refused(server, repo):
     assert "code" in msg and "report" in msg
 
 
-
-# wait lane
 
 SLOW_OR_FAST = 'case "$*" in *SLOW*) sleep 30;; *) sleep 1; echo fast > fast.txt;; esac'
 
@@ -1009,9 +987,6 @@ def test_status_and_instructions_point_at_wait(server):
     tools = {t.name: t for t in anyio.run(server.list_tools)}
     assert "use wait" in tools["status"].description
     assert "call the wait tool" in INSTRUCTIONS
-
-
-# --- Lane reportapi: argument edges, and status reading only files' ends. ---
 
 
 @pytest.mark.usefixtures("no_launch")

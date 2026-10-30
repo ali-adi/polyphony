@@ -1,6 +1,3 @@
-"""agy.run against a fake agy: the result event ends a run, a stall is stopped, and
-events read as a heartbeat. The fixture stream is a real agy run's output."""
-
 import os
 import threading
 import time
@@ -10,6 +7,7 @@ import pytest
 
 from polyphony import agy
 
+# The fixture stream is a real agy run's output.
 STREAM = Path(__file__).parent / "fixtures" / "agy-stream.ndjson"
 
 

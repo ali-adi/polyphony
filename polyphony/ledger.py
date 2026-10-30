@@ -1,13 +1,3 @@
-"""The outcome ledger: one JSON line per job that was applied, discarded, or cancelled.
-
-It lives at ~/.polyphony/ledger.jsonl, beside jobs/ rather than in it, so a
-job's outcome outlives discard. That record is what the model choice should
-eventually be judged on: which model's work actually got applied.
-
-A job normally gets one line. The exception is a cancelled job that is then
-revised: its later outcome is appended too, and only a job's last line counts.
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,9 +17,6 @@ def path(root: Path) -> Path:
 
 
 def record(root: Path, job: Job, outcome: str, via: str | None = None) -> None:
-    """Append one outcome. A single short write in append mode, so concurrent
-    servers don't interleave their lines. `via` names what recorded it when
-    that was not the caller's own tool, such as "gc"."""
     end = job.finished_at or time.time()
     entry = {
         "job_id": job.id,
@@ -56,8 +43,6 @@ def record(root: Path, job: Job, outcome: str, via: str | None = None) -> None:
 
 
 def read(root: Path) -> list[dict]:
-    """Each job's last recorded outcome, oldest first. A torn line from a
-    crash mid-write is skipped rather than making the whole ledger unreadable."""
     f = path(root)
     if not f.exists():
         return []
@@ -67,7 +52,7 @@ def read(root: Path) -> list[dict]:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        latest.pop(entry.get("job_id"), None)  # re-insert, so order follows the last line
+        latest.pop(entry.get("job_id"), None)
         latest[entry.get("job_id")] = entry
     return list(latest.values())
 
@@ -87,7 +72,6 @@ def _stats(entries: list[dict]) -> dict:
 
 
 def summarize(entries: list[dict]) -> list[dict]:
-    """Per executor, then per model within it, in order of first appearance."""
     by_executor: dict[str, list[dict]] = {}
     for e in entries:
         by_executor.setdefault(e.get("executor"), []).append(e)

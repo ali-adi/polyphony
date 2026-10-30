@@ -1,5 +1,3 @@
-"""The subprocess-level git guard."""
-
 import subprocess
 
 import pytest
@@ -39,6 +37,5 @@ def test_ordinary_commands_pass_through(tmp_path):
 
 def test_words_containing_push_are_not_refused(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    # A branch named "pushover" is not a push.
     res = run_git(["branch", "--list", "pushover"], cwd=str(tmp_path))
     assert res.returncode == 0

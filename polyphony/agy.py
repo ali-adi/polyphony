@@ -137,7 +137,7 @@ def events(path: Path) -> list[dict | str]:
     except FileNotFoundError:
         return []
     if len(lines) > 1 and os.path.getsize(path) > TAIL_BYTES:
-        lines = lines[1:]  # cut part way
+        lines = lines[1:]
     parsed: list[dict | str] = []
     for line in filter(str.strip, lines):
         try:

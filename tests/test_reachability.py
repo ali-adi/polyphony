@@ -1,17 +1,10 @@
-"""Every module in the package must be reachable from an entry point.
-
-The first version of this project had 24 modules that nothing imported.
-Their tests passed, so nothing looked wrong. This walks the static import
-graph and fails on any module no entry point can reach.
-"""
-
 import ast
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[1] / "polyphony"
 
-# Modules started directly rather than imported: polyphony.cli is the
-# console script, polyphony.worker is launched with python -m by jobs.launch.
+# Once 24 modules were imported by nothing and their own tests still passed, so this walks the import graph.
+# cli is the console script and worker is launched with python -m by jobs.launch, so neither is imported.
 ENTRY_POINTS = ["polyphony.cli", "polyphony.worker"]
 
 

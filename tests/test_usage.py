@@ -1,5 +1,3 @@
-"""agy's quota: its /usage rows, the per-model gate, and the shared cache."""
-
 import time
 
 import pytest

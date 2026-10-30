@@ -1,15 +1,12 @@
-# Settings Polyphony applies when a task targets this repository.
 name: medicoder
 path: /Users/ali/root/work/medicoder/medicoder/medicoder
 
-# Gitignored paths a fresh copy lacks. Verified: without all three,
-# the test suite cannot run (docs/evidence/provisioning-spike.md).
+# Without all three the test suite cannot run.
 provision:
   - { path: env/, mode: clone }
   - { path: datasets/smoke/, mode: clone }
   - { path: datasets/tuning/, mode: clone }
 
-# Argon judges medical coding; flash writes code.
 models:
   report: gemini-4-argon-high
   code: gemini-3.8-flash-low

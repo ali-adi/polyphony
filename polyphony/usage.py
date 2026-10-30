@@ -1,8 +1,3 @@
-"""How much quota agy has left, as its /usage slash command prints it in
-print mode: tab-separated rows, one per model group and window. agy
-authenticates its own request; Polyphony never touches its credentials.
-"""
-
 from __future__ import annotations
 
 import json
@@ -22,6 +17,7 @@ QUOTA_FLOOR_PERCENT = 5
 USAGE_TTL_SECONDS = 300
 
 
+# agy's /usage in print mode prints tab-separated rows, one per model group and window.
 def parse_agy_usage(text: str) -> list[dict]:
     rows = []
     for line in text.splitlines():

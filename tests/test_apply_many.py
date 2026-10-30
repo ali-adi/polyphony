@@ -1,5 +1,3 @@
-"""apply_many: several jobs pre-checked together, then applied in order, or none."""
-
 import json
 import subprocess
 
@@ -36,15 +34,13 @@ def _done(store, repo, script):
 
 @pytest.fixture
 def lines(repo):
-    """A committed 30-line file, so two jobs can edit it far enough apart."""
     (repo / "lines.txt").write_text(LINES)
     _git("add", "lines.txt", cwd=repo)
     _git("commit", "-q", "-m", "lines", cwd=repo)
     return repo / "lines.txt"
 
 
-def _state(repo):
-    """Everything apply could change: HEAD, the index, and the working tree."""
+def _head_index_and_working_tree(repo):
     return (
         _git("rev-parse", "HEAD", cwd=repo),
         _git("ls-files", "-s", cwd=repo),
@@ -82,14 +78,14 @@ def test_conflicting_jobs_apply_none_and_name_the_second(store, repo):
     a = _done(store, repo, "echo 'x = 2' > app.py")
     b = _done(store, repo, "echo 'x = 3' > app.py")
     c = _done(store, repo, "echo c > c.txt")
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
     result = apply_many(store, [a.id, b.id, c.id])
     assert result["applied"] == []
     assert result["not_applied"] == [a.id, b.id, c.id]
     assert result["overlaps"] == {"app.py": [a.id, b.id]}
     assert result["error"].startswith(f"Job {b.id} does not apply cleanly on top of job(s) {a.id}")
     assert "app.py" in result["error"]
-    assert _state(repo) == before
+    assert _head_index_and_working_tree(repo) == before
     assert all(not store.load(j.id).applied for j in (a, b, c))
     assert ledger.read(store.root) == []
 
@@ -99,23 +95,22 @@ def test_a_job_that_no_longer_fits_the_repository_is_named(store, repo):
     b = _done(store, repo, "echo 'x = 2' > app.py")
     (repo / "app.py").write_text("x = 3\n")
     _git("commit", "-q", "-am", "meanwhile", cwd=repo)
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
     result = apply_many(store, [a.id, b.id])
     assert result["error"].startswith(f"Job {b.id} does not apply cleanly on top of job(s) {a.id}")
-    assert _state(repo) == before
+    assert _head_index_and_working_tree(repo) == before
 
 
 def test_dry_run_reports_and_changes_nothing(store, repo, lines):
     a = _done(store, repo, "sed -i.bak 's/^line 2$/line two/' lines.txt && rm lines.txt.bak")
     b = _done(store, repo, "sed -i.bak 's/^line 28$/line 28!/' lines.txt && rm lines.txt.bak")
     objects = sorted(p.name for p in (repo / ".git" / "objects").rglob("*"))
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
     result = apply_many(store, [a.id, b.id], dry_run=True)
     assert result == {"applied": [], "not_applied": [a.id, b.id],
                       "overlaps": {"lines.txt": [a.id, b.id]}, "unstaged": [],
                       "dry_run": True, "error": None}
-    assert _state(repo) == before
-    # The pre-check writes its blobs elsewhere, not into the repository.
+    assert _head_index_and_working_tree(repo) == before
     assert sorted(p.name for p in (repo / ".git" / "objects").rglob("*")) == objects
     assert not store.load(a.id).applied and store.load(a.id).outcome is None
     assert [p.name for p in store.root.iterdir() if p.name.startswith("apply-many")] == []
@@ -194,7 +189,7 @@ def test_every_job_is_validated_before_anything_changes(store, repo, tmp_path):
     empty = _done(store, repo, "true")
     partial = _done(store, repo, "echo p > p.txt && echo q > q.txt")
     apply(store, partial.id, paths=["p.txt"])
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
 
     with pytest.raises(JobNotFound):
         apply_many(store, [good.id, "nope"])
@@ -215,26 +210,22 @@ def test_every_job_is_validated_before_anything_changes(store, repo, tmp_path):
     with pytest.raises(JobError, match="different repositories"):
         apply_many(store, [good.id, elsewhere.id])
 
-    assert _state(repo) == before
+    assert _head_index_and_working_tree(repo) == before
     assert not store.load(good.id).applied
 
 
 
 def test_a_report_job_is_refused_before_anything_changes(store, repo):
-    """apply refuses a report job, so apply_many must refuse it up front rather
-    than apply the jobs before it and stop there."""
     good = _done(store, repo, "echo a > a.txt")
     report = create_job(store, project=ProjectConfig(name="demo", path=repo),
                         instruction="echo findings > REPORT.md; exit 0", mode="report")
     run(store.path(report.id))
     assert store.load(report.id).state == "succeeded"
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
     with pytest.raises(JobError, match=f"Job {report.id} is a report job"):
         apply_many(store, [good.id, report.id])
-    assert _state(repo) == before
+    assert _head_index_and_working_tree(repo) == before
     assert not store.load(good.id).applied
-
-# --- The tool ---
 
 
 def _call(server, tool, **args):
@@ -263,18 +254,12 @@ def test_the_tool_applies_a_fan_out_and_refuses_readably(store, repo, fake_agy, 
     assert e.type is ToolError
 
 
-# --- applyrobust lane ---
-
-
-def _tree(repo):
-    """Every file under the repository outside .git, with its bytes."""
+def _files_outside_git(repo):
     return {str(p.relative_to(repo)): p.read_bytes()
             for p in sorted(repo.rglob("*")) if p.is_file() and ".git" not in p.parts}
 
 
-def _dir_to_file(store, repo, wip):
-    """A job that replaces directory d with a file, over an ignored d/cache.pyc
-    that keeps the directory from going, so git apply fails part way through."""
+def _job_replacing_a_directory_pinned_by_an_ignored_file(store, repo, wip):
     (repo / "d").mkdir()
     (repo / "d" / "a.txt").write_text("a\n")
     (repo / ".gitignore").write_text("env/\ndata/\n*.pyc\n")
@@ -288,14 +273,12 @@ def _dir_to_file(store, repo, wip):
 
 @pytest.mark.parametrize("wip", [True, False], ids=["unstaged", "staged"])
 def test_a_failed_apply_puts_back_what_git_removed_before_failing(store, repo, wip):
-    # git apply removes the files it rewrites before writing any. When writing
-    # d fails, app.py (with wip, an unstaged edit that exists nowhere else) and
-    # d/a.txt must not stay deleted.
-    job = _dir_to_file(store, repo, wip)
-    before, files = _state(repo), _tree(repo)
+    # git apply deletes the files it rewrites before it writes any
+    job = _job_replacing_a_directory_pinned_by_an_ignored_file(store, repo, wip)
+    before, files = _head_index_and_working_tree(repo), _files_outside_git(repo)
     with pytest.raises(JobError, match="nothing was changed"):
         apply(store, job.id)
-    assert (_state(repo), _tree(repo)) == (before, files)
+    assert (_head_index_and_working_tree(repo), _files_outside_git(repo)) == (before, files)
     assert not store.load(job.id).applied
 
 
@@ -311,7 +294,7 @@ def test_a_dry_run_in_a_split_index_repository_writes_nothing_to_git(store, repo
     assert result["error"] is None
     after = {str(p): p.read_bytes() for p in git_dir.rglob("*") if p.is_file()}
     assert after == before
-    _git("status", cwd=repo)  # the shared index the real one needs is still there
+    _git("status", cwd=repo)
 
 
 def test_a_directory_replaced_by_a_file_passes_the_pre_check(store, repo):
@@ -380,7 +363,7 @@ def test_paths_left_out_of_a_job_do_not_count_as_overlaps(store, repo):
 ])
 def test_bad_paths_are_refused_before_anything_changes(store, repo, paths, expected):
     a = _done(store, repo, "echo a > a.txt")
-    before = _state(repo)
+    before = _head_index_and_working_tree(repo)
     with pytest.raises((ValueError, JobError), match=expected):
         apply_many(store, [a.id], paths=paths or {a.id: ["missing.txt"]})
-    assert _state(repo) == before
+    assert _head_index_and_working_tree(repo) == before

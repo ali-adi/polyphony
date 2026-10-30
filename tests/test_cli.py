@@ -1,5 +1,3 @@
-"""The human-facing command line."""
-
 import time
 from importlib.metadata import version as pkg_version
 from pathlib import Path

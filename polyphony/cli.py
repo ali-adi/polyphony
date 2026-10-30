@@ -1,6 +1,3 @@
-"""Polyphony command line. The MCP server is the main interface; these
-commands are for starting it and for a human checking on jobs."""
-
 from __future__ import annotations
 
 import re
@@ -172,8 +169,7 @@ def stats(store):
 @cli.command()
 @click.pass_obj
 def doctor(store):
-    """Show whether agy is installed, and which project config applies to
-    the repository in the current directory."""
+    """Show whether agy is installed and which project config applies here."""
     from polyphony import agy
     from polyphony.config import ConfigError, find_project
     from polyphony.guard import run_git

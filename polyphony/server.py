@@ -1,10 +1,3 @@
-"""MCP server: hand isolated coding tasks to agent CLIs.
-
-Tools are thin wrappers over polyphony.jobs. A failure the caller can act
-on becomes a ToolError with a readable message. Anything else is a
-Polyphony bug, which the SDK reports as a generic crash and logs here.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -32,8 +25,7 @@ RECENT_EVENTS = 8
 FILES_SHOWN = 50
 CHECK_TAIL_CHARS = 4000
 INSTRUCTION_TAIL_CHARS = 200
-# A day. Far above any real task, and far below where the executor's
-# communicate(timeout=) overflows (about 35,791 minutes).
+# communicate(timeout=) overflows at about 35,791 minutes; a day is far below.
 MAX_TIMEOUT_MINUTES = 24 * 60
 WITHHELD_NOTE = (
     "These secret-looking files were kept out of the job's copy. If the task needs "
@@ -41,13 +33,13 @@ WITHHELD_NOTE = (
 )
 INSTRUCTIONS = (
     "Polyphony runs a task with Antigravity (agy, Gemini models) in a private "
-    "copy of the repository, so nothing touches it until you apply it. Use it "
-    "for a non-Claude view (a report-mode audit or judge seat) and for "
+    "copy of the repository; nothing touches the repository until you apply. "
+    "Use it for a non-Claude view (a report-mode audit or judge seat) and for "
     "well-specified mechanical code changes; keep work that needs your own "
-    "judgment. The loop is: delegate, status with wait_seconds, diff, then "
-    "apply, revise with feedback, or discard; for a report, read it with "
-    "report. apply stages the changes without committing. With more than one "
-    "job running, call the wait tool on all of them instead of status on each."
+    "judgment. Loop: delegate, status with wait_seconds, diff, then apply, "
+    "revise with feedback, or discard; read a report-mode result with report. "
+    "apply stages the changes without committing. With more than one job "
+    "running, call the wait tool on all of them instead of status on each."
 )
 
 
@@ -87,16 +79,9 @@ def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
             f"check runs only in code mode; {mode} mode changes no code to check.")
 
 
-def _task(
+def _checked_brief(
     instruction: str, brief_path: str | None, repo: str, mode: str
 ) -> tuple[Path, str] | None:
-    """The brief, read and checked, if one was named; refuses a delegate with no
-    task, or one too long to hand an executor (see jobs.MAX_PROMPT_BYTES).
-
-    A relative brief_path is taken from `repo` as the caller gave it, which
-    may be a subdirectory, not from the repository's top level.
-    Before any copy is made, so a bad path costs nothing.
-    """
     base = Path(repo).expanduser().resolve()
     brief = jobs.read_brief(brief_path, base) if brief_path else None
     if brief is None and not instruction.strip():
@@ -106,8 +91,6 @@ def _task(
 
 
 def _model(model: str | None, what: str = "model") -> str | None:
-    """A model the caller named, or None for the project's. Blank is a mistake,
-    not a request for the default: the default is what leaving it out gives."""
     if model is None:
         return None
     if not model.strip():
@@ -125,10 +108,6 @@ def _check_ready(store: JobStore, project: ProjectConfig) -> None:
 
 
 def _tail(path: Path, chars: int) -> str:
-    """The file's last `chars` characters, reading only its end (UTF-8 takes at
-    most 4 bytes a character). The executor, and the check it is judged by,
-    decide how large their output grows; status must not load all of it into
-    the server."""
     try:
         with path.open("rb") as f:
             f.seek(max(0, f.seek(0, os.SEEK_END) - chars * 4))
@@ -166,12 +145,11 @@ def _summary(store: JobStore, job: Job) -> dict:
         "repo": job.repo,
         "workdir": job.workdir,
         "elapsed_seconds": round(end - (job.started_at or job.created_at), 1),
-        # So the caller can confirm the whole task arrived. Revise feedback is not included.
         "instruction_chars": len(job.instruction),
         "instruction_sha256": hashlib.sha256(job.instruction.encode()).hexdigest(),
         "instruction_tail": job.instruction[-INSTRUCTION_TAIL_CHARS:],
     }
-    if job.withheld:  # known from the start, so shown even while queued
+    if job.withheld:
         info.update(withheld=job.withheld, withheld_note=WITHHELD_NOTE)
     if job.brief_path:
         info["brief_path"] = job.brief_path
@@ -198,7 +176,7 @@ def _summary(store: JobStore, job: Job) -> dict:
     if job.mode == jobs.REPORT and job.state not in ACTIVE:
         report = Path(job.report_path) if job.report_path else None
         chars = job.report_chars
-        if chars is None:  # saved before the length was recorded: bytes, near enough
+        if chars is None:
             chars = report.stat().st_size if report and report.is_file() else 0
         info.update(
             report_path=job.report_path,
@@ -212,7 +190,6 @@ def _summary(store: JobStore, job: Job) -> dict:
     return info
 
 
-# wait lane
 WAIT_UNTIL = ("any", "all")
 
 
@@ -230,7 +207,7 @@ def _reload(store: JobStore, job: Job) -> Job:
     try:
         return store.refresh(store.load(job.id))
     except JobNotFound:
-        return replace(job, state="deleted")  # cancelled by another call, which deletes it
+        return replace(job, state="deleted")
 
 
 def build_server(
@@ -268,36 +245,36 @@ def build_server(
         brief_path: str | None = None,
         model: str | None = None,
     ) -> dict:
-        """Start a task with agy in a private copy of repo, returning a
-        job_id at once. mode "code" lets the agent edit files; "report" is an
-        audit whose findings the agent writes to REPORT.md, read with
-        report(). check is a shell command run in the copy once the agent
-        succeeds (code mode only), overriding the repository's configured
-        one; "" skips it. Nothing reaches the repository until you call
-        apply. Follow up with status or wait.
+        """Start an agy task in a private copy of repo (a directory inside a git
+        repository); returns a job_id at once. Nothing reaches the repository
+        until apply. Follow up with status or wait.
 
-        model is an agy model id (gemini-4-argon-high, gemini-3.8-flash-low,
-        ...); left out, the repository's model for the mode is used. A model
-        whose quota is at 5% or less is refused; the result carries
-        quota_unknown when the quota could not be read.
+        instruction, brief_path: the task; give either or both. brief_path is
+        a UTF-8 file of at most 100 KB (a relative path is from repo as given),
+        read at once and appended after instruction and a blank line; use it
+        for long briefs. Together they must stay under 120 KB. The result's
+        instruction_chars and instruction_tail show the task arrived whole.
+        mode: "code" (the agent edits files) or "report" (an audit; the agent
+        writes findings to REPORT.md, read with report).
+        check: shell command run in the copy once the agent succeeds, code mode
+        only; overrides the repository's configured one; "" skips it.
+        model: agy model id (gemini-4-argon-high, gemini-3.8-flash-low, ...);
+        default is the repository's model for the mode. Refused when its quota
+        is at 5% or less; the result carries quota_unknown when quota could
+        not be read.
+        timeout_minutes: default 30, at most 1440.
 
-        brief_path names a UTF-8 file (at most 100 KB; a relative path is
-        from the repo directory as given) whose text follows instruction,
-        after a blank line, as the task; use it for any long brief, which
-        can be cut short when passed inline. It is copied at once, so later
-        edits to the file don't reach the job. Give instruction, brief_path,
-        or both; together they must stay under 120 KB. instruction_chars and
-        instruction_tail in the result show the task arrived whole.
-        timeout_minutes is at most 1440 (a day)."""
+        Also refused when agy is not installed or the repository's limit of
+        active jobs is reached."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
             model = _model(model)
             root = _toplevel(repo)
-            brief = _task(instruction, brief_path, repo, mode)
+            brief = _checked_brief(instruction, brief_path, repo, mode)
             project = project_for(root)
             model = model or project.models[mode]
             jobs.gc(store, jobs.AUTO_GC_SECONDS)
-            unknown = quota(model)  # outside the lock: a check can take a minute
+            unknown = quota(model)
             with store.lock():
                 _check_ready(store, project)
                 job = jobs.create_job(
@@ -317,11 +294,12 @@ def build_server(
     @server.tool()
     def revise(job_id: str, feedback: str, timeout_minutes: int | None = None) -> dict:
         """Run a finished job's agent again in the same copy, on top of its
-        previous changes, with your feedback on what to fix. The agent gets
-        the original instruction plus all feedback so far, and the job's check
-        runs again. diff and apply then cover every attempt together. Refused
-        once any of the job has been applied, or once the task with all its
-        feedback would pass 120 KB. Follow up with status."""
+        changes, with feedback on what to fix. The agent gets the original
+        instruction plus all feedback so far; the check runs again; diff and
+        apply then cover every attempt together. timeout_minutes (at most
+        1440) overrides the job's. Refused once any of the job has been
+        applied, when the task with all feedback would pass 120 KB, or when
+        the model's quota is at 5% or less. Follow up with status."""
         with _anticipated():
             if timeout_minutes is not None:
                 _check_timeout(timeout_minutes)
@@ -338,11 +316,11 @@ def build_server(
 
     @server.tool()
     def status(job_id: str, wait_seconds: int = 0) -> dict:
-        """A job's state; its latest agent events ("recent") and, while it
-        runs, the files it has touched so far; once it has finished, agy's
-        final response, what it changed and whether its check passed.
-        wait_seconds (at most 100) blocks until the job finishes or the time runs out,
-        which is cheaper than polling. For more than one job, use wait."""
+        """A job's state and latest agent events ("recent"); while running, the
+        files touched so far; once finished, agy's final response, files
+        changed and whether the check passed. wait_seconds (at most 100)
+        blocks until the job finishes or time runs out, cheaper than polling.
+        For more than one job, use wait."""
         with _anticipated():
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
             while True:
@@ -360,13 +338,12 @@ def build_server(
     @server.tool()
     def apply(job_id: str, paths: list[str] | None = None) -> str:
         """Stage a succeeded job's changes in the repository without committing.
-        paths applies only those of its changed files, so a mostly good diff
-        can land without its bad files; a later call without paths applies
-        the rest. If the changes touch files with unstaged edits, they're
-        applied to the working tree and left unstaged. Refuses, changing
-        nothing, if they don't apply cleanly to the repository as it is now
-        (or git cannot write it: a locked index, say, with git's reason).
-        Once every file is applied, the job is deleted."""
+        paths limits it to those changed files; a later call without paths
+        applies the rest. Files with unstaged edits are applied to the working
+        tree and left unstaged. Refuses, changing nothing, if the changes
+        don't apply cleanly to the repository as it is now or git cannot
+        write it (a locked index, say; git's reason is given). The job is
+        deleted once every file is applied."""
         with _anticipated():
             files, job = jobs.apply(store, job_id, paths)
             if job.applied_unstaged:
@@ -395,7 +372,7 @@ def build_server(
 
     @server.tool(name="jobs")
     def list_jobs(limit: int = 20) -> dict:
-        """Recent jobs, newest first."""
+        """Recent jobs, newest first; limit defaults to 20."""
         return {
             "jobs": [
                 {
@@ -413,41 +390,38 @@ def build_server(
 
     @server.tool()
     def usage() -> dict:
-        """How much quota agy has left per model group (Gemini Models,
-        Gemini 4 Argon, ...): percentages and reset times. Takes several
-        seconds. delegate reuses the result for a few minutes."""
+        """Quota agy has left per model group (Gemini Models, Gemini 4 Argon,
+        ...): percentages and reset times. Takes several seconds; delegate
+        reuses the result for a few minutes."""
         return {"usage": usage_cache.refresh()}
 
     @server.tool()
     def stats() -> dict:
-        """How past jobs turned out per executor and model: jobs,
-        succeeded, revised, applied, discarded, cancelled, check pass rate, and median
-        elapsed time. Counted when a job is applied, discarded, or cancelled."""
+        """How past jobs turned out per executor and model: jobs, succeeded,
+        revised, applied, discarded, cancelled, check pass rate, median
+        elapsed time. Counted when a job is applied, discarded or cancelled."""
         return {"executors": ledger.summarize(ledger.read(store.root))}
-
-    # --- Report mode ---
 
     @server.tool()
     def report(job_id: str, offset: int = 0, limit: int = jobs.REPORT_LIMIT) -> dict:
-        """The report a finished report-mode job wrote, limit characters
-        from offset. more is true while text stops short of total_chars; call
-        again with offset + limit for the rest. The report is the REPORT.md
-        the job wrote or changed: a tracked REPORT.md it left as it was, or a
-        symlink, is not taken as one, and the job fails with no report."""
+        """The report a finished report-mode job wrote: limit characters
+        (default 20000) from offset. more is true while text stops short of
+        total_chars; call again with offset + limit for the rest. Only a
+        REPORT.md the job wrote or changed counts; a tracked one left as it
+        was, or a symlink, fails the job with no report."""
         with _anticipated():
             return jobs.report(store, job_id, offset, limit)
 
-    # wait lane
     @server.tool()
     def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 90) -> dict:
         """Block until any (until="any") or all (until="all") of job_ids have
-        finished, or wait_seconds (at most 100) runs out: one call in place
-        of status on each job in turn. "done" says whether that happened.
-        "finished" and "active" list the ids by state, and "jobs" gives
-        each finished job in full, as status would, and each active one only
-        as job_id, state, elapsed_seconds and, while it runs, its last
-        events and the files it has touched. With "any", a job already
-        finished counts, so pass only the ids you still wait on."""
+        finished, or wait_seconds (default 90, at most 100) runs out: one call
+        in place of status on each job. "done" says whether that happened;
+        "finished" and "active" list ids by state; "jobs" gives each finished
+        job in full, as status would, and each active one as job_id, state,
+        elapsed_seconds and, while running, its last events and files touched.
+        With "any", an already finished job counts, so pass only the ids you
+        still wait on."""
         with _anticipated():
             if until not in WAIT_UNTIL:
                 raise ValueError(f"until must be one of {', '.join(WAIT_UNTIL)}, not {until!r}.")
@@ -457,7 +431,6 @@ def build_server(
             if repeated:
                 raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
-            # An unknown id is refused before any waiting.
             listed = [store.refresh(store.load(i)) for i in job_ids]
             while True:
                 listed = [_reload(store, j) for j in listed]
@@ -474,24 +447,21 @@ def build_server(
                          for j in listed],
             }
 
-    # --- apply_many lane ---
-
     @server.tool()
     def apply_many(
         job_ids: list[str], dry_run: bool = False, paths: dict[str, list[str]] | None = None,
     ) -> dict:
         """Stage several succeeded jobs in one repository, in the order given,
         without committing: all of them or, if any would not apply, none.
-        Every patch is first checked on top of the ones before it, so jobs
-        that conflict with each other are found before anything changes;
-        "error" names the job that did not apply and why. With "applied"
-        empty nothing changed; if the repository changed while the jobs
-        landed, the ones in "applied" are already staged. "overlaps" lists
-        each file more than one job touched; "unstaged" the jobs left unstaged
-        because they touch files with unstaged edits. dry_run only reports.
-        paths maps a job id to the only files of that job to apply, as in
-        apply; for a job already partly applied, use apply. Each job applied
-        in full is deleted."""
+        Each patch is first checked on top of the earlier ones, so conflicts
+        between jobs are found before anything changes; "error" names the job
+        that did not apply and why. With "applied" empty nothing changed; if
+        the repository changed while the jobs landed, the ones in "applied" are
+        already staged. "overlaps" lists each file more than one job touched;
+        "unstaged" the jobs left unstaged because they touch files with
+        unstaged edits. dry_run only reports. paths maps a job id to the only
+        files of that job to apply, as in apply; for a job already partly
+        applied, use apply. Each job applied in full is deleted."""
         with _anticipated():
             return jobs.apply_many(store, job_ids, dry_run, paths)
 

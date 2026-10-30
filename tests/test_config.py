@@ -1,5 +1,3 @@
-"""Per-repository config: what a job's copy needs provisioned, which model each mode uses."""
-
 from pathlib import Path
 
 import pytest
@@ -82,8 +80,8 @@ def test_find_project_tolerates_missing_projects_dir(tmp_path):
     assert find_project(tmp_path, projects_dir=tmp_path / "nope") is None
 
 
+# The provisioning spike showed medicoder's tests fail without all three.
 def test_real_medicoder_config_provisions_what_its_tests_need():
-    """Verified by the provisioning spike: without all three, tests fail."""
     cfg = load_project(PROJECTS_DIR / "medicoder" / "project.yaml")
     assert cfg.provision == [
         {"path": "env", "mode": "clone"},
@@ -150,7 +148,6 @@ def test_non_mapping_file_names_the_file(tmp_path):
 
 @pytest.fixture
 def no_legacy(monkeypatch, tmp_path):
-    """Point the legacy package-relative dir somewhere empty."""
     monkeypatch.setattr("polyphony.config.PROJECTS_DIR", tmp_path / "legacy-none")
 
 
@@ -187,7 +184,6 @@ def test_repo_file_accepts_a_path_that_is_the_repo(tmp_path):
 
 @pytest.mark.usefixtures("no_legacy")
 def test_repo_file_pointing_elsewhere_is_rejected(tmp_path):
-    """A file in one repository must not make a job clone another."""
     repo = tmp_path / "myrepo"
     repo.mkdir()
     (repo / REPO_FILE).write_text(yaml.safe_dump({"path": str(tmp_path / "other")}))
@@ -302,8 +298,6 @@ def test_malformed_secret_settings_name_the_file(tmp_path, bad):
     with pytest.raises(ConfigError, match=str(f)):
         load_project(f)
 
-
-# Lane: workspace review fixes.
 
 @pytest.mark.parametrize("provision", [
     ["node_modules"],

@@ -1,5 +1,3 @@
-"""Shared fixtures for the job and server test suites."""
-
 import os
 import subprocess
 import time
@@ -15,11 +13,9 @@ def _git(*args, cwd):
     ).stdout.strip()
 
 
+# A global core.hooksPath would run the user's hooks in every test repo, and planted hooks would write into it.
 @pytest.fixture(autouse=True)
 def isolated_git(tmp_path_factory, monkeypatch):
-    """No test sees the user's own git config. A global core.hooksPath would run
-    their hooks in every test repo, and a test that plants hooks the way an
-    agent might (`git rev-parse --git-path hooks`) would write into it."""
     config = tmp_path_factory.mktemp("gitconfig") / "config"
     config.write_text("")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
@@ -49,8 +45,7 @@ def store(tmp_path):
     return JobStore(tmp_path / "home")
 
 
-# Runs the prompt's first paragraph as shell (an instruction, before any brief,
-# report request or revise feedback), and keeps the prompt and argv beside the copy.
+# Fake agy: runs the prompt's first paragraph as shell and keeps the prompt and argv beside the copy.
 SHELL_AGY = """for a; do case "$a" in -p=*) p="${a#-p=}";; esac; done
 printf '%s' "$p" > ../prompt.txt
 printf '%s\\n' "$@" > ../argv.txt
@@ -60,7 +55,6 @@ eval "$(printf '%s\\n' "$p" | awk 'BEGIN { RS = "" } NR == 1 { print; exit }')"
 
 @pytest.fixture(autouse=True)
 def agy_bin(tmp_path, monkeypatch):
-    """No test reaches the real agy: one that fails loudly is first on PATH."""
     bin_dir = tmp_path / "agy-bin"
     bin_dir.mkdir()
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")

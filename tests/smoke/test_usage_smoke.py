@@ -1,4 +1,4 @@
-"""Real agy. Reads usage only; spends no model quota."""
+# Reading /usage spends no model quota.
 
 import pytest
 
