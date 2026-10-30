@@ -9,13 +9,13 @@ import anyio
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from polyphony.executors import AgyExecutor, Mode
+from polyphony.config import DEFAULT_MODELS
 from polyphony.jobs import MAX_BRIEF_BYTES, MAX_PROMPT_BYTES
 from polyphony.server import INSTRUCTIONS, build_server
 
 TOOLS = {
-    "executors", "delegate", "delegate_many", "status", "diff", "apply", "discard", "cancel",
-    "jobs", "usage", "stats", "revise", "report", "wait", "apply_many",
+    "delegate", "revise", "status", "diff", "apply", "discard", "cancel", "jobs", "usage",
+    "stats", "report", "wait", "apply_many",
 }
 
 
@@ -26,18 +26,14 @@ def _git(*args, cwd):
 
 
 class Checks:
-    """A stand-in for check_usage, so no test ever runs a real usage check."""
+    """A stand-in for agy_usage, so no test ever runs a real usage check."""
 
-    def __init__(self, reports=None):
-        self.reports, self.calls = reports or {}, []
+    def __init__(self, report=None):
+        self.report, self.calls = report or {"ok": True, "limits": []}, 0
 
-    def __call__(self, names=None):
-        names = list(names or self.reports)
-        self.calls.append(names)
-        unknown = [n for n in names if n not in self.reports]
-        if unknown:
-            raise ValueError(f"No usage check for {', '.join(unknown)}.")
-        return [self.reports[n] for n in names]
+    def __call__(self):
+        self.calls += 1
+        return self.report
 
 
 @pytest.fixture
@@ -78,7 +74,7 @@ def test_delegate_status_diff_apply_discard(server, repo, fake_agy, store):
     commits_before = _git("rev-list", "--count", "HEAD", cwd=repo)
 
     started = call(server, "delegate", instruction="add hello.py", repo=str(repo))
-    assert started["executor"] == "agy"
+    assert started["model"] == DEFAULT_MODELS["code"]
     job_id = started["job_id"]
     assert _git("branch", "--list", "polyphony/*", cwd=repo) == ""
     assert len(_git("worktree", "list", cwd=repo).splitlines()) == 1
@@ -86,7 +82,7 @@ def test_delegate_status_diff_apply_discard(server, repo, fake_agy, store):
     status = finished(server, job_id)
     assert status["state"] == "succeeded", status
     assert status["files_changed"] == ["hello.py"]
-    assert "wrote it" in status["output_tail"]
+    assert "wrote it" in status["recent"]
 
     assert "+print('hi')" in call(server, "diff", job_id=job_id)
 
@@ -95,9 +91,19 @@ def test_delegate_status_diff_apply_discard(server, repo, fake_agy, store):
     assert _git("diff", "--cached", "--name-only", cwd=repo) == "hello.py"
     assert _git("rev-list", "--count", "HEAD", cwd=repo) == commits_before
 
+    assert not store.path(job_id).exists(), "a fully applied job is deleted"
+    assert "No job" in refused(server, "status", job_id=job_id)
+    assert "No job" in refused(server, "discard", job_id=job_id)
+
+
+def test_discard_deletes_a_finished_job(server, repo, fake_agy, store):
+    fake_agy("echo hi > new.txt")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    assert finished(server, job_id)["state"] == "succeeded"
     call(server, "discard", job_id=job_id)
     assert not store.path(job_id).exists()
     assert "No job" in refused(server, "status", job_id=job_id)
+    assert _git("status", "--porcelain", cwd=repo) == ""
 
 
 def test_delegate_resolves_a_subdirectory_to_the_repo_root(server, repo, fake_agy):
@@ -107,33 +113,10 @@ def test_delegate_resolves_a_subdirectory_to_the_repo_root(server, repo, fake_ag
     assert started["repo"] == str(repo.resolve())
 
 
-def test_explicit_unavailable_executor_is_refused(store, repo, tmp_path):
-    class Missing(AgyExecutor):
-        def is_available(self):
-            return False
-
-    srv = build_server(store=store, projects_dir=tmp_path / "none", executors={"agy": Missing},
-                       usage_check=Checks())
-    assert "not available" in refused(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
-
-
-def test_no_available_executor_is_refused(store, repo, tmp_path):
-    class Missing(AgyExecutor):
-        def is_available(self):
-            return False
-
-    srv = build_server(store=store, projects_dir=tmp_path / "none", executors={"agy": Missing},
-                       usage_check=Checks())
-    assert "No executor" in refused(srv, "delegate", instruction="x", repo=str(repo))
-
-
-def test_unknown_executor_is_refused(server, repo):
-    assert "gpt" in refused(server, "delegate", instruction="x", repo=str(repo), executor="gpt")
-
-
 def test_bad_mode_is_refused(server, repo):
     msg = refused(server, "delegate", instruction="x", repo=str(repo), mode="yolo")
-    assert "code" in msg and "review" in msg
+    assert "code" in msg and "report" in msg
+    assert "review" not in msg
 
 
 def test_non_repository_is_refused(server, tmp_path):
@@ -178,34 +161,55 @@ def test_status_without_wait_returns_while_running_then_cancel(server, repo, fak
     assert call(server, "status", job_id=job_id)["state"] == "running"
     assert "cancel" in refused(server, "discard", job_id=job_id)
     assert call(server, "cancel", job_id=job_id)["state"] == "cancelled"
-    call(server, "discard", job_id=job_id)
+    assert not store.path(job_id).exists(), "cancel deletes the job"
+    assert "No job" in refused(server, "discard", job_id=job_id)
+    assert "No job" in refused(server, "status", job_id=job_id)
 
 
 def test_status_shows_output_while_running(server, repo, fake_agy, store, wait_for):
-    fake_agy("echo step one done; sleep 30")
+    fake_agy("echo hi > new.txt; echo step one done; sleep 30")
     job_id = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
     wait_for(store, job_id, {"running"})
     deadline = time.monotonic() + 10
     status = call(server, "status", job_id=job_id)
-    while "step one done" not in status.get("output_tail", "") and time.monotonic() < deadline:
+    while ("step one done" not in status.get("recent", [])
+           or "files_touched" not in status) and time.monotonic() < deadline:
         time.sleep(0.1)
         status = call(server, "status", job_id=job_id)
     try:
         assert status["state"] == "running"
-        assert "step one done" in status["output_tail"]
+        assert "step one done" in status["recent"]
+        assert status["files_touched"] == ["new.txt"]
         assert status["output_path"] == str(store.output_path(job_id))
         assert "files_changed" not in status, "only a finished job has a result"
+        assert "response" not in status
     finally:
         call(server, "cancel", job_id=job_id)
+
+
+def test_status_shows_the_agents_events_and_final_response(server, repo, fake_agy):
+    fake_agy("""cat <<'EOF'
+{"event":"init"}
+{"event":"step","step_update":{"state":"DONE","step_type":"TOOL_CALL","tool_name":"write_file","tool_info":{"parameters":{"file_path":"/w/hello.py"}}}}
+{"event":"result","result":{"status":"SUCCESS","response":"all done"}}
+EOF
+echo hi > hello.py""")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    status = finished(server, job_id)
+    assert status["state"] == "succeeded", status
+    assert status["recent"] == ["DONE TOOL_CALL write_file hello.py"]
+    assert status["response"] == "all done"
+    assert "files_touched" not in status, "only a running job has pending changes"
+    assert "executor" not in status and "output_tail" not in status
 
 
 def test_status_of_a_queued_job_has_no_output_yet(server, repo, store):
     from polyphony.config import ProjectConfig
     from polyphony.jobs import create_job
-    job = create_job(store, ProjectConfig(name="d", path=repo), "x", "agy", "code")
+    job = create_job(store, ProjectConfig(name="d", path=repo), "x", "code")
     status = call(server, "status", job_id=job.id)
     assert status["state"] == "queued"
-    assert "output_tail" not in status
+    assert "recent" not in status and "output_path" not in status
 
 
 def test_jobs_lists_recent_jobs(server, repo, fake_agy):
@@ -214,23 +218,23 @@ def test_jobs_lists_recent_jobs(server, repo, fake_agy):
     listed = call(server, "jobs")["jobs"]
     assert listed[0]["job_id"] == job_id
     assert listed[0]["instruction"] == "list me"
+    assert listed[0]["model"] == DEFAULT_MODELS["code"] and listed[0]["mode"] == "code"
+    assert "executor" not in listed[0]
 
 
-def test_executors_reports_availability_in_pool_order(store, tmp_path):
-    # Stubs, because a real cursor's availability check runs the binary.
-    srv = build_server(store=store, projects_dir=tmp_path / "none", executors=STUBS,
-                       usage_check=Checks())
-    listed = call(srv, "executors")["executors"]
-    assert [e["name"] for e in listed] == ["agy", "cursor", "claude"]
-    assert all(e["available"] for e in listed)
+def test_usage_tool_reports_what_agy_prints(store, tmp_path, fake_agy):
+    fake_agy("printf 'Gemini Models\\tWeekly Limit Remaining\\t50%%\\tOct 1\\n'")
+    server = build_server(store=store, projects_dir=tmp_path / "none")  # the real agy_usage
+    assert call(server, "usage") == {"usage": {"ok": True, "limits": [
+        {"models": "Gemini Models", "window": "Weekly Limit", "remaining_percent": 50.0,
+         "resets_at": "Oct 1"},
+    ]}}
 
 
-def test_usage_tool(store, tmp_path, monkeypatch):
-    from polyphony import usage
-    monkeypatch.setattr(usage, "USAGE_CHECKS", {"agy": lambda: {"executor": "agy", "ok": True}})
-    server = build_server(store=store, projects_dir=tmp_path / "none")  # the real check_usage
-    assert call(server, "usage")["usage"] == [{"executor": "agy", "ok": True}]
-    assert "gpt" in refused(server, "usage", executor="gpt")
+def test_usage_tool_reports_a_failed_check(server, store, tmp_path):
+    srv = build_server(store=store, projects_dir=tmp_path / "none",
+                       usage_check=Checks({"ok": False, "error": "no"}))
+    assert call(srv, "usage") == {"usage": {"ok": False, "error": "no"}}
 
 
 def test_status_reports_the_check(server, repo, fake_agy):
@@ -265,23 +269,32 @@ def test_project_check_applies_and_delegate_overrides_it(store, repo, fake_agy, 
     assert "check_passed" not in finished(srv, skipped)
 
 
-def test_a_check_in_review_mode_is_refused(server, repo):
-    msg = refused(server, "delegate", instruction="x", repo=str(repo), mode="review",
-                  check="pytest")
-    assert "code" in msg
-
-
 def test_stats_summarizes_recorded_outcomes(server, repo, fake_agy):
     fake_agy("echo hi > new.txt")
     job_id = call(server, "delegate", instruction="x", repo=str(repo), check="true")["job_id"]
     finished(server, job_id)
     call(server, "apply", job_id=job_id)
-    call(server, "discard", job_id=job_id)
+    assert "No job" in refused(server, "discard", job_id=job_id)
 
     [agy] = call(server, "stats")["executors"]
     assert agy["executor"] == "agy"
     assert (agy["jobs"], agy["succeeded"], agy["applied"], agy["discarded"]) == (1, 1, 1, 0)
     assert agy["check_pass_rate"] == 1.0
+
+
+def test_stats_counts_a_discard_and_a_cancel(server, repo, fake_agy, store, wait_for):
+    fake_agy("echo hi > new.txt")
+    discarded = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    finished(server, discarded)
+    call(server, "discard", job_id=discarded)
+
+    fake_agy("sleep 30")
+    cancelled = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    wait_for(store, cancelled, {"running"})
+    call(server, "cancel", job_id=cancelled)
+
+    [agy] = call(server, "stats")["executors"]
+    assert (agy["jobs"], agy["discarded"], agy["cancelled"]) == (2, 1, 1)
 
 
 def test_revise_runs_a_second_attempt_and_apply_takes_both(server, repo, fake_agy, store):
@@ -298,11 +311,11 @@ def test_revise_runs_a_second_attempt_and_apply_takes_both(server, repo, fake_ag
     assert status["state"] == "succeeded", status
     assert status["attempt"] == 2
     assert status["files_changed"] == ["a.txt", "b.txt"]
-    assert "second" in status["output_tail"]
+    assert "second" in status["recent"]
 
     call(server, "apply", job_id=job_id)
     assert _git("diff", "--cached", "--name-only", cwd=repo).splitlines() == ["a.txt", "b.txt"]
-    assert "discard" in refused(server, "revise", job_id=job_id, feedback="more")
+    assert "No job" in refused(server, "revise", job_id=job_id, feedback="more")
 
 
 def test_revise_refusals(server, repo, fake_agy, store, wait_for):
@@ -311,44 +324,31 @@ def test_revise_refusals(server, repo, fake_agy, store, wait_for):
     wait_for(store, job_id, {"running"})
     assert "running" in refused(server, "revise", job_id=job_id, feedback="more")
     call(server, "cancel", job_id=job_id)
-    assert "feedback" in refused(server, "revise", job_id=job_id, feedback=" ")
-    assert "positive" in refused(server, "revise", job_id=job_id, feedback="x", timeout_minutes=0)
+    assert "No job" in refused(server, "revise", job_id=job_id, feedback="more")
+
+    fake_agy("true")
+    done = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    finished(server, done)
+    assert "feedback" in refused(server, "revise", job_id=done, feedback=" ")
+    assert "positive" in refused(server, "revise", job_id=done, feedback="x", timeout_minutes=0)
+    assert store.load(done).attempt == 1
     assert "No job" in refused(server, "revise", job_id="nope", feedback="x")
 
 
-def test_revise_refuses_when_the_jobs_executor_is_gone(store, repo, tmp_path, fake_agy):
-    fake_agy("true")
-    srv = build_server(store=store, projects_dir=tmp_path / "none", usage_check=Checks())
-    job_id = call(srv, "delegate", instruction="x", repo=str(repo))["job_id"]
-    finished(srv, job_id)
+# --- Quota, the concurrency cap, and the project's model. ---
 
-    class Missing(AgyExecutor):
-        def is_available(self):
-            return False
-
-    gone = build_server(store=store, projects_dir=tmp_path / "none", executors={"agy": Missing},
-                        usage_check=Checks())
-    assert "not available" in refused(gone, "revise", job_id=job_id, feedback="x")
+ARGON = "gemini-4-argon-high"
+RESET = "2026-10-01T02:17:05Z"
 
 
-# --- Choosing an executor: quota, concurrency caps, and fan-out. ---
+def _limits(group, remaining):
+    return {"ok": True, "limits": [
+        {"models": group, "window": f"{group} Weekly Limit", "remaining_percent": remaining,
+         "resets_at": RESET},
+    ]}
 
 
-class Always(AgyExecutor):
-    def is_available(self):
-        return True
-
-
-POOL = {"agy": Always, "cursor": Always, "claude": Always}
-
-AGY_OUT = {"executor": "agy", "ok": True, "credits": 0, "limits": [
-    {"models": "Gemini Models", "window": "Weekly Limit", "remaining_percent": 0.0,
-     "resets_at": "2026-10-01T02:17:05Z"},
-]}
-CURSOR_OUT = {"executor": "cursor", "ok": True, "plan": "Team", "resets": "Oct 21", "categories": [
-    {"name": "Included", "parent": None, "current": "100% used", "used_percent": 100.0},
-    {"name": "On-Demand", "parent": None, "current": "Disabled", "used_percent": None},
-]}
+ARGON_LOW = _limits("Gemini 4 Argon", 1.0)
 
 
 @pytest.fixture
@@ -359,9 +359,9 @@ def no_launch(monkeypatch):
     monkeypatch.setattr(jobs, "launch", lambda store, job: None)
 
 
-def _server(store, tmp_path, checks=None, executors=POOL, **kw):
+def _server(store, tmp_path, checks=None, **kw):
     return build_server(store=store, projects_dir=tmp_path / "projects",
-                        executors=executors, usage_check=checks or Checks(), **kw)
+                        usage_check=checks or Checks(), **kw)
 
 
 def _project(tmp_path, repo, **data):
@@ -371,107 +371,109 @@ def _project(tmp_path, repo, **data):
 
 
 @pytest.mark.usefixtures("no_launch")
-def test_delegate_skips_an_executor_out_of_quota(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks({"agy": AGY_OUT}))
-    started = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert started["executor"] == "cursor"
-    [skip] = started["skipped"]
-    assert skip["executor"] == "agy" and "2026-10-01T02:17:05Z" in skip["reason"]
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_a_named_executor_is_never_skipped_for_quota(store, repo, tmp_path):
-    checks = Checks({"agy": AGY_OUT})
-    srv = _server(store, tmp_path, checks)
-    started = call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
-    assert started["executor"] == "agy"
-    assert started["skipped"] == []
-    assert checks.calls == []
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_a_broken_usage_check_does_not_block_delegation(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks({"agy": {"executor": "agy", "ok": False, "error": "?"}}))
-    started = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert started["executor"] == "agy" and started["skipped"] == []
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_every_executor_out_of_quota_is_refused_with_reset_times(store, repo, tmp_path):
-    srv = _server(store, tmp_path, Checks({"agy": AGY_OUT, "cursor": CURSOR_OUT}),
-                  executors={"agy": Always, "cursor": Always})
-    msg = refused(srv, "delegate", instruction="x", repo=str(repo))
-    assert "agy" in msg and "2026-10-01T02:17:05Z" in msg
-    assert "cursor" in msg and "Oct 21" in msg
+def test_a_model_out_of_quota_is_refused_with_its_reset_time(store, repo, tmp_path):
+    srv = _server(store, tmp_path, Checks(ARGON_LOW))
+    msg = refused(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
+    assert ARGON in msg and "Gemini 4 Argon Weekly Limit" in msg and RESET in msg
     assert store.all() == []
 
 
 @pytest.mark.usefixtures("no_launch")
+def test_a_model_in_another_group_is_allowed_while_argon_is_low(store, repo, tmp_path):
+    srv = _server(store, tmp_path, Checks(ARGON_LOW))
+    started = call(srv, "delegate", instruction="x", repo=str(repo))
+    assert started["model"] == DEFAULT_MODELS["code"]
+    assert "quota_unknown" not in started
+    assert len(store.all()) == 1
+
+
+@pytest.mark.parametrize("remaining, allowed", [(5.0, False), (5.1, True)])
+@pytest.mark.usefixtures("no_launch")
+def test_the_quota_floor_is_five_percent(store, repo, tmp_path, remaining, allowed):
+    srv = _server(store, tmp_path, Checks(_limits("Gemini Models", remaining)))
+    if allowed:
+        call(srv, "delegate", instruction="x", repo=str(repo))
+        assert len(store.all()) == 1
+    else:
+        assert RESET in refused(srv, "delegate", instruction="x", repo=str(repo))
+        assert store.all() == []
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_broken_usage_check_lets_the_job_through(store, repo, tmp_path):
+    srv = _server(store, tmp_path, Checks({"ok": False, "error": "agy is down"}))
+    started = call(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
+    assert started["quota_unknown"] == "agy is down"
+    assert len(store.all()) == 1
+
+
+@pytest.mark.usefixtures("no_launch")
 def test_usage_reports_are_cached_across_delegates_and_servers(store, repo, tmp_path):
-    checks = Checks({"agy": {"executor": "agy", "ok": True, "credits": 0, "limits": []}})
+    checks = Checks()
     call(_server(store, tmp_path, checks), "delegate", instruction="x", repo=str(repo))
     call(_server(store, tmp_path, checks), "delegate", instruction="y", repo=str(repo))
-    assert checks.calls == [["agy"]]
+    assert checks.calls == 1
     assert (store.root / "usage-cache.json").exists()
 
 
 @pytest.mark.usefixtures("no_launch")
 def test_usage_is_checked_again_after_the_ttl(store, repo, tmp_path):
-    checks = Checks({"agy": {"executor": "agy", "ok": True, "credits": 0, "limits": []}})
+    checks = Checks()
     srv = _server(store, tmp_path, checks, usage_ttl=0)
     call(srv, "delegate", instruction="x", repo=str(repo))
     call(srv, "delegate", instruction="y", repo=str(repo))
-    assert checks.calls == [["agy"], ["agy"]]
+    assert checks.calls == 2
 
 
 @pytest.mark.usefixtures("no_launch")
 def test_usage_tool_refreshes_the_cache_that_delegate_reads(store, repo, tmp_path):
-    checks = Checks({"agy": AGY_OUT, "cursor": CURSOR_OUT})
+    checks = Checks(ARGON_LOW)
     srv = _server(store, tmp_path, checks)
-    assert [r["executor"] for r in call(srv, "usage")["usage"]] == ["agy", "cursor"]
-    started = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert started["executor"] == "claude"
-    assert checks.calls[0] == ["agy", "cursor"]
-    assert all(c == ["claude"] for c in checks.calls[1:])  # claude has no check to cache
-
-
-def test_executors_shows_cached_quota_without_checking(store, tmp_path):
-    checks = Checks({"agy": AGY_OUT, "cursor": {"executor": "cursor", "ok": False, "error": "no"}})
-    srv = _server(store, tmp_path, checks)
-    before = call(srv, "executors")["executors"]
-    assert all("quota" not in e for e in before)
-    assert checks.calls == []
-
-    call(srv, "usage")
-    listed = {e["name"]: e for e in call(srv, "executors")["executors"]}
-    assert "2026-10-01T02:17:05Z" in listed["agy"]["quota"]["out_of_quota"]
-    assert listed["cursor"]["quota"]["out_of_quota"] is None
-    assert listed["cursor"]["quota"]["error"] == "no"
-    assert "quota" not in listed["claude"]
-    assert listed["agy"]["active_jobs"] == 0 and listed["agy"]["max_parallel"] is None
-    assert len(checks.calls) == 1
+    assert call(srv, "usage") == {"usage": ARGON_LOW}
+    assert RESET in refused(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)
+    assert checks.calls == 1
 
 
 @pytest.mark.usefixtures("no_launch")
-def test_an_executor_at_its_cap_is_skipped_when_unnamed(store, repo, tmp_path):
-    _project(tmp_path, repo, max_parallel={"agy": 3})
-    srv = _server(store, tmp_path)
-    for _ in range(3):
-        assert call(srv, "delegate", instruction="x", repo=str(repo))["executor"] == "agy"
-    started = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert started["executor"] == "cursor"
-    assert started["skipped"][0]["executor"] == "agy"
-    assert "3" in started["skipped"][0]["reason"]
+def test_revise_is_gated_by_quota_too(store, repo, tmp_path):
+    checks = Checks()
+    srv = _server(store, tmp_path, checks, usage_ttl=0)
+    job_id = call(srv, "delegate", instruction="x", repo=str(repo), model=ARGON)["job_id"]
+    job = store.load(job_id)
+    job.state = "succeeded"
+    store.save(job)
+
+    checks.report = ARGON_LOW
+    msg = refused(srv, "revise", job_id=job_id, feedback="more")
+    assert ARGON in msg and RESET in msg
+    assert store.load(job_id).attempt == 1
+
+    checks.report = {"ok": False, "error": "agy is down"}
+    revised = call(srv, "revise", job_id=job_id, feedback="more")
+    assert revised["attempt"] == 2 and revised["quota_unknown"] == "agy is down"
+
+
+def test_agy_not_installed_is_refused(server, repo, store, fake_agy, monkeypatch):
+    fake_agy("true")
+    job_id = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
+    finished(server, job_id)
+
+    monkeypatch.setattr("polyphony.agy.binary", lambda: None)
+    assert "agy is not installed." in refused(server, "delegate", instruction="x", repo=str(repo))
+    assert "agy is not installed." in refused(server, "revise", job_id=job_id, feedback="x")
+    assert [j.id for j in store.all()] == [job_id]
+    assert store.load(job_id).attempt == 1
 
 
 @pytest.mark.usefixtures("no_launch")
-def test_a_named_executor_at_its_cap_is_refused(store, repo, tmp_path):
-    _project(tmp_path, repo, max_parallel={"agy": 1})
+def test_a_project_at_its_cap_refuses_a_delegate(store, repo, tmp_path):
+    _project(tmp_path, repo, max_parallel=2)
     srv = _server(store, tmp_path)
-    call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
-    msg = refused(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
-    assert "1 active" in msg
-    assert len(store.all()) == 1
+    for _ in range(2):
+        call(srv, "delegate", instruction="x", repo=str(repo))
+    msg = refused(srv, "delegate", instruction="x", repo=str(repo))
+    assert "active" in msg and "limit of 2" in msg
+    assert len(store.all()) == 2
 
 
 @pytest.mark.usefixtures("no_launch")
@@ -481,93 +483,86 @@ def test_the_cap_counts_jobs_from_every_project(store, repo, tmp_path):
     _git("init", "-q", "-b", "main", cwd=other)
     _git("-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "--allow-empty",
          "-m", "init", cwd=other)
-    _project(tmp_path, repo, max_parallel={"agy": 1})
+    _project(tmp_path, repo, max_parallel=1)
     srv = _server(store, tmp_path)
-    call(srv, "delegate", instruction="x", repo=str(other), executor="agy")
-    assert "1 active" in refused(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
+    call(srv, "delegate", instruction="x", repo=str(other))
+    assert "active" in refused(srv, "delegate", instruction="x", repo=str(repo))
 
 
 @pytest.mark.usefixtures("no_launch")
 def test_a_dead_worker_does_not_hold_a_slot(store, repo, tmp_path):
-    _project(tmp_path, repo, max_parallel={"agy": 1})
+    _project(tmp_path, repo, max_parallel=1)
     srv = _server(store, tmp_path)
-    job_id = call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")["job_id"]
+    job_id = call(srv, "delegate", instruction="x", repo=str(repo))["job_id"]
     p = subprocess.Popen(["true"])
     p.wait()
     job = store.load(job_id)
     job.state, job.pid = "running", p.pid
     store.save(job)
-    assert call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")["executor"] == "agy"
+    call(srv, "delegate", instruction="x", repo=str(repo))
+    assert len(store.all()) == 2
 
 
 @pytest.mark.usefixtures("no_launch")
-def test_delegate_many_starts_one_job_per_executor(store, repo, tmp_path):
-    checks = Checks({"agy": AGY_OUT})
-    srv = _server(store, tmp_path, checks)
-    started = call(srv, "delegate_many", instruction="same brief", repo=str(repo),
-                   executors=["cursor", "agy"], mode="review")
-    assert [j["executor"] for j in started["jobs"]] == ["cursor", "agy"]
-    assert len({j["job_id"] for j in started["jobs"]}) == 2
-    assert {store.load(j["job_id"]).instruction for j in started["jobs"]} == {"same brief"}
-    assert all(j["mode"] == "review" for j in started["jobs"])
-    assert checks.calls == []
-
-
-@pytest.mark.parametrize("names, expected", [
-    ([], "at least one"),
-    (["agy", "agy"], "more than once"),
-    (["agy", "gpt"], "gpt"),
-])
-@pytest.mark.usefixtures("no_launch")
-def test_delegate_many_refuses_bad_executor_lists(store, repo, tmp_path, names, expected):
+def test_revise_respects_the_cap(store, repo, tmp_path):
+    (repo / ".polyphony.yaml").write_text("max_parallel: 1\n")
     srv = _server(store, tmp_path)
-    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo), executors=names)
-    assert store.all() == []
+    job_id = call(srv, "delegate", instruction="x", repo=str(repo))["job_id"]
+    job = store.load(job_id)
+    job.state = "succeeded"
+    store.save(job)
+    call(srv, "delegate", instruction="y", repo=str(repo))
+    assert "limit of 1" in refused(srv, "revise", job_id=job_id, feedback="more")
+    assert store.load(job_id).attempt == 1
 
 
 @pytest.mark.usefixtures("no_launch")
-def test_delegate_many_starts_nothing_if_any_executor_cannot_run(store, repo, tmp_path):
-    class Missing(AgyExecutor):
-        def is_available(self):
-            return False
-
-    _project(tmp_path, repo, max_parallel={"agy": 1})
-    srv = _server(store, tmp_path, executors={"agy": Always, "cursor": Missing})
-    assert "not available" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                                      executors=["agy", "cursor"])
-    assert store.all() == []
-    call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")
-    srv = _server(store, tmp_path, executors={"agy": Always, "cursor": Always})
-    assert "1 active" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                                 executors=["cursor", "agy"])
-    assert len(store.all()) == 1
-
-
-def test_delegate_many_starts_nothing_if_a_later_copy_fails(store, repo, tmp_path, monkeypatch):
-    from polyphony import jobs
-    from polyphony.workspace import WorkspaceError
-
-    launched, real_create = [], jobs.create_job
-
-    def create(*a, **kw):
-        if kw["executor"] == "agy":
-            raise WorkspaceError("disk full")
-        return real_create(*a, **kw)
-
-    monkeypatch.setattr(jobs, "create_job", create)
-    monkeypatch.setattr(jobs, "launch", lambda store, job: launched.append(job.id))
+def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
     srv = _server(store, tmp_path)
-    assert "disk full" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                                  executors=["cursor", "agy"])
-    assert launched == []
+    for _ in range(7):
+        call(srv, "delegate", instruction="x", repo=str(repo))
+    assert len(store.all()) == 7
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_project_config_sets_the_model_per_mode(store, repo, tmp_path):
+    _project(tmp_path, repo, models={"code": "gemini-3.8-flash-high", "report": ARGON})
+    srv = _server(store, tmp_path)
+    assert call(srv, "delegate", instruction="x", repo=str(repo))["model"] == "gemini-3.8-flash-high"
+    assert call(srv, "delegate", instruction="x", repo=str(repo), mode="report")["model"] == ARGON
+    assert call(srv, "delegate", instruction="x", repo=str(repo), mode="report",
+                model="picked")["model"] == "picked"
+
+    gated = _server(store, tmp_path, Checks(ARGON_LOW), usage_ttl=0)
+    assert ARGON in refused(gated, "delegate", instruction="x", repo=str(repo), mode="report")
+    call(gated, "delegate", instruction="x", repo=str(repo))
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_a_repo_without_config_gets_the_default_models(store, repo, tmp_path):
+    srv = _server(store, tmp_path)
+    assert call(srv, "delegate", instruction="x", repo=str(repo))["model"] == DEFAULT_MODELS["code"]
+    assert call(srv, "delegate", instruction="x", repo=str(repo),
+                mode="report")["model"] == DEFAULT_MODELS["report"]
+
+
+def test_project_files_are_read_from_the_stores_home(store, repo, fake_agy):
+    fake_agy("true")
+    f = store.root / "projects" / "demo" / "project.yaml"
+    f.parent.mkdir(parents=True)
+    f.write_text(f"name: demo\npath: {repo}\nmodels: {{code: from-home}}\n")
+    srv = build_server(store=store, usage_check=Checks())
+    started = call(srv, "delegate", instruction="x", repo=str(repo))
+    assert started["model"] == "from-home"
+    finished(srv, started["job_id"])
+
+
+@pytest.mark.parametrize("config", ["models: [code\n", "models: {agy: m1}\n"])
+def test_malformed_repo_file_is_refused_readably(store, repo, config):
+    (repo / ".polyphony.yaml").write_text(config)
+    srv = build_server(store=store, usage_check=Checks())
+    assert ".polyphony.yaml" in refused(srv, "delegate", instruction="x", repo=str(repo))
     assert store.all() == []
-    assert not any(store.dir.iterdir())
-
-
-def test_delegate_many_says_it_spends_quota_on_each(server):
-    tools = {t.name: t for t in anyio.run(server.list_tools)}
-    assert "quota" in tools["delegate_many"].description
-
 
 def test_partial_apply_names_what_was_staged_and_what_was_left_out(server, repo, fake_agy):
     fake_agy("echo good > good.py; echo bad > bad.py")
@@ -593,64 +588,6 @@ def test_apply_refuses_paths_the_job_did_not_change(server, repo, fake_agy):
     assert _git("status", "--porcelain", cwd=repo) == ""
 
 
-class _Stub(AgyExecutor):
-    """Never probes a real binary: executors() checks availability."""
-
-    def is_available(self):
-        return True
-
-
-STUBS = {"agy": _Stub, "cursor": _Stub, "claude": _Stub}
-
-
-def test_repo_file_sets_the_pool(store, repo):
-    (repo / ".polyphony.yaml").write_text("pool: [cursor, agy]\nmodels: {agy: m1}\n")
-    srv = build_server(store=store, executors=STUBS, usage_check=Checks())
-    listed = call(srv, "executors", repo=str(repo))["executors"]
-    assert [e["name"] for e in listed] == ["cursor", "agy"]
-    assert listed[1]["model"] == "m1"
-
-
-def test_project_files_are_read_from_the_stores_home(store, repo):
-    f = store.root / "projects" / "demo" / "project.yaml"
-    f.parent.mkdir(parents=True)
-    f.write_text(f"name: demo\npath: {repo}\npool: [claude]\n")
-    srv = build_server(store=store, executors=STUBS, usage_check=Checks())
-    assert [e["name"] for e in call(srv, "executors", repo=str(repo))["executors"]] == ["claude"]
-
-
-def test_malformed_repo_file_is_refused_readably(store, repo):
-    (repo / ".polyphony.yaml").write_text("pool: [agy\n")
-    srv = build_server(store=store, executors=STUBS, usage_check=Checks())
-    assert ".polyphony.yaml" in refused(srv, "executors", repo=str(repo))
-
-
-class _ReviewOnly(_Stub):
-    modes = (Mode.REVIEW,)
-
-
-def test_executor_without_the_mode_is_refused_by_name(store, repo):
-    srv = build_server(store=store, executors={"opencode": _ReviewOnly}, usage_check=Checks())
-    msg = refused(srv, "delegate", instruction="x", repo=str(repo), executor="opencode")
-    assert "opencode" in msg and "code" in msg
-
-
-def test_pool_skips_an_executor_without_the_mode(store, repo, fake_agy):
-    fake_agy("true")
-    (repo / ".polyphony.yaml").write_text("pool: [opencode, agy]\n")
-    srv = build_server(store=store, executors={"opencode": _ReviewOnly, "agy": AgyExecutor},
-                       usage_check=Checks())
-    assert call(srv, "delegate", instruction="x", repo=str(repo))["executor"] == "agy"
-
-
-def test_executors_tool_lists_each_ones_modes(store, repo):
-    (repo / ".polyphony.yaml").write_text("pool: [opencode, agy]\n")
-    srv = build_server(store=store, executors={"opencode": _ReviewOnly, "agy": _Stub},
-                       usage_check=Checks())
-    listed = {e["name"]: e["modes"] for e in call(srv, "executors", repo=str(repo))["executors"]}
-    assert listed == {"opencode": ["review"], "agy": ["review", "code"]}
-
-
 # --- How the lanes' tools work together. ---
 
 
@@ -658,77 +595,22 @@ def test_a_revision_streams_into_a_fresh_output(server, repo, fake_agy, store, w
     fake_agy("if [ -f a.txt ]; then echo second attempt; sleep 30; "
              "else echo one > a.txt; echo first attempt; fi")
     job_id = call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
-    assert "first attempt" in finished(server, job_id)["output_tail"]
+    assert "first attempt" in finished(server, job_id)["recent"]
 
     call(server, "revise", job_id=job_id, feedback="more")
     wait_for(store, job_id, {"running"})
     deadline = time.monotonic() + 10
     status = call(server, "status", job_id=job_id)
-    while "second attempt" not in status.get("output_tail", "") and time.monotonic() < deadline:
+    while "second attempt" not in status.get("recent", []) and time.monotonic() < deadline:
         time.sleep(0.1)
         status = call(server, "status", job_id=job_id)
     try:
         assert status["state"] == "running" and status["attempt"] == 2
-        assert "second attempt" in status["output_tail"]
-        assert "first attempt" not in status["output_tail"]
+        assert "second attempt" in status["recent"]
+        assert "first attempt" not in status["recent"]
         assert "first attempt" in (store.path(job_id) / "output-1.txt").read_text()
     finally:
         call(server, "cancel", job_id=job_id)
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_delegate_many_passes_the_check_through(store, repo, tmp_path):
-    (repo / ".polyphony.yaml").write_text("check: make test\ncheck_timeout_minutes: 2\n")
-    srv = _server(store, tmp_path)
-    configured = call(srv, "delegate_many", instruction="x", repo=str(repo),
-                      executors=["agy", "cursor"])["jobs"]
-    overridden = call(srv, "delegate_many", instruction="x", repo=str(repo),
-                      executors=["agy", "cursor"], check="true")["jobs"]
-    skipped = call(srv, "delegate_many", instruction="x", repo=str(repo),
-                   executors=["claude"], check="")["jobs"]
-    load = store.load
-    assert {load(j["job_id"]).check_command for j in configured} == {"make test"}
-    assert {load(j["job_id"]).check_timeout_seconds for j in configured} == {120}
-    assert {load(j["job_id"]).check_command for j in overridden} == {"true"}
-    assert load(skipped[0]["job_id"]).check_command is None
-    assert "code" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                             executors=["agy"], mode="review", check="pytest")
-
-
-class _Codex(Always):
-    pass
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_opt_in_adapters_are_listed_and_capped_only_through_a_pool(store, repo, tmp_path):
-    srv = _server(store, tmp_path, executors={**POOL, "codex": _Codex})
-    assert "codex" not in [e["name"] for e in call(srv, "executors", repo=str(repo))["executors"]]
-
-    (repo / ".polyphony.yaml").write_text("pool: [codex, agy]\nmax_parallel: {codex: 1}\n")
-    listed = {e["name"]: e for e in call(srv, "executors", repo=str(repo))["executors"]}
-    assert list(listed) == ["codex", "agy"]
-    assert (listed["codex"]["active_jobs"], listed["codex"]["max_parallel"]) == (0, 1)
-    assert listed["codex"]["modes"] == ["review", "code"]
-
-    first = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert first["executor"] == "codex"
-    second = call(srv, "delegate", instruction="x", repo=str(repo))
-    assert second["executor"] == "agy"
-    assert second["skipped"] == [{"executor": "codex", "reason": "at its limit of 1 active jobs"}]
-    assert call(srv, "executors", repo=str(repo))["executors"][0]["active_jobs"] == 1
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_revise_respects_the_executors_cap(store, repo, tmp_path):
-    (repo / ".polyphony.yaml").write_text("max_parallel: {agy: 1}\n")
-    srv = _server(store, tmp_path)
-    job_id = call(srv, "delegate", instruction="x", repo=str(repo), executor="agy")["job_id"]
-    job = store.load(job_id)
-    job.state = "succeeded"
-    store.save(job)
-    call(srv, "delegate", instruction="y", repo=str(repo), executor="agy")
-    assert "1 active" in refused(srv, "revise", job_id=job_id, feedback="more")
-    assert store.load(job_id).attempt == 1
 
 
 def test_revise_is_refused_after_a_partial_apply(server, repo, fake_agy):
@@ -746,14 +628,6 @@ def test_status_survives_check_output_that_is_not_utf8(server, repo, fake_agy):
     status = finished(server, job_id)
     assert status["check_passed"] is True
     assert "caf�" in status["check_output_tail"]
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_no_job_limit_unless_the_project_sets_one(store, repo, tmp_path):
-    srv = _server(store, tmp_path)
-    for _ in range(7):
-        call(srv, "delegate", instruction="x", repo=str(repo), executor="cursor")
-    assert len(store.all()) == 7
 
 
 def test_status_lists_withheld_secrets(server, repo, fake_agy):
@@ -814,8 +688,7 @@ def test_a_brief_alone_is_the_task_and_a_relative_path_is_from_the_repo(store, r
     (repo / "docs").mkdir()
     (repo / "docs" / "brief.md").write_text("only the brief\n")
     srv = _server(store, tmp_path)
-    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="brief.md",
-                   executor="agy")
+    started = call(srv, "delegate", repo=str(repo / "docs"), brief_path="brief.md")
     job = store.load(started["job_id"])
     assert job.instruction == "only the brief\n"
     assert job.brief_path == str((repo / "docs" / "brief.md").resolve())
@@ -847,8 +720,6 @@ def test_a_bad_brief_is_refused_before_anything_is_copied(store, repo, tmp_path,
     srv = _server(store, tmp_path)
     assert expected in refused(srv, "delegate", instruction="x", repo=str(repo),
                                brief_path=str(brief))
-    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                               brief_path=str(brief), executors=["agy"])
     assert store.all() == []
 
 
@@ -863,47 +734,16 @@ def test_a_brief_at_the_limit_is_accepted(store, repo, tmp_path):
 @pytest.mark.usefixtures("no_launch")
 def test_delegate_needs_an_instruction_or_a_brief(store, repo, tmp_path):
     srv = _server(store, tmp_path)
-    for tool, extra in [("delegate", {}), ("delegate_many", {"executors": ["agy"]})]:
-        assert "brief_path" in refused(srv, tool, repo=str(repo), **extra)
-        assert "brief_path" in refused(srv, tool, instruction="  ", brief_path="",
-                                       repo=str(repo), **extra)
-    assert store.all() == []
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_delegate_many_gives_every_job_the_brief_and_its_model(store, repo, tmp_path):
-    (repo / ".polyphony.yaml").write_text("models: {agy: configured, cursor: configured}\n")
-    brief = tmp_path / "brief.md"
-    brief.write_text("the brief")
-    srv = _server(store, tmp_path)
-    started = call(srv, "delegate_many", instruction="lead", repo=str(repo),
-                   executors=["agy", "cursor"], brief_path=str(brief),
-                   models={"cursor": "picked"})["jobs"]
-    loaded = {j["executor"]: store.load(j["job_id"]) for j in started}
-    assert {j.instruction for j in loaded.values()} == {"lead\n\nthe brief"}
-    assert all((store.path(j.id) / "brief.md").read_text() == "the brief"
-               for j in loaded.values())
-    assert loaded["agy"].model == "configured"
-    assert loaded["cursor"].model == "picked"
-
-
-@pytest.mark.parametrize("models, expected", [
-    ({"claude": "m"}, "not in executors"),
-    ({"agy": " "}, "blank"),
-])
-@pytest.mark.usefixtures("no_launch")
-def test_delegate_many_refuses_bad_models(store, repo, tmp_path, models, expected):
-    srv = _server(store, tmp_path)
-    assert expected in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                               executors=["agy", "cursor"], models=models)
+    assert "brief_path" in refused(srv, "delegate", repo=str(repo))
+    assert "brief_path" in refused(srv, "delegate", instruction="  ", brief_path="",
+                                   repo=str(repo))
     assert store.all() == []
 
 
 def test_delegate_model_overrides_the_projects_and_revise_keeps_it(server, repo, fake_agy, store):
-    (repo / ".polyphony.yaml").write_text("models: {agy: configured}\n")
+    (repo / ".polyphony.yaml").write_text("models: {code: configured}\n")
     _record_prompt(fake_agy)
-    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ",
-                   executor="agy")
+    started = call(server, "delegate", instruction="x", repo=str(repo), model=" picked ")
     job_id = started["job_id"]
     assert started["model"] == "picked"
     finished(server, job_id)
@@ -923,14 +763,6 @@ def test_a_blank_model_is_refused(server, repo, store):
     assert store.all() == []
 
 
-def test_a_model_without_an_executor_is_refused(server, repo, store):
-    """A model names one CLI's model; leaving the pool to pick the CLI would
-    hand it to whichever runs."""
-    assert "needs executor" in refused(server, "delegate", instruction="x", repo=str(repo),
-                                       model="picked")
-    assert store.all() == []
-
-
 @pytest.mark.usefixtures("no_launch")
 def test_a_task_too_long_for_one_argument_is_refused(store, repo, tmp_path):
     srv = _server(store, tmp_path)
@@ -942,8 +774,6 @@ def test_a_task_too_long_for_one_argument_is_refused(store, repo, tmp_path):
     long_lead = "i" * (MAX_PROMPT_BYTES - MAX_BRIEF_BYTES)
     assert "limit" in refused(srv, "delegate", instruction=long_lead, repo=str(repo),
                               brief_path=str(brief))
-    assert "limit" in refused(srv, "delegate_many", instruction=long_lead, repo=str(repo),
-                              brief_path=str(brief), executors=["agy"])
     # Bytes, not characters: what the kernel counts.
     assert "limit" in refused(srv, "delegate", repo=str(repo),
                               instruction="\u00e9" * (MAX_PROMPT_BYTES // 2 + 1))
@@ -1006,7 +836,7 @@ def test_report_mode_without_a_report_fails_readably(server, repo, fake_agy):
     assert status["state"] == "failed"
     assert "REPORT.md" in status["error"]
     assert status["report_path"] is None and status["report_chars"] == 0
-    assert "findings only on stdout" in status["output_tail"]
+    assert "findings only on stdout" in status["recent"]
     assert "no report" in refused(server, "report", job_id=job_id)
 
 
@@ -1045,32 +875,6 @@ def test_a_check_in_report_mode_is_refused(server, repo):
     assert "code" in msg and "report" in msg
 
 
-def test_report_mode_needs_an_executor_with_a_code_mode(store, repo, fake_agy):
-    srv = build_server(store=store, executors={"opencode": _ReviewOnly}, usage_check=Checks())
-    msg = refused(srv, "delegate", instruction="x", repo=str(repo), executor="opencode",
-                  mode="report")
-    assert "opencode" in msg and "code" in msg
-    msg = refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                  executors=["opencode"], mode="report")
-    assert "opencode" in msg and "code" in msg
-
-    fake_agy("echo r > REPORT.md")
-    (repo / ".polyphony.yaml").write_text("pool: [opencode, agy]\n")
-    srv = build_server(store=store, executors={"opencode": _ReviewOnly, "agy": AgyExecutor},
-                       usage_check=Checks())
-    started = call(srv, "delegate", instruction="x", repo=str(repo), mode="report")
-    assert started["executor"] == "agy"
-    assert started["skipped"] == [{"executor": "opencode", "reason": "has no code mode"}]
-    finished(srv, started["job_id"])
-
-
-@pytest.mark.usefixtures("no_launch")
-def test_delegate_many_takes_report_mode(store, repo, tmp_path):
-    srv = _server(store, tmp_path)
-    started = call(srv, "delegate_many", instruction="x", repo=str(repo),
-                   executors=["agy", "cursor"], mode="report")["jobs"]
-    assert [j["mode"] for j in started] == ["report", "report"]
-
 
 # wait lane
 
@@ -1094,13 +898,32 @@ def test_wait_any_returns_when_the_first_job_finishes(server, repo, fake_agy):
         assert result["active"] == [slow]
         assert [j["job_id"] for j in result["jobs"]] == [slow, fast], "keeps the caller's order"
         compact, full = result["jobs"]
-        assert set(compact) == {"job_id", "state", "executor", "elapsed_seconds"}
+        brief = {"job_id", "state", "elapsed_seconds"}
+        assert set(compact) in (brief, brief | {"recent", "files_touched"})
         assert compact["state"] in ("queued", "running")
         assert full["state"] == "succeeded"
         assert full["files_changed"] == ["fast.txt"]
-        assert "output_tail" in full
+        assert "recent" in full and "output_path" in full
     finally:
         call(server, "cancel", job_id=slow)
+
+
+def test_wait_shows_a_running_job_briefly(server, repo, fake_agy, store, wait_for):
+    fake_agy("for i in 1 2 3 4 5; do echo step $i; done; echo hi > new.txt; sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    try:
+        wait_for(store, job_id, {"running"})
+        deadline = time.monotonic() + 10
+        [brief] = call(server, "wait", job_ids=[job_id], wait_seconds=0)["jobs"]
+        while brief.get("recent") != ["step 3", "step 4", "step 5"] and time.monotonic() < deadline:
+            time.sleep(0.1)
+            [brief] = call(server, "wait", job_ids=[job_id], wait_seconds=0)["jobs"]
+        assert set(brief) == {"job_id", "state", "elapsed_seconds", "recent", "files_touched"}
+        assert brief["state"] == "running"
+        assert brief["recent"] == ["step 3", "step 4", "step 5"]
+        assert brief["files_touched"] == ["new.txt"]
+    finally:
+        call(server, "cancel", job_id=job_id)
 
 
 def test_wait_all_waits_for_every_job(server, repo, fake_agy):
@@ -1170,6 +993,18 @@ def test_wait_refuses_an_unknown_job_before_waiting(server, repo, fake_agy):
         call(server, "cancel", job_id=job_id)
 
 
+def test_a_job_cancelled_elsewhere_during_a_wait_counts_as_finished(server, repo, fake_agy, store):
+    import threading
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+    canceller = threading.Timer(1.5, lambda: call(server, "cancel", job_id=job_id))
+    canceller.start()
+    result = call(server, "wait", job_ids=[job_id], wait_seconds=20)
+    canceller.join()
+    assert result["done"] and result["finished"] == [job_id]
+    assert result["jobs"][0]["state"] == "deleted"
+
+
 def test_status_and_instructions_point_at_wait(server):
     tools = {t.name: t for t in anyio.run(server.list_tools)}
     assert "use wait" in tools["status"].description
@@ -1185,8 +1020,7 @@ def test_a_relative_brief_path_is_from_the_repo_directory_given(store, repo, tmp
     (repo / "pkg" / "brief.md").write_text("the package's brief\n")
     (repo / "brief.md").write_text("the root's brief\n")
     srv = _server(store, tmp_path)
-    started = call(srv, "delegate", repo=str(repo / "pkg"), brief_path="brief.md",
-                   executor="agy")
+    started = call(srv, "delegate", repo=str(repo / "pkg"), brief_path="brief.md")
     assert store.load(started["job_id"]).instruction == "the package's brief\n"
 
 
@@ -1195,8 +1029,6 @@ def test_timeout_minutes_is_at_most_a_day(store, repo, tmp_path):
     srv = _server(store, tmp_path)
     assert "at most 1440" in refused(srv, "delegate", instruction="x", repo=str(repo),
                                      timeout_minutes=50000)
-    assert "at most 1440" in refused(srv, "delegate_many", instruction="x", repo=str(repo),
-                                     executors=["agy"], timeout_minutes=1441)
     assert "at most 1440" in refused(srv, "revise", job_id="nope", feedback="x",
                                      timeout_minutes=50000)
     call(srv, "delegate", instruction="x", repo=str(repo), timeout_minutes=1440)
@@ -1225,6 +1057,21 @@ def test_status_reads_only_the_end_of_output_and_report(server, repo, fake_agy, 
     monkeypatch.setattr(Path, "read_text", whole_file)
     status = call(server, "status", job_id=job_id)
     assert status["report_chars"] == len("# Audit\n\nall clear\n")
-    assert status["output_tail"].endswith("19999\n20000\n")
-    assert len(status["output_tail"]) == 8000
+    assert status["recent"][-1] == "20000"
+    assert len(status["recent"]) == 8
     assert "report_truncated" not in status
+
+
+def test_delegate_deletes_jobs_left_unresolved_for_a_week(server, repo, fake_agy, store):
+    from polyphony import ledger
+    fake_agy("true")
+    (old,) = _started(server, repo, "old")
+    finished(server, old)
+    job = store.load(old)
+    job.finished_at = time.time() - 8 * 86400
+    store.save(job)
+    (recent,) = _started(server, repo, "recent")
+    finished(server, recent)
+    _started(server, repo, "new")
+    assert not store.path(old).exists() and store.path(recent).exists()
+    assert {e["job_id"]: e.get("via") for e in ledger.read(store.root)} == {old: "gc"}

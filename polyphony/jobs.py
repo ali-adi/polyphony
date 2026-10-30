@@ -20,20 +20,18 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 from polyphony import ledger
 from polyphony.config import DEFAULT_HOME, ProjectConfig
-from polyphony.executors.base import Mode
 from polyphony.guard import run_git
 from polyphony.workspace import DIFF_FLAGS, Workspace, WorkspaceError, copy_git
 
 ACTIVE = ("queued", "running")
-# agy, cursor, gemini and opencode take the whole prompt as one argv string, which
+# agy takes the whole prompt as one argv string, which
 # Linux caps at 128 KiB (MAX_ARG_STRLEN); over it the executor cannot even start.
 # The prompt limit stays under that, and a brief under the prompt limit leaves
 # room for the instruction, report mode's request, and revise feedback.
@@ -48,9 +46,11 @@ CANCEL_GRACE_SECONDS = 2
 
 # A report job is a read-only audit whose findings are a file rather than
 # stdout, which a caller tends to lose. Writing that file needs edit
-# permission, so the executor runs in its code mode; what keeps it to the
+# permission, so agy runs as in code mode; what keeps it to the
 # report is the instruction, and stray_changes shows whether it listened.
+CODE = "code"
 REPORT = "report"
+MODES = (CODE, REPORT)
 REPORT_FILE = "REPORT.md"
 REPORT_INSTRUCTION = (
     f"Write your complete findings as Markdown to {REPORT_FILE} at the repository "
@@ -77,7 +77,6 @@ class Job:
     id: str
     project: str
     repo: str
-    executor: str
     mode: str
     instruction: str
     timeout_seconds: int
@@ -152,6 +151,9 @@ class Job:
         return bool(self.applied_paths)
 
 
+_JOB_FIELDS = {f.name for f in fields(Job)}
+
+
 class JobStore:
     def __init__(self, root: Path | None = None):
         # Expanded and absolute: POLYPHONY_HOME=~/.polyphony from an MCP
@@ -191,7 +193,9 @@ class JobStore:
         f = self.path(job_id) / "job.json"
         if not f.exists():
             raise JobNotFound(f"No job {job_id!r} in {self.dir}.")
-        return Job(**json.loads(f.read_text()))
+        data = json.loads(f.read_text())
+        # Records from before agy-only carry fields Job no longer has.
+        return Job(**{k: v for k, v in data.items() if k in _JOB_FIELDS})
 
     def all(self) -> list[Job]:
         if not self.dir.is_dir():
@@ -201,7 +205,7 @@ class JobStore:
 
     @contextmanager
     def lock(self):
-        """Held from counting an executor's active jobs until the new job is
+        """Held from counting active jobs until the new job is
         recorded, so two servers can't both take its last slot, and while a
         job changes hands between states (claim, refresh, revise).
 
@@ -253,10 +257,10 @@ class JobStore:
             return current
 
 
-def active_counts(store: JobStore) -> Counter[str]:
-    """Queued and running jobs per executor, across every project. Each job
-    is refreshed first, so a dead worker doesn't hold a slot."""
-    return Counter(j.executor for j in map(store.refresh, store.all()) if j.state in ACTIVE)
+def active_count(store: JobStore) -> int:
+    """Queued and running jobs across every project. Each job is refreshed
+    first, so a dead worker doesn't hold a slot."""
+    return sum(j.state in ACTIVE for j in map(store.refresh, store.all()))
 
 
 def _stuck(job: Job) -> bool:
@@ -292,7 +296,10 @@ def save_running(store: JobStore, job: Job) -> None:
     where cancel and refresh write too.
     """
     with store.lock():
-        current = store.load(job.id)
+        try:
+            current = store.load(job.id)
+        except JobNotFound:
+            raise JobDisowned(f"Job {job.id} was deleted; this worker stops.") from None
         if current.state != "running" or current.attempt != job.attempt or current.pid != job.pid:
             raise JobDisowned(f"Job {job.id} is {current.state} now; this worker stops.")
         store.save(job)
@@ -370,9 +377,7 @@ def check_prompt(text: str) -> None:
 
     Checked when the job is created and on each revise, rather than left to
     fail at launch with "Argument list too long" or "embedded null byte",
-    which the job would report as a Polyphony worker error. Applied to every
-    executor, though claude and codex read stdin, so a task's limits do not
-    depend on which executor happens to be chosen.
+    which the job would report as a Polyphony worker error.
     """
     if "\0" in text:
         raise ValueError(
@@ -399,7 +404,6 @@ def create_job(
     store: JobStore,
     project: ProjectConfig,
     instruction: str,
-    executor: str,
     mode: str,
     model: str | None = None,
     timeout_seconds: int = 1800,
@@ -409,7 +413,7 @@ def create_job(
 ) -> Job:
     """Copy the repository, provision the copy, and record the job as queued.
 
-    A check only makes sense after edits, so review mode drops it.
+    A check only makes sense after edits, so report mode drops it.
 
     `brief` is read_brief's result. Its text is joined to the instruction and
     stored as the job's instruction, so prompt() and every revision see the
@@ -436,7 +440,6 @@ def create_job(
         id=job_id,
         project=project.name,
         repo=str(project.path),
-        executor=executor,
         mode=mode,
         instruction=with_brief(instruction, brief[1] if brief else None),
         timeout_seconds=timeout_seconds,
@@ -448,7 +451,7 @@ def create_job(
             str(e["path"]).rstrip("/") for e in project.provision if e.get("mode") == "link"
         ],
         overlay_skipped=ws.skipped,
-        check_command=check if mode == "code" else None,
+        check_command=check if mode == CODE else None,
         check_timeout_seconds=check_timeout_seconds,
         queued_at=time.time(),
         withheld=ws.withheld,
@@ -478,12 +481,6 @@ def _drop_untracked_report(ws: Workspace, base_commit: str) -> None:
         stale.unlink()
 
 
-def executor_mode(mode: str) -> Mode:
-    """The mode the executor runs in for a job of `mode`: a report job needs
-    edit permission to write its report, so it is a code-mode run."""
-    return Mode.CODE if mode == REPORT else Mode(mode)
-
-
 def launch(store: JobStore, job: Job) -> None:
     """Start the job's worker, detached from the caller.
 
@@ -492,9 +489,7 @@ def launch(store: JobStore, job: Job) -> None:
     in a long-lived server, where it would make a dead worker look alive.
 
     The grace a worker has to claim the job (QUEUE_GRACE_SECONDS) counts from
-    here, not from create_job: delegate_many makes every copy before launching
-    any, and a slow later copy would otherwise get an earlier job marked died
-    before its worker could claim it.
+    here, not from create_job.
     """
     job_dir = store.path(job.id)
     with store.lock():
@@ -555,6 +550,9 @@ def revise(
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is still {job.state}; wait for it or cancel it first.")
+    if job.mode not in MODES:
+        raise JobError(f"Job {job.id} is a {job.mode} job, a mode Polyphony no longer has; "
+                       "discard it and delegate again.")
     if job.applied:
         raise JobError(
             f"Job {job.id} has already been applied ({', '.join(job.applied_paths)}). "
@@ -609,6 +607,7 @@ def cancel(store: JobStore, job_id: str) -> Job:
     Nothing else would ever escalate, since the worker was what enforced the
     timeout, so any group still alive CANCEL_GRACE_SECONDS later gets
     SIGKILL. That wait is outside the lock and ends as soon as the groups do.
+    Then the job's folder goes; the ledger keeps its outcome.
     """
     with store.lock():
         job = store.load(job_id)
@@ -626,7 +625,21 @@ def cancel(store: JobStore, job_id: str) -> Job:
         time.sleep(0.05)
         groups = [g for g in groups if _group_alive(g)]
     _signal_groups(groups, signal.SIGKILL)
+    shutil.rmtree(store.path(job.id), ignore_errors=True)
     return job
+
+
+def notify(job: Job) -> None:
+    if sys.platform != "darwin" or os.environ.get("POLYPHONY_NO_NOTIFY"):
+        return
+    script = ["-e", "on run argv", "-e",
+              "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run"]
+    try:
+        subprocess.run(["osascript", *script, f"Polyphony: {job.mode} job {job.state}",
+                        f"{job.id}: {job.instruction[:100]}"],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _record(store: JobStore, job: Job, outcome: str) -> None:
@@ -662,6 +675,13 @@ def snapshot(job: Job) -> None:
     names = _jgit(job, ["diff", "--name-only", "-z", _range(job)]).stdout
     job.files_changed = [name for name in names.split("\0") if name]
     job.diff_stat = _jgit(job, ["diff", "--stat", "--no-color", _range(job)]).stdout.rstrip()
+
+
+def pending_changes(job: Job) -> list[str]:
+    # Without --no-optional-locks, status takes index.lock and can fail the worker's own git.
+    out = _jgit(job, ["--no-optional-locks", "status", "--porcelain", "-z", "--no-renames"],
+                check=False).stdout
+    return [entry[3:] for entry in out.split("\0") if len(entry) > 3]
 
 
 def _range(job: Job) -> str:
@@ -975,7 +995,7 @@ def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
     return text
 
 
-def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[str]:
+def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple[list[str], Job]:
     """Stage a succeeded job's changes in the repository, without committing.
 
     The only operation that writes to the user's repository. If any hunk
@@ -989,7 +1009,8 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     failure (a locked index, say) is reported with git's own reason.
 
     `paths` limits it to some of the job's files; without it, everything not
-    yet applied goes. Returns the entries of files_changed applied this time.
+    yet applied goes. Returns the entries of files_changed applied this time,
+    and the job. Once all of it is applied, the job's folder goes.
     """
     job = store.load(job_id)
     if job.mode == REPORT:
@@ -1037,7 +1058,9 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> list[
     store.save(job)
     if job.outcome is None:
         _record(store, job, "applied")
-    return files
+    if all(f in job.applied_paths for f in job.files_changed):
+        shutil.rmtree(store.path(job.id), ignore_errors=True)
+    return files, job
 
 
 def _export(store: JobStore, job: Job, pathspecs: list[str]) -> Path:
@@ -1147,7 +1170,10 @@ def _put_back(repo: Path, saved: list[tuple[str, str, str, int]]) -> list[str]:
     return lost
 
 
-def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> dict:
+def apply_many(
+    store: JobStore, job_ids: list[str], dry_run: bool = False,
+    paths: dict[str, list[str]] | None = None,
+) -> dict:
     """Apply several succeeded jobs to one repository in order, or none of them.
 
     Applying a fan-out one job at a time finds a conflict between two jobs
@@ -1158,8 +1184,9 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     anything changes. Then each goes through apply, so the ledger,
     applied_paths and applied_unstaged stay exactly as one apply leaves them.
 
-    Only whole jobs: a job partly applied already is refused (use apply for
-    the rest of it). Refusals raise, changing nothing. What the pre-check
+    `paths` maps a job id to the only files of that job to apply, as apply's
+    paths do. A job partly applied already is refused (use apply for the
+    rest of it). Refusals raise, changing nothing. What the pre-check
     or the apply itself finds is returned instead, next to the report:
     applied and not_applied (job ids), overlaps (each file more than one job
     touches, with those jobs), unstaged (jobs that land, or would land,
@@ -1173,6 +1200,10 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
     if repeated:
         raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
+    paths = paths or {}
+    stray = sorted(set(paths) - set(job_ids))
+    if stray:
+        raise ValueError(f"paths names job(s) not in job_ids: {', '.join(stray)}.")
     batch = [store.load(i) for i in job_ids]
     for job in batch:
         if job.state != "succeeded":
@@ -1196,7 +1227,8 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
                        "apply_many applies to one.")
     _require_repo(repos[0])
 
-    touched = {job.id: _touched(job) for job in batch}
+    pathspecs = {job.id: _select(job, paths.get(job.id))[1] for job in batch}
+    touched = {job.id: _covered(job, pathspecs[job.id]) for job in batch}
     by_path: dict[str, list[str]] = {}
     for job in batch:
         for path in touched[job.id]:
@@ -1209,7 +1241,7 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
         "dry_run": dry_run,
         "error": None,
     }
-    patches = {job.id: _export(store, job, []) for job in batch}
+    patches = {job.id: _export(store, job, pathspecs[job.id]) for job in batch}
     result["unstaged"], result["error"] = _precheck(store, repos[0], batch, patches, touched)
     if result["error"] or dry_run:
         return result
@@ -1217,7 +1249,7 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
     result["unstaged"] = []  # from here on, what apply actually did
     for job in batch:
         try:
-            apply(store, job.id)
+            _, applied = apply(store, job.id, paths.get(job.id))
         except JobError as e:
             result["error"] = (
                 f"Stopped at job {job.id}: the pre-check passed, so the repository changed "
@@ -1226,7 +1258,7 @@ def apply_many(store: JobStore, job_ids: list[str], dry_run: bool = False) -> di
             break
         result["applied"].append(job.id)
         result["not_applied"].remove(job.id)
-        if store.load(job.id).applied_unstaged:
+        if applied.applied_unstaged:
             result["unstaged"].append(job.id)
     return result
 
@@ -1380,12 +1412,15 @@ class GcRecord:
     bytes: int
 
 
+AUTO_GC_SECONDS = 7 * 86400
+
+
 def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> list[GcRecord]:
     """Delete finished jobs that ended more than `older_than_seconds` ago.
 
-    Never run automatically: a finished job may hold work nobody has applied
-    yet, and deleting that silently is worse than the disk it uses. A job
-    that never recorded an end is aged from its creation.
+    delegate runs it with AUTO_GC_SECONDS, so a job left unresolved for a
+    week does not hold its copy forever. A job that never recorded an end
+    is aged from its creation.
     """
     now = time.time()
 

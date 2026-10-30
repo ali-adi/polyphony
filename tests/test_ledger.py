@@ -6,22 +6,11 @@ import pytest
 
 from polyphony import ledger
 from polyphony.config import ProjectConfig
-from polyphony.executors import BaseExecutor
 from polyphony.jobs import JobError, apply, cancel, create_job, discard
 from polyphony.worker import run
 
 
-class ShellExecutor(BaseExecutor):
-    name = "shell"
-
-    def find_binary(self):
-        return "/bin/sh"
-
-    def build_argv(self, instruction, mode, cwd, model=None):
-        return ["/bin/sh", "-c", instruction]
-
-
-FAKE = {"shell": ShellExecutor}
+pytestmark = pytest.mark.usefixtures("shell_agy")
 
 
 def _run_job(store, repo, instruction="echo hi > new.txt", **kw):
@@ -29,23 +18,21 @@ def _run_job(store, repo, instruction="echo hi > new.txt", **kw):
         store,
         project=ProjectConfig(name="demo", path=repo),
         instruction=instruction,
-        executor="shell",
         mode="code",
         **kw,
     )
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     return store.load(job.id)
 
 
-def test_apply_then_discard_is_one_applied_outcome(store, repo):
+def test_apply_is_one_applied_outcome(store, repo):
     job = _run_job(store, repo, check="true")
     apply(store, job.id)
-    discard(store, job.id)
     entries = ledger.read(store.root)
     assert len(entries) == 1
     e = entries[0]
     assert e["job_id"] == job.id and e["outcome"] == "applied"
-    assert e["project"] == "demo" and e["executor"] == "shell" and e["mode"] == "code"
+    assert e["project"] == "demo" and e["executor"] == "agy" and e["mode"] == "code"
     assert e["state"] == "succeeded" and e["files_changed"] == 1
     assert e["check_passed"] is True
     assert e["elapsed_seconds"] >= 0 and e["recorded_at"] >= e["created_at"]
@@ -59,11 +46,11 @@ def test_the_ledger_survives_discard(store, repo):
     assert ledger.path(store.root).parent == store.root
 
 
-def test_cancel_then_discard_is_one_cancelled_outcome(store, repo):
+def test_cancel_is_one_cancelled_outcome_and_deletes_the_job(store, repo):
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction="x", executor="shell", mode="code")
+                     instruction="x", mode="code")
     cancel(store, job.id)
-    discard(store, job.id)
+    assert not store.path(job.id).exists()
     assert [e["outcome"] for e in ledger.read(store.root)] == ["cancelled"]
 
 

@@ -9,7 +9,6 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from polyphony import ledger
 from polyphony.config import ProjectConfig
-from polyphony.executors import BaseExecutor
 from polyphony.jobs import JobError, JobNotFound, apply, apply_many, create_job
 from polyphony.server import build_server
 from polyphony.worker import run
@@ -23,22 +22,13 @@ def _git(*args, cwd):
     ).stdout.strip()
 
 
-class ShellExecutor(BaseExecutor):
-    """Runs the instruction as a shell script, so a test decides what 'the agent' does."""
-
-    name = "shell"
-
-    def find_binary(self):
-        return "/bin/sh"
-
-    def build_argv(self, instruction, mode, cwd, model=None):
-        return ["/bin/sh", "-c", instruction]
+pytestmark = pytest.mark.usefixtures("shell_agy")
 
 
 def _done(store, repo, script):
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction=script, executor="shell", mode="code")
-    run(store.path(job.id), executors={"shell": ShellExecutor})
+                     instruction=script, mode="code")
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
     return job
@@ -71,7 +61,7 @@ def test_disjoint_jobs_apply_together(store, repo):
                       "unstaged": [], "dry_run": False, "error": None}
     assert _git("diff", "--cached", "--name-only", cwd=repo).split() == ["a.txt", "app.py"]
     assert (repo / "app.py").read_text() == "x = 2\n"
-    assert store.load(a.id).applied_paths == ["a.txt"]
+    assert not store.path(a.id).exists() and not store.path(b.id).exists()
     assert {e["job_id"]: e["outcome"] for e in ledger.read(store.root)} == {
         a.id: "applied", b.id: "applied"}
 
@@ -140,7 +130,6 @@ def test_a_job_over_unstaged_edits_is_reported_and_lands_unstaged(store, repo, l
     result = apply_many(store, [a.id, b.id])
     assert result["applied"] == [a.id, b.id]
     assert result["unstaged"] == [b.id]
-    assert store.load(b.id).applied_unstaged and not store.load(a.id).applied_unstaged
     assert _git("diff", "--cached", "--name-only", cwd=repo) == "a.txt"
     assert "line 2 (mine)\n" in lines.read_text() and "line 28!\n" in lines.read_text()
 
@@ -200,8 +189,8 @@ def test_bad_job_lists_are_refused(store, ids, match):
 def test_every_job_is_validated_before_anything_changes(store, repo, tmp_path):
     good = _done(store, repo, "echo a > a.txt")
     failed = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                        instruction="exit 1", executor="shell", mode="code")
-    run(store.path(failed.id), executors={"shell": ShellExecutor})
+                        instruction="exit 1", mode="code")
+    run(store.path(failed.id))
     empty = _done(store, repo, "true")
     partial = _done(store, repo, "echo p > p.txt && echo q > q.txt")
     apply(store, partial.id, paths=["p.txt"])
@@ -236,9 +225,8 @@ def test_a_report_job_is_refused_before_anything_changes(store, repo):
     than apply the jobs before it and stop there."""
     good = _done(store, repo, "echo a > a.txt")
     report = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                        instruction="echo findings > REPORT.md; exit 0", executor="shell",
-                        mode="report")
-    run(store.path(report.id), executors={"shell": ShellExecutor})
+                        instruction="echo findings > REPORT.md; exit 0", mode="report")
+    run(store.path(report.id))
     assert store.load(report.id).state == "succeeded"
     before = _state(repo)
     with pytest.raises(JobError, match=f"Job {report.id} is a report job"):
@@ -256,12 +244,11 @@ def _call(server, tool, **args):
 
 def test_the_tool_applies_a_fan_out_and_refuses_readably(store, repo, fake_agy, wait_for):
     server = build_server(store=store, projects_dir=repo.parent / "no-projects",
-                          usage_check=lambda names=None: [])
+                          usage_check=lambda: {"ok": True, "limits": []})
     ids = []
     for name in ("one", "two"):
         fake_agy(f"echo {name} > {name}.txt")
-        job_id = _call(server, "delegate", instruction="x", repo=str(repo),
-                       executor="agy")["job_id"]
+        job_id = _call(server, "delegate", instruction="x", repo=str(repo))["job_id"]
         wait_for(store, job_id, ("succeeded",))
         ids.append(job_id)
 
@@ -271,7 +258,7 @@ def test_the_tool_applies_a_fan_out_and_refuses_readably(store, repo, fake_agy, 
     assert result["applied"] == ids
     assert _git("diff", "--cached", "--name-only", cwd=repo).split() == ["one.txt", "two.txt"]
 
-    with pytest.raises(ToolError, match=f"Job {ids[0]} is already applied") as e:
+    with pytest.raises(ToolError, match=f"No job '{ids[0]}'") as e:
         _call(server, "apply_many", job_ids=ids)
     assert e.type is ToolError
 
@@ -367,3 +354,33 @@ def test_a_moved_repository_is_a_readable_refusal(store, repo):
         apply(store, a.id)
     with pytest.raises(JobError, match="no longer exists"):
         apply_many(store, [a.id])
+
+
+def test_paths_apply_only_the_named_files_of_a_job(store, repo):
+    a = _done(store, repo, "echo a > a.txt; echo junk > junk.txt")
+    b = _done(store, repo, "echo b > b.txt")
+    result = apply_many(store, [a.id, b.id], paths={a.id: ["a.txt"]})
+    assert result["applied"] == [a.id, b.id] and result["error"] is None
+    assert _git("diff", "--cached", "--name-only", cwd=repo).split() == ["a.txt", "b.txt"]
+    assert not (repo / "junk.txt").exists()
+    assert store.load(a.id).applied_paths == ["a.txt"], "a partly applied job is kept"
+    assert not store.path(b.id).exists()
+
+
+def test_paths_left_out_of_a_job_do_not_count_as_overlaps(store, repo):
+    a = _done(store, repo, "echo a > a.txt; echo mine > shared.txt")
+    b = _done(store, repo, "echo theirs > shared.txt")
+    result = apply_many(store, [a.id, b.id], paths={a.id: ["a.txt"]}, dry_run=True)
+    assert result["overlaps"] == {} and result["error"] is None
+
+
+@pytest.mark.parametrize("paths, expected", [
+    ({"nope": ["a.txt"]}, "not in job_ids"),
+    (None, "did not change"),
+])
+def test_bad_paths_are_refused_before_anything_changes(store, repo, paths, expected):
+    a = _done(store, repo, "echo a > a.txt")
+    before = _state(repo)
+    with pytest.raises((ValueError, JobError), match=expected):
+        apply_many(store, [a.id], paths=paths or {a.id: ["missing.txt"]})
+    assert _state(repo) == before

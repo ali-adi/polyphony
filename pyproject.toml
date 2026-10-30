@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "polyphony"
 version = "0.3.0.dev0"
-description = "An MCP server that hands isolated coding tasks to agent CLIs (agy, cursor-agent, claude)"
+description = "An MCP server that hands isolated tasks to Antigravity (agy)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ali Adi" }]
-keywords = ["mcp", "claude-code", "codex", "antigravity", "cursor", "agents"]
+keywords = ["mcp", "claude-code", "antigravity", "gemini", "agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -29,7 +29,6 @@ dependencies = [
     "click>=8.1.0",
     "pyyaml>=6.0.0",
     "mcp>=2.2,<3",
-    "pyte>=0.8",
 ]
 
 [project.urls]
@@ -55,7 +54,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 norecursedirs = [".venv", "env"]
 markers = [
-    "smoke: spawns real CLI binaries and consumes subscription quota (deselected by default; run with -m smoke)",
+    "smoke: runs the real agy binary (deselected by default; run with -m smoke)",
 ]
 addopts = "-m 'not smoke'"
 

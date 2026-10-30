@@ -45,7 +45,6 @@ def test_jobs_lists_and_shows_a_job(run, tmp_path, repo):
         store,
         project=ProjectConfig(name="demo", path=repo),
         instruction="tidy the imports",
-        executor="agy",
         mode="code",
     )
     listed = run("jobs")
@@ -65,7 +64,7 @@ def test_showing_a_job_lists_withheld_secrets(run, tmp_path, repo):
     (repo / ".env").write_text("API_KEY=real\n")
     store = JobStore(tmp_path / "home")
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction="x", executor="agy", mode="code")
+                     instruction="x", mode="code")
     shown = run("jobs", job.id)
     assert "withheld   .env (see allow_secrets)" in shown.output
 
@@ -82,7 +81,6 @@ def test_discard_removes_a_finished_job(run, tmp_path, repo):
         store,
         project=ProjectConfig(name="demo", path=repo),
         instruction="x",
-        executor="agy",
         mode="code",
     )
     job.state = "failed"
@@ -92,33 +90,23 @@ def test_discard_removes_a_finished_job(run, tmp_path, repo):
     assert not store.path(job.id).exists()
 
 
-def test_doctor_reports_every_executor(run, monkeypatch):
-    from polyphony import executors
-
-    # Unavailable stand-ins, because a real cursor's availability check runs the binary.
-    stubs = {
-        name: type(name, (cls,), {"is_available": lambda self: False})
-        for name, cls in executors.EXECUTORS.items()
-    }
-    monkeypatch.setattr(executors, "EXECUTORS", stubs)
+def test_doctor_reports_agy(run, agy_bin):
     result = run("doctor")
     assert result.exit_code == 0
-    for name in ("agy", "cursor", "claude"):
-        assert name in result.output
+    assert f"ok      agy      {agy_bin / 'agy'}" in result.output
 
 
-def test_usage_prints_each_executor(run, monkeypatch):
-    from polyphony import usage
-    monkeypatch.setattr(usage, "USAGE_CHECKS", {
-        "agy": lambda: {"executor": "agy", "ok": True, "credits": 3, "limits": [
-            {"models": "Gemini Models", "window": "Weekly Limit",
-             "remaining_percent": 89.0, "resets_at": "2026-10-01T02:17:05Z"}]},
-        "cursor": lambda: {"executor": "cursor", "ok": False, "error": "timed out"},
-    })
+def test_usage_prints_agys_report(run, fake_agy):
+    fake_agy("printf 'Gemini Models\\tWeekly Limit Remaining\\t89%%\\t2026-10-01T02:17:05Z\\n'")
     result = run("usage")
     assert result.exit_code == 0
-    assert "89% left" in result.output and "credits: 3" in result.output
-    assert "ERROR  timed out" in result.output
+    assert "89% left" in result.output and "2026-10-01T02:17:05Z" in result.output
+
+
+def test_usage_says_why_it_could_not_read_agy(run):
+    result = run("usage")
+    assert result.exit_code == 0
+    assert result.output.startswith("ERROR") and "real agy called from tests" in result.output
 
 
 def test_stats_with_no_outcomes(run):
@@ -133,7 +121,6 @@ def test_stats_summarizes_the_ledger(run, tmp_path, repo):
         store,
         project=ProjectConfig(name="demo", path=repo),
         instruction="x",
-        executor="agy",
         mode="code",
     )
     job.state = "failed"
@@ -150,7 +137,6 @@ def _old_job(tmp_path, repo, state="succeeded", age_seconds=10 * 86400):
         store,
         project=ProjectConfig(name="demo", path=repo),
         instruction="x",
-        executor="agy",
         mode="code",
     )
     job.state = state
@@ -200,15 +186,12 @@ def test_gc_with_nothing_to_remove(run):
 
 @pytest.fixture
 def no_probes(monkeypatch):
-    """Keep doctor from probing real CLIs; these tests are about config."""
-    from polyphony import executors
-    monkeypatch.setattr(executors, "EXECUTORS", {})
     monkeypatch.setattr("polyphony.config.PROJECTS_DIR", Path("/nonexistent-legacy"))
 
 
 @pytest.mark.usefixtures("no_probes")
 def test_doctor_names_the_repo_config_file(run, repo, monkeypatch):
-    (repo / ".polyphony.yaml").write_text("pool: [cursor]\n")
+    (repo / ".polyphony.yaml").write_text("check: make test\n")
     monkeypatch.chdir(repo / ".")
     result = run("doctor")
     assert result.exit_code == 0, result.output
@@ -253,7 +236,7 @@ def test_doctor_reports_a_malformed_config_without_crashing(run, repo, monkeypat
 def test_jobs_shows_attempts_and_applied_files(run, tmp_path, repo):
     store = JobStore(tmp_path / "home")
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction="x", executor="agy", mode="code")
+                     instruction="x", mode="code")
     job.feedback, job.attempt, job.applied_paths = ["add tests"], 2, ["a.py"]
     store.save(job)
     shown = run("jobs", job.id)
@@ -265,7 +248,7 @@ def test_jobs_shows_attempts_and_applied_files(run, tmp_path, repo):
 def test_report_prints_the_whole_report(run, tmp_path, repo):
     store = JobStore(tmp_path / "home")
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction="audit", executor="agy", mode="report")
+                     instruction="audit", mode="report")
     text = "# Audit\n\n" + "finding\n" * 5000
     store.report_path(job.id).write_text(text)
     job.state, job.report_path = "succeeded", str(store.report_path(job.id))
@@ -278,7 +261,7 @@ def test_report_prints_the_whole_report(run, tmp_path, repo):
 def test_report_without_one_fails_readably(run, tmp_path, repo):
     store = JobStore(tmp_path / "home")
     job = create_job(store, project=ProjectConfig(name="demo", path=repo),
-                     instruction="audit", executor="agy", mode="report")
+                     instruction="audit", mode="report")
     job.state = "failed"
     store.save(job)
     result = run("report", job.id)

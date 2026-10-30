@@ -1,8 +1,8 @@
 """Per-repository settings: what a job's copy needs provisioned, and which
-executors to prefer.
+agy model each mode uses.
 
 A repository with no config still works. It just gets no provisioning and
-the default pool.
+the default models.
 
 find_project looks in three places and the first match wins:
 
@@ -20,16 +20,9 @@ from pathlib import Path
 
 import yaml
 
-from polyphony.executors import EXECUTORS
 from polyphony.workspace import normalize_rel
 
-# Cheapest subscription first: Claude quota is the binding constraint.
-DEFAULT_POOL = ["agy", "cursor", "claude"]
-
-# Active jobs allowed per executor, counted across every project (quota is per
-# account). No limit unless a project sets max_parallel: real use has run seven
-# cursor jobs at once, all applied.
-DEFAULT_MAX_PARALLEL: int | None = None
+DEFAULT_MODELS = {"code": "gemini-3.8-flash-low", "report": "gemini-3.8-flash-low"}
 
 # Here rather than in jobs.py, which imports this module.
 DEFAULT_HOME = Path.home() / ".polyphony"
@@ -49,12 +42,12 @@ class ProjectConfig:
     name: str
     path: Path
     provision: list[dict] = field(default_factory=list)
-    pool: list[str] = field(default_factory=lambda: list(DEFAULT_POOL))
-    models: dict[str, str] = field(default_factory=dict)
+    models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     # A shell command run in the job's copy after a code-mode executor succeeds.
     check: str | None = None
     check_timeout_minutes: int = 10
-    max_parallel: dict[str, int] = field(default_factory=dict)
+    # Active jobs allowed across every project (quota is per account); None is no limit.
+    max_parallel: int | None = None
     # The file this came from; None for the no-config default.
     source: Path | None = None
     # Globs for secret-looking files the job's copy gets anyway (see
@@ -90,19 +83,16 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
         if not data.get(key):
             raise ConfigError(f"{file}: missing required key {key!r}.")
 
-    pool = list(data.get("pool") or DEFAULT_POOL)
-    models = dict(data.get("models") or {})
-    max_parallel = dict(data.get("max_parallel") or {})
-    unknown = sorted((set(pool) | set(models) | set(max_parallel)) - set(EXECUTORS))
-    if unknown:
+    models = data.get("models") or {}
+    if not isinstance(models, dict) or set(models) - set(DEFAULT_MODELS):
         raise ConfigError(
-            f"{file}: unknown executor(s) {', '.join(unknown)}; "
-            f"expected one of {', '.join(sorted(EXECUTORS))}."
+            f"{file}: 'models' maps a mode ({', '.join(DEFAULT_MODELS)}) to an agy model, "
+            f"not {models!r}."
         )
-    for name, cap in max_parallel.items():
-        # bool is an int subclass; `true` in YAML is not a count.
-        if type(cap) is not int or cap < 1:
-            raise ConfigError(f"{file}: max_parallel for {name} must be a positive integer, not {cap!r}.")
+    max_parallel = data.get("max_parallel")
+    # bool is an int subclass; `true` in YAML is not a count.
+    if max_parallel is not None and (type(max_parallel) is not int or max_parallel < 1):
+        raise ConfigError(f"{file}: max_parallel must be a positive integer, not {max_parallel!r}.")
 
     check = data.get("check")
     if check is not None and not isinstance(check, str):
@@ -123,8 +113,7 @@ def load_project(file: Path, repo: Path | None = None) -> ProjectConfig:
         name=str(data["name"]),
         path=Path(data["path"]).expanduser().resolve(),
         provision=provision,
-        pool=pool,
-        models={str(k): str(v) for k, v in models.items()},
+        models={**DEFAULT_MODELS, **{k: str(v) for k, v in models.items()}},
         check=(check or "").strip() or None,
         check_timeout_minutes=check_timeout,
         max_parallel=max_parallel,

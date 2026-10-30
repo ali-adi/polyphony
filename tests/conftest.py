@@ -49,18 +49,39 @@ def store(tmp_path):
     return JobStore(tmp_path / "home")
 
 
-@pytest.fixture
-def fake_agy(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
+# Runs the prompt's first paragraph as shell (an instruction, before any brief,
+# report request or revise feedback), and keeps the prompt and argv beside the copy.
+SHELL_AGY = """for a; do case "$a" in -p=*) p="${a#-p=}";; esac; done
+printf '%s' "$p" > ../prompt.txt
+printf '%s\\n' "$@" > ../argv.txt
+eval "$(printf '%s\\n' "$p" | awk 'BEGIN { RS = "" } NR == 1 { print; exit }')"
+"""
+
+
+@pytest.fixture(autouse=True)
+def agy_bin(tmp_path, monkeypatch):
+    """No test reaches the real agy: one that fails loudly is first on PATH."""
+    bin_dir = tmp_path / "agy-bin"
     bin_dir.mkdir()
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("POLYPHONY_NO_NOTIFY", "1")
+    _script(bin_dir / "agy", "echo 'real agy called from tests' >&2; exit 97")
+    return bin_dir
 
-    def make(body):
-        script = bin_dir / "agy"
-        script.write_text(f"#!/bin/sh\n{body}\n")
-        script.chmod(0o755)
 
-    return make
+def _script(path, body):
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+
+
+@pytest.fixture
+def fake_agy(agy_bin):
+    return lambda body: _script(agy_bin / "agy", body)
+
+
+@pytest.fixture
+def shell_agy(fake_agy):
+    fake_agy(SHELL_AGY)
 
 
 @pytest.fixture

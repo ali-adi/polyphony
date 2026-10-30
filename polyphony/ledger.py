@@ -1,8 +1,8 @@
 """The outcome ledger: one JSON line per job that was applied, discarded, or cancelled.
 
 It lives at ~/.polyphony/ledger.jsonl, beside jobs/ rather than in it, so a
-job's outcome outlives discard. That record is what the pool order should
-eventually be judged on: which executor's work actually got applied.
+job's outcome outlives discard. That record is what the model choice should
+eventually be judged on: which model's work actually got applied.
 
 A job normally gets one line. The exception is a cancelled job that is then
 revised: its later outcome is appended too, and only a job's last line counts.
@@ -34,7 +34,7 @@ def record(root: Path, job: Job, outcome: str, via: str | None = None) -> None:
     entry = {
         "job_id": job.id,
         "project": job.project,
-        "executor": job.executor,
+        "executor": "agy",
         "model": job.model,
         "mode": job.mode,
         "state": job.state,

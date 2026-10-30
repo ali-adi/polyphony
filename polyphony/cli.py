@@ -34,7 +34,7 @@ from polyphony.jobs import (
 )
 @click.pass_context
 def cli(ctx, home):
-    """Polyphony: hand isolated coding tasks to agent CLIs."""
+    """Polyphony: hand isolated tasks to agy."""
     ctx.obj = JobStore(home)
 
 
@@ -65,7 +65,7 @@ def jobs(store, job_id):
             job = store.refresh(store.load(job_id))
         except JobNotFound as e:
             raise click.ClickException(str(e))
-        for key in ("id", "state", "executor", "model", "mode", "project", "workdir",
+        for key in ("id", "state", "model", "mode", "project", "workdir",
                     "exit_code", "error", "diff_stat", "check_command", "check_passed"):
             value = getattr(job, key)
             if value not in (None, ""):
@@ -89,7 +89,7 @@ def jobs(store, job_id):
     for job in all_jobs[:20]:
         job = store.refresh(job)
         created = datetime.fromtimestamp(job.created_at).strftime("%m-%d %H:%M")
-        click.echo(f"{job.id}  {job.state:<9} {job.executor:<8} {created}  {job.instruction[:60]}")
+        click.echo(f"{job.id}  {job.state:<9} {job.mode:<6} {created}  {job.instruction[:60]}")
     click.echo(f"{len(all_jobs)} job(s), {_size(disk_usage(store.dir))} on disk in {store.dir}")
 
 
@@ -172,16 +172,14 @@ def stats(store):
 @cli.command()
 @click.pass_obj
 def doctor(store):
-    """Show which agent CLIs are installed and usable, and which project
-    config applies to the repository in the current directory."""
-    from polyphony import executors
+    """Show whether agy is installed, and which project config applies to
+    the repository in the current directory."""
+    from polyphony import agy
     from polyphony.config import ConfigError, find_project
     from polyphony.guard import run_git
 
-    for name, cls in executors.EXECUTORS.items():
-        ex = cls()
-        mark = "ok     " if ex.is_available() else "MISSING"
-        click.echo(f"{mark} {name:<8} {ex.binary_path or '-'}")
+    exe = agy.binary()
+    click.echo(f"{'ok     ' if exe else 'MISSING'} agy      {exe or '-'}")
 
     res = run_git(["rev-parse", "--show-toplevel"], cwd=".")
     if res.returncode != 0:
@@ -193,19 +191,14 @@ def doctor(store):
     except ConfigError as e:
         raise click.ClickException(str(e))
     if cfg is None:
-        click.echo(f"config  no config for {root}; default pool, no provisioning")
+        click.echo(f"config  no config for {root}; default models, no provisioning")
     else:
         click.echo(f"config  {cfg.source}")
 
 
 @cli.command("usage")
-@click.argument("executor", required=False)
-def usage_cmd(executor):
-    """Show how much quota agy and cursor have left."""
-    from polyphony.usage import check_usage, format_usage
+def usage_cmd():
+    """Show how much quota agy has left."""
+    from polyphony.usage import agy_usage, format_usage
 
-    try:
-        results = check_usage([executor] if executor else None)
-    except ValueError as e:
-        raise click.ClickException(str(e))
-    click.echo(format_usage(results))
+    click.echo(format_usage(agy_usage()))

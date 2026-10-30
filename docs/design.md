@@ -8,11 +8,13 @@ it duplicated what the user's own agent already does well: planning, reviewing,
 and deciding what to do next.
 
 So the roles are reversed. The agent the user is already working with is the
-lead. Polyphony is an MCP server offering a **pool** of cheaper executors. The
-goal is quota: Claude Max weekly limits are the binding constraint, agy is cheap,
-and cursor-agent is free on a team plan. Executor choice is a preference order,
-not capability routing. There is no evidence behind any "agent X is better at Y"
-rule.
+lead. Polyphony is an MCP server that hands it one non-Claude agent, agy. Until
+October 2026 it ran a pool (agy, cursor-agent, claude, and opt-in codex, gemini
+and opencode) to save Claude quota. A month of use (`evidence/usage-review-2026-10.md`)
+showed quota rarely binds now and the real demand is a Gemini seat (Argon) on
+judgements, so the pool went: one implementation needs no executor interface,
+registry or routing. That gave up cursor's composer-2.5, the best code performer
+(10 of 11 applied), knowingly.
 
 Because the protocol is MCP and every tool describes itself without naming a
 client, switching the lead (to Codex, say) means registering the same server
@@ -22,14 +24,14 @@ there. State lives in `~/.polyphony/`, not in any client's session.
 
 | Module | Role |
 |---|---|
-| `executors/` | One adapter per CLI: binary discovery, argv for `review` and `code` modes, and failures a CLI reports while exiting 0 |
+| `agy.py` | One agy run: argv, the done-signal and stall watch, and reading its event stream |
 | `workspace.py` | A job's private clone of the repo, provisioning of gitignored paths |
 | `guard.py` | The only way git is spawned. Refuses `push` before a process exists |
-| `config.py` | Per-repository provisioning, pool order, models, check command, job limits. Found in the repo's `.polyphony.yaml`, then `$POLYPHONY_HOME/projects/`, then the legacy package-relative `projects/` |
+| `config.py` | Per-repository provisioning, model per mode, check command, job limit. Found in the repo's `.polyphony.yaml`, then `$POLYPHONY_HOME/projects/`, then the legacy package-relative `projects/` |
 | `jobs.py` | Job records, launch, cancel, revise, snapshot, check, diff, apply, apply_many, discard, gc |
 | `ledger.py` | One line per job's outcome (applied, discarded, cancelled), and the `stats` summary |
 | `worker.py` | The detached process that runs one job |
-| `usage.py` | Remaining quota, read from each CLI's own report, and its on-disk cache |
+| `usage.py` | agy's remaining quota per model group, the 5% gate, and its on-disk cache |
 | `server.py` | MCP tools: thin wrappers over `jobs.py`, `ledger.py` and `usage.py` |
 | `cli.py` | `mcp`, plus `jobs`, `discard`, `gc`, `stats`, `usage`, `doctor` for a human |
 
@@ -40,32 +42,32 @@ whether to re-delegate. An automatic rule would have to tell quota exhaustion
 apart from real bugs using output patterns nobody has observed yet. Failing over
 on a real bug would hide it and spend cheap quota on broken work.
 
-**Quota and job limits steer an unnamed choice only.** With no executor
-named, `delegate` walks the pool and passes over one that is unavailable, at
-its limit of active jobs, or whose latest usage report says it is out of quota,
-recording why in `skipped`. A named executor is never skipped for quota (the
-caller chose it) but is refused at its job limit. Usage reports are cached in
-`<home>/usage-cache.json` for 300s, failures included, because a cursor check
-runs a pseudo-terminal for seconds and a broken one would otherwise cost its
-timeout on every delegate. A missing, failed or unparsed report means "don't
-skip". agy counts as out only when every model group has a window at 0%, since
-which group a job's model draws on isn't known; cursor counts as out when every
-top-level category is 100% used or disabled. Neither CLI has been observed out
-of quota, so both rules are read from healthy output and may need adjusting.
+**Quota gates every job, per model.** agy's `/usage` rows are per model group
+(Gemini Models, Gemini 4 Argon, Claude and GPT models) and window, so `delegate`
+and `revise` map the job's model to its group by name prefix and refuse when
+any of its windows is at 5% or less. Named or defaulted makes no difference:
+the old rule that skipped the check for a named executor let Argon be delegated
+at 1% weekly quota, and a 429 killed jobs 25 minutes in. The report is cached in
+`<home>/usage-cache.json` for 300s, failures included. A failed or unreadable
+check lets the job through, marked `quota_unknown`: a broken check must not stop
+all delegation. The prefix map is a guess at agy's naming and needs a line for a
+new model family.
+
+**The model is chosen per mode.** A project's `models` maps `code` and `report`
+to agy models, because the right model depends on the job: Argon judges medical
+coding, flash writes code. With no config both are `gemini-3.8-flash-low`.
 
 **Job limits are per account, so they span projects.** Active jobs are counted
 across the whole store, refreshing each so a dead worker frees its slot. The
 limit comes from the delegating project's `max_parallel`. There is none by
-default: real use has run seven cursor jobs at once, all of them applied. A file
+default. A file
 lock on `<home>/delegate.lock` is held from counting to recording the job, so
 two servers can't both take the last slot; it serialises delegations, usage
 checks included.
 
-**Fan-out is opt-in.** `delegate_many` sends one brief to several named
-executors so the lead can compare diffs on a risky change. It checks every
-executor and makes every copy before launching any, so a failure part way
-leaves nothing running. It never picks executors itself: spending quota twice
-is the caller's decision.
+**One job per call.** A panel (several Claude judges plus an Argon seat) is the
+lead's to orchestrate; Polyphony runs the non-Claude seat. `delegate_many`, which
+sent one brief to several executors, went with the pool.
 
 **A worker runs only the attempt it was launched for.** `launch` passes the
 attempt number, and the worker claims the job (queued to running) under the
@@ -73,9 +75,7 @@ store lock only if that attempt is still current. So a job cancelled while
 queued and then revised can't be run by both its old worker and its new one.
 A queued job that no worker claims within a minute (the server stopped
 between creating and launching it) is marked `died`, so it stops holding a
-job slot. The minute counts from `launch`, not from creating the job, so a
-`delegate_many` whose later copies are slow doesn't get its first job marked
-`died` while that job's worker waits for the lock. The lock is reentrant per thread, because `delegate` holds it while
+job slot. The minute counts from `launch`, not from creating the job. The lock is reentrant per thread, because `delegate` holds it while
 counting jobs and counting refreshes them.
 
 **The worker double-forks.** The server is long-lived. If it were the worker's
@@ -97,18 +97,23 @@ signalling a group that is still being reaped briefly returns `EPERM` before
 `ESRCH`, so treating `EPERM` as alive only delays `died` by a poll, and `cancel`
 ignores it.
 
-**Output is streamed to disk, and the executor gets its own process group.**
-The executor's stdout goes straight into the job's `output.txt`, so `status`
-can show a running job's progress; stderr goes to a separate temporary file,
-because it is what explains a non-zero exit and would clutter a review's
-output. Both are files rather than pipes, so no buffer can fill and block the
-CLI. How often the file grows depends on the CLI's own buffering. The executor
-starts a new session, so a timeout kills everything it started, not only the
-CLI, and so does its exit: a dev server or watcher it left in the background
-would otherwise keep writing to the copy. That puts it outside the worker's group, so the worker records the
-executor's group in `job.json` for `cancel`. A `cancel` in the
-instant between the executor starting and that record being written still
-misses the executor.
+**agy streams events to disk, and its `result` event ends the run.** agy runs
+with `--output-format stream-json`: one JSON event per line into the job's
+`output.txt`, so `status` shows a running job's last steps and the files it has
+touched. On 2026-10-30 two report jobs printed agy's final message (so the turn
+had ended) and then ran on for two to nine minutes until cancelled, so once the
+stream holds the turn's `result` event agy gets 10 seconds to exit and is then
+stopped; the result's `status` decides success. A run with
+no new output and under a second of CPU per 30-second sample for 10 minutes
+(`STALL_SECONDS`) is stopped as stalled: output growth and the process group's
+CPU time (`ps`) are cheap to read, where walking a multi-gigabyte copy for
+mtimes is not. The job fails but keeps its snapshot and any report. stderr goes
+to a separate temporary file, because it explains a non-zero exit. agy starts a
+new session, so a timeout, a stall or the done-signal kills everything it
+started; the worker records that group in `job.json` for `cancel`. A `cancel` in
+the instant between agy starting and that record being written still misses it.
+The worker posts one macOS notification when a job ends (`osascript`, with the
+text passed as arguments, never spliced into the script).
 
 **A private clone, not a git worktree.** A worktree writes a branch, a worktree
 record and commit objects into the user's repository, and shares its `origin`.
@@ -242,7 +247,7 @@ the original instruction, says which attempt this is, and lists all feedback in
 order. The attempt goes through the worker like the first, so its output streams
 to a fresh `output.txt` and the check runs again; the previous attempt's are kept
 as `output-<n>.txt` and `check-<n>.txt`, and every result field and process
-group is cleared first. It counts against the executor's job limit. A job any
+group is cleared first. It counts against the job limit and the quota gate. A job any
 of whose files have been applied is refused: they are already in the
 repository, and applying the cumulative patch again would conflict.
 
@@ -263,30 +268,27 @@ instruction, a blank line, and its text are stored together as the job's
 `job.json` alone, and later edits to the file reach no queued or revised job.
 `brief.md` keeps the brief by itself for reading, and `brief_path` is kept for
 display only. `status` gives the stored task's length, SHA-256, and last 200
-characters so the lead can confirm it arrived whole. agy, cursor, gemini, and
-opencode take the prompt as one argv string, which Linux caps at 128 KiB
+characters so the lead can confirm it arrived whole. agy takes the prompt as
+one argv string, which Linux caps at 128 KiB
 (MAX_ARG_STRLEN); over it the executor fails to start with "Argument list too
 long". So the whole prompt, as `prompt()` builds it, is held to 120 KB
 (`MAX_PROMPT_BYTES`, in UTF-8 bytes, which is what the kernel counts), checked
 at delegate time before any copy is made and again on each `revise`, whose
-feedback only adds to it. The limit applies whichever executor runs, although
-claude and codex read stdin, so whether a task fits never depends on which one
-the pool picks. The brief's own 100 KB leaves room for the instruction, report
+feedback only adds to it. The brief's own 100 KB leaves room for the instruction, report
 mode's request and feedback.
 
-**A model needs its executor.** `model` on `delegate` is refused without
-`executor`: a model name belongs to one CLI, and with the pool choosing, it
-would go to whichever executor was free, which may not know it.
-
-**Old jobs are removed only on request.** `polyphony gc --older-than` has no
-default and never runs on its own. A finished job may hold work nobody has
-applied, and deleting that silently is worse than the disk it uses. Sizes count
-files without following link-mode symlinks; clone-mode copies share blocks with
-their source until written, so the figure is an upper bound. A job removed by
-`gc` with no outcome yet is recorded in the ledger as discarded.
-
-**Review mode also uses a copy.** It keeps the blast radius at zero even if a
-CLI's read-only mode is weaker than documented.
+**Resolving a job deletes it.** `apply` in full, `discard` and `cancel` remove
+the job's folder, and `delegate` runs `gc` on jobs unresolved for 7 days: in a
+month of use 19 folders held 12 GB, since the overlay copies gitignored data
+(medicoder's `results/` alone is 1.5 GB) and nothing was ever removed. A partial
+`apply` keeps the job for the rest. The ledger row is written before the
+folder goes, so `stats` keeps every outcome. A worker that finds its job deleted
+stops quietly. Sizes count files without following link-mode symlinks;
+clone-mode copies share blocks with their source until written, so `gc`'s figure
+is an upper bound. A job removed by `gc` with no outcome yet is recorded as
+discarded. Job records from before agy-only (with `executor` and cursor fields)
+still load: unknown fields are dropped, and a `review` job can be discarded but
+not revised.
 
 **Errors the caller can act on are `ToolError`s.** In the MCP SDK (2.x), any
 other exception reaches the client as a generic "Error executing tool" and the
@@ -294,27 +296,15 @@ message stays on the server. Bad input, git refusals, and wrong job states are
 converted. Real bugs are left to surface as crashes rather than being disguised
 as refusals.
 
-**Usage comes from the CLIs, never from their credentials.** agy prints its
-`/usage` and `/credits` slash commands in print mode as tab-separated rows.
-cursor-agent shows `/usage` only in its interactive UI, so Polyphony runs it in a
-pseudo-terminal, renders the screen with `pyte`, and parses the panel. That is
-brittle by nature. When the layout changes, the check fails loudly and returns
-the screen it saw rather than guessing. The CLIs' own tokens are never read.
-Cleanup closes the pseudo-terminal before waiting on the process: on macOS the
-real cursor-agent otherwise never finishes exiting, and the check hung forever.
-No stand-in process reproduced that, so the real-binary smoke test is the
-guard.
+**Usage comes from agy, never from its credentials.** agy prints its `/usage`
+slash command in print mode as tab-separated rows; output it cannot parse fails
+the check loudly with what it saw. agy's own tokens are never read.
 
 **Config does not depend on how Polyphony is installed.** A package-relative
 `projects/` exists only in a source checkout, so config is also read from the
 repository itself and from `$POLYPHONY_HOME`. A `.polyphony.yaml` whose `path`
 names another directory is refused: a file in one repository must not make a
 job clone another.
-
-**An adapter with no safe edit mode is review-only.** `BaseExecutor.modes`
-lists what an adapter supports, and the server refuses or skips one that lacks
-the requested mode. opencode's edit-capable agent allows everything without
-asking and has no sandbox, so it gets no `code` mode.
 
 **Secrets are withheld by name, and the check's environment is scrubbed.**
 The overlay copies untracked and gitignored files so the copy matches the
@@ -331,10 +321,11 @@ not filtered. The check runs executor-written code, so it loses
 CLIs authenticate with them; `env_scrub` names variables removed from both, and
 is recorded on the job so the detached worker applies it.
 
-**A report is a job mode, not an executor mode.** Audits run in review mode
-left their findings only in stdout, which callers lost, and users worked around
-it by running code mode with "only create ERROR_AUDIT.md". `report` makes that
-the contract: the executor runs in its `code` mode (writing a file needs edit
+**A report is a job mode, not an executor mode.** Audits run in the old review
+mode left their findings only in stdout, which callers lost (cursor's returned
+empty output 3 times of 3), and users worked around it by running code mode with
+"only create ERROR_AUDIT.md". `report` makes that the contract and replaced
+review mode: agy runs with `--mode accept-edits` (writing a file needs edit
 permission), the prompt asks for `REPORT.md` and nothing else, and the worker
 copies it out as the job's `report.md`. Other edits are listed as
 `stray_changes` rather than prevented, since no CLI can grant write access to
@@ -360,8 +351,9 @@ fails tests for reasons unrelated to the agent's work
 
 ## Verified, and not yet
 
-Verified: each adapter's flags against the real binaries
-(`evidence/smoke-results.md`), copy-on-write provisioning of medicoder's
+Verified: agy's flags and its stream-json event shapes against the real binary
+(`evidence/smoke-results.md`; `tests/fixtures/agy-stream.ndjson` is a real run's
+stream, replayed by the tests), copy-on-write provisioning of medicoder's
 virtualenv (`evidence/provisioning-spike.md`), and the full delegate, status,
 diff, apply, discard cycle against scratch repositories with a stand-in CLI.
 The check, streaming, revise, job limits, partial apply, and gc are covered the
@@ -370,9 +362,6 @@ same way, with stand-in CLIs only.
 A job copy of medicoder, provisioned from its project config, ran the repo's
 tracked suite (1245 tests) as a sandboxed check, with a stand-in executor.
 
-Not yet: a real executor's job against a real work repository. How often each real CLI flushes
-its output when stdout is not a terminal. Whether real agents build on an
-"attempt N" prompt as intended. The out-of-quota rules for agy and cursor,
-which no exhausted account has confirmed. The opt-in `codex`, `gemini`,
-and `opencode` adapters: their flags are from official docs only, never run
-against a real binary (`evidence/new-adapters-unverified.md`).
+Not yet: the done-signal and stall watch against a real agy job that idles. Whether
+real agents build on an "attempt N" prompt as intended. The model-to-quota-group
+prefix map, read from one healthy `/usage` listing.

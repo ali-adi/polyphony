@@ -9,9 +9,7 @@ provision:
   - { path: datasets/smoke/, mode: clone }
   - { path: datasets/tuning/, mode: clone }
 
-pool: [agy, cursor, claude]
-
+# Argon judges medical coding; flash writes code.
 models:
-  agy: gemini-3.8-flash-high
-  cursor: grok-4.7-high
-  claude: claude-sonnet-5
+  report: gemini-4-argon-high
+  code: gemini-3.8-flash-low

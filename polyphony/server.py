@@ -9,32 +9,27 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from polyphony import jobs, ledger
-from polyphony.config import (
-    DEFAULT_MAX_PARALLEL,
-    DEFAULT_POOL,
-    ConfigError,
-    ProjectConfig,
-    find_project,
-)
-from polyphony.executors import EXECUTORS, BaseExecutor, Mode
+from polyphony import agy, jobs, ledger
+from polyphony.config import DEFAULT_MODELS, ConfigError, ProjectConfig, find_project
 from polyphony.guard import run_git
-from polyphony.jobs import ACTIVE, Job, JobError, JobNotFound, JobStore, active_counts
-from polyphony.usage import USAGE_TTL_SECONDS, UsageCache, check_usage, out_of_quota
+from polyphony.jobs import ACTIVE, Job, JobError, JobNotFound, JobStore, active_count
+from polyphony.usage import USAGE_TTL_SECONDS, UsageCache, agy_usage, gate
 from polyphony.workspace import WorkspaceError
 
-MAX_WAIT_SECONDS = 240  # below MCP clients' tool-call timeouts
-OUTPUT_TAIL_CHARS = 8000
+# MCP clients time a tool call out at about 120 s.
+MAX_WAIT_SECONDS = 100
+RECENT_EVENTS = 8
+FILES_SHOWN = 50
 CHECK_TAIL_CHARS = 4000
 INSTRUCTION_TAIL_CHARS = 200
 # A day. Far above any real task, and far below where the executor's
@@ -44,15 +39,14 @@ WITHHELD_NOTE = (
     "These secret-looking files were kept out of the job's copy. If the task needs "
     "one, list it under allow_secrets in the project config and delegate again."
 )
-MODES = [m.value for m in Mode] + [jobs.REPORT]
-
 INSTRUCTIONS = (
-    "Polyphony runs a coding task with a separate agent CLI (agy, cursor, or "
-    "claude) in a private copy of the repository, so nothing touches it "
-    "until you apply it. Use it for well-specified mechanical work and read-only "
-    "reviews; keep work that needs your own judgment. The loop is: delegate, "
-    "status with wait_seconds, diff, then apply, revise with feedback, or "
-    "discard. apply stages the changes without committing. With more than one "
+    "Polyphony runs a task with Antigravity (agy, Gemini models) in a private "
+    "copy of the repository, so nothing touches it until you apply it. Use it "
+    "for a non-Claude view (a report-mode audit or judge seat) and for "
+    "well-specified mechanical code changes; keep work that needs your own "
+    "judgment. The loop is: delegate, status with wait_seconds, diff, then "
+    "apply, revise with feedback, or discard; for a report, read it with "
+    "report. apply stages the changes without committing. With more than one "
     "job running, call the wait tool on all of them instead of status on each."
 )
 
@@ -85,8 +79,8 @@ def _check_timeout(timeout_minutes: int) -> None:
 
 
 def _check_args(mode: str, timeout_minutes: int, check: str | None) -> None:
-    if mode not in MODES:
-        raise ValueError(f"mode must be one of {', '.join(MODES)}, not {mode!r}.")
+    if mode not in jobs.MODES:
+        raise ValueError(f"mode must be one of {', '.join(jobs.MODES)}, not {mode!r}.")
     _check_timeout(timeout_minutes)
     if check and mode != "code":
         raise ValueError(
@@ -101,7 +95,7 @@ def _task(
 
     A relative brief_path is taken from `repo` as the caller gave it, which
     may be a subdirectory, not from the repository's top level.
-    Before any executor is chosen or copy made, so a bad path costs nothing.
+    Before any copy is made, so a bad path costs nothing.
     """
     base = Path(repo).expanduser().resolve()
     brief = jobs.read_brief(brief_path, base) if brief_path else None
@@ -121,75 +115,13 @@ def _model(model: str | None, what: str = "model") -> str | None:
     return model.strip()
 
 
-def _check_named(
-    name: str,
-    executors: dict[str, type[BaseExecutor]],
-    running: dict[str, int],
-    project: ProjectConfig,
-    mode: Mode,
-) -> None:
-    """An executor the caller named must exist, support the mode, be
-    installed, and have a free slot. Quota is not checked: they chose it."""
-    if name not in executors:
-        raise ValueError(f"Unknown executor {name!r}; expected one of {', '.join(executors)}.")
-    if mode not in executors[name].modes:
-        raise ValueError(f"Executor {name!r} has no {mode.value} mode.")
-    if not executors[name]().is_available():
-        raise ValueError(f"Executor {name!r} is not available right now.")
-    cap = project.max_parallel.get(name, DEFAULT_MAX_PARALLEL)
-    if cap is not None and running.get(name, 0) >= cap:
+def _check_ready(store: JobStore, project: ProjectConfig) -> None:
+    if agy.binary() is None:
+        raise ValueError("agy is not installed.")
+    running, cap = active_count(store), project.max_parallel
+    if cap is not None and running >= cap:
         raise ValueError(
-            f"Executor {name!r} already has {running[name]} active job(s), its limit of {cap}. "
-            "Wait for one to finish, or name another executor."
-        )
-
-
-def _choose(
-    executor: str | None,
-    project: ProjectConfig,
-    executors: dict[str, type[BaseExecutor]],
-    running: dict[str, int],
-    quota: Callable[[str], str | None],
-    mode: Mode,
-) -> tuple[str, list[dict]]:
-    """The executor to use, and the ones passed over on the way with why.
-
-    `quota(name)` gives the reason name is out of quota, or None. It is only
-    asked about an executor that would otherwise be chosen, since a check
-    takes seconds when not cached.
-    """
-    if executor is not None:
-        _check_named(executor, executors, running, project, mode)
-        return executor, []
-    skipped: list[dict] = []
-    for name in project.pool:
-        if name not in executors:
-            continue
-        if mode not in executors[name].modes:
-            skipped.append({"executor": name, "reason": f"has no {mode.value} mode"})
-            continue
-        if not executors[name]().is_available():
-            skipped.append({"executor": name, "reason": "not available"})
-            continue
-        cap = project.max_parallel.get(name, DEFAULT_MAX_PARALLEL)
-        if cap is not None and running.get(name, 0) >= cap:
-            skipped.append({"executor": name, "reason": f"at its limit of {cap} active jobs"})
-            continue
-        reason = quota(name)
-        if reason:
-            skipped.append({"executor": name, "reason": reason})
-            continue
-        return name, skipped
-    if all(s["reason"] in ("not available", f"has no {mode.value} mode") for s in skipped):
-        raise ValueError(
-            f"No executor in {', '.join(project.pool)} is available right now "
-            f"for {mode.value} mode."
-        )
-    raise ValueError(
-        "No executor can take this job: "
-        + "; ".join(f"{s['executor']}: {s['reason']}" for s in skipped)
-        + "."
-    )
+            f"{running} job(s) are active, the limit of {cap}. Wait for one to finish.")
 
 
 def _tail(path: Path, chars: int) -> str:
@@ -205,12 +137,29 @@ def _tail(path: Path, chars: int) -> str:
         return ""
 
 
+def _activity(store: JobStore, job: Job) -> dict:
+    stream = agy.events(store.output_path(job.id))
+    recent: list[str] = []
+    for event in stream:
+        if isinstance(event, dict) and event.get("event") in ("init", "result"):
+            continue
+        line = agy.describe(event)
+        if not recent or recent[-1] != line:
+            recent.append(line)
+    info: dict = {"recent": recent[-RECENT_EVENTS:]}
+    final = agy.result_event(store.output_path(job.id))
+    if final is not None:
+        info["response"] = final.get("response")
+    if job.state == "running" and Path(job.workdir).is_dir():
+        info["files_touched"] = jobs.pending_changes(job)[:FILES_SHOWN]
+    return info
+
+
 def _summary(store: JobStore, job: Job) -> dict:
     end = job.finished_at or time.time()
     info = {
         "job_id": job.id,
         "state": job.state,
-        "executor": job.executor,
         "model": job.model,
         "mode": job.mode,
         "attempt": job.attempt,
@@ -228,9 +177,7 @@ def _summary(store: JobStore, job: Job) -> dict:
         info["brief_path"] = job.brief_path
     if job.state == "queued":
         return info
-    # A running job's output is whatever the executor has written so far.
-    output = store.output_path(job.id)
-    info.update(output_tail=_tail(output, OUTPUT_TAIL_CHARS), output_path=str(output))
+    info.update(_activity(store, job), output_path=str(store.output_path(job.id)))
     if job.state not in ACTIVE:
         info.update(
             exit_code=job.exit_code,
@@ -269,211 +216,103 @@ def _summary(store: JobStore, job: Job) -> dict:
 WAIT_UNTIL = ("any", "all")
 
 
-def _brief(job: Job) -> dict:
-    """An active job as wait reports it: enough to see it is still going,
-    without the output tail that makes a full summary large when waiting on
-    many jobs. elapsed_seconds is computed as in _summary."""
+def _brief(store: JobStore, job: Job) -> dict:
     end = job.finished_at or time.time()
-    return {"job_id": job.id, "state": job.state, "executor": job.executor,
+    info = {"job_id": job.id, "state": job.state,
             "elapsed_seconds": round(end - (job.started_at or job.created_at), 1)}
+    if job.state == "running":
+        activity = _activity(store, job)
+        info.update(recent=activity["recent"][-3:], files_touched=activity.get("files_touched"))
+    return info
+
+
+def _reload(store: JobStore, job: Job) -> Job:
+    try:
+        return store.refresh(store.load(job.id))
+    except JobNotFound:
+        return replace(job, state="deleted")  # cancelled by another call, which deletes it
 
 
 def build_server(
     store: JobStore | None = None,
     projects_dir: Path | None = None,
-    executors: dict[str, type[BaseExecutor]] = EXECUTORS,
-    usage_check: Callable[[list[str] | None], list[dict]] = check_usage,
+    usage_check: Callable[[], dict] = agy_usage,
     usage_ttl: float = USAGE_TTL_SECONDS,
 ) -> MCPServer:
     store = store or JobStore()
     server = MCPServer(name="polyphony", instructions=INSTRUCTIONS)
     usage_cache = UsageCache(store.root, check=usage_check, ttl=usage_ttl)
-    known = executors  # delegate_many's parameter shadows the name
 
     def project_for(root: Path) -> ProjectConfig:
         return (find_project(root, projects_dir, home=store.root)
                 or ProjectConfig(name=root.name, path=root))
 
-    def create(project: ProjectConfig, instruction: str, executor: str, mode: str,
-               timeout_minutes: int, check: str | None,
-               brief: tuple[Path, str] | None = None, model: str | None = None) -> Job:
-        """check None uses the project's command; "" runs none. model None
-        uses the project's for the executor."""
-        return jobs.create_job(
-            store,
-            project=project,
-            instruction=instruction,
-            executor=executor,
-            mode=mode,
-            model=model or project.models.get(executor),
-            timeout_seconds=timeout_minutes * 60,
-            check=project.check if check is None else (check.strip() or None),
-            check_timeout_seconds=project.check_timeout_minutes * 60,
-            brief=brief,
-        )
-
-    def launched(job: Job) -> Job:
-        jobs.launch(store, job)
-        return store.refresh(store.load(job.id))
-
-    def start(project: ProjectConfig, instruction: str, executor: str, mode: str,
-              timeout_minutes: int, check: str | None,
-              brief: tuple[Path, str] | None = None, model: str | None = None) -> Job:
-        return launched(create(project, instruction, executor, mode, timeout_minutes, check,
-                               brief, model))
-
-    def quota_state(name: str) -> dict | None:
-        entry = usage_cache.cached(name)
-        if entry is None:
-            return None
-        report = entry["report"]
-        state = {
-            "checked_at": datetime.fromtimestamp(entry["checked_at"]).isoformat(timespec="seconds"),
-            "out_of_quota": out_of_quota(report),
-        }
+    def quota(model: str) -> dict:
+        report = usage_cache.report()
         if not report.get("ok"):
-            state["error"] = report.get("error")
-        return state
-
-    @server.tool(name="executors")
-    def list_executors(repo: str | None = None) -> dict:
-        """List the agent CLIs in preference order, whether each is available
-        right now, the model it would use, its modes (some are review only),
-        its active jobs against its limit, and its quota as of the last usage
-        check, if there was one (this never runs a check). Pass repo to use
-        that repository's preferences."""
-        with _anticipated():
-            project = project_for(_toplevel(repo)) if repo else None
-            pool = project.pool if project else DEFAULT_POOL
-            models = project.models if project else {}
-            caps = project.max_parallel if project else {}
-            running = active_counts(store)
-            listed = []
-            for n in pool:
-                if n not in executors:
-                    continue
-                entry = {
-                    "name": n,
-                    "available": executors[n]().is_available(),
-                    "model": models.get(n),
-                    "modes": [m.value for m in executors[n].modes],
-                    "active_jobs": running.get(n, 0),
-                    "max_parallel": caps.get(n, DEFAULT_MAX_PARALLEL),
-                }
-                quota = quota_state(n)
-                if quota is not None:
-                    entry["quota"] = quota
-                listed.append(entry)
-            return {"executors": listed}
+            return {"quota_unknown": report.get("error")}
+        reason = gate(report, model)
+        if reason:
+            raise ValueError(f"{reason} Name another model (such as {DEFAULT_MODELS['code']}), "
+                             "or wait for the reset.")
+        return {}
 
     @server.tool()
     def delegate(
         instruction: str = "",
         *,
         repo: str,
-        executor: str | None = None,
         mode: str = "code",
         timeout_minutes: int = 30,
         check: str | None = None,
         brief_path: str | None = None,
         model: str | None = None,
     ) -> dict:
-        """Start a task with another agent CLI in a private copy of repo,
-        returning a job_id at once. mode "code" lets the agent edit files;
-        "review" is read-only; "report" is an audit whose findings the agent
-        writes to REPORT.md, read with report(). executor defaults to the
-        first one in the repository's preference order that is available,
-        below its limit of active jobs, and not out of quota; "skipped" says
-        why any before it were passed over. check is a shell command run in
-        the copy once the agent succeeds (code mode only), overriding the
-        repository's configured one; "" skips it. Nothing reaches the
-        repository until you call apply. Follow up with status.
+        """Start a task with agy in a private copy of repo, returning a
+        job_id at once. mode "code" lets the agent edit files; "report" is an
+        audit whose findings the agent writes to REPORT.md, read with
+        report(). check is a shell command run in the copy once the agent
+        succeeds (code mode only), overriding the repository's configured
+        one; "" skips it. Nothing reaches the repository until you call
+        apply. Follow up with status or wait.
+
+        model is an agy model id (gemini-4-argon-high, gemini-3.8-flash-low,
+        ...); left out, the repository's model for the mode is used. A model
+        whose quota is at 5% or less is refused; the result carries
+        quota_unknown when the quota could not be read.
 
         brief_path names a UTF-8 file (at most 100 KB; a relative path is
         from the repo directory as given) whose text follows instruction,
         after a blank line, as the task; use it for any long brief, which
-        can be cut short when passed inline. It is
-        copied at once, so later edits to the file don't reach the job. Give
-        instruction, brief_path, or both; together they must stay under 120
-        KB. instruction_chars and instruction_tail in the result show the
-        task arrived whole. model overrides the repository's model and needs
-        executor, since a model belongs to one CLI. timeout_minutes is at
-        most 1440 (a day)."""
+        can be cut short when passed inline. It is copied at once, so later
+        edits to the file don't reach the job. Give instruction, brief_path,
+        or both; together they must stay under 120 KB. instruction_chars and
+        instruction_tail in the result show the task arrived whole.
+        timeout_minutes is at most 1440 (a day)."""
         with _anticipated():
             _check_args(mode, timeout_minutes, check)
             model = _model(model)
-            if model is not None and executor is None:
-                # A model belongs to one CLI; which one runs would be up to the pool.
-                raise ValueError(
-                    "model needs executor: name the executor the model belongs to, "
-                    "or leave model out for the project's."
-                )
             root = _toplevel(repo)
             brief = _task(instruction, brief_path, repo, mode)
             project = project_for(root)
+            model = model or project.models[mode]
+            jobs.gc(store, jobs.AUTO_GC_SECONDS)
+            unknown = quota(model)  # outside the lock: a check can take a minute
             with store.lock():
-                chosen, skipped = _choose(
-                    executor, project, executors, active_counts(store),
-                    lambda name: out_of_quota(usage_cache.report(name)),
-                    jobs.executor_mode(mode),
+                _check_ready(store, project)
+                job = jobs.create_job(
+                    store,
+                    project=project,
+                    instruction=instruction,
+                    mode=mode,
+                    model=model,
+                    timeout_seconds=timeout_minutes * 60,
+                    check=project.check if check is None else (check.strip() or None),
+                    check_timeout_seconds=project.check_timeout_minutes * 60,
+                    brief=brief,
                 )
-                job = start(project, instruction, chosen, mode, timeout_minutes, check,
-                            brief, model)
-            return {**_summary(store, job), "skipped": skipped}
-
-    @server.tool()
-    def delegate_many(
-        instruction: str = "",
-        *,
-        repo: str,
-        executors: list[str],
-        mode: str = "code",
-        timeout_minutes: int = 30,
-        check: str | None = None,
-        brief_path: str | None = None,
-        models: dict[str, str] | None = None,
-    ) -> dict:
-        """Start the same task with each named executor at once, one job per
-        executor, each in its own copy of repo. This spends quota on every
-        executor named, so use it only for a risky change where comparing two
-        diffs is worth that; apply at most one and discard the rest. Starts
-        nothing unless every executor is available and below its limit of
-        active jobs. check and brief_path work as in delegate; every job gets
-        the same brief. models maps an executor named here to the model it
-        should use instead of the repository's."""
-        with _anticipated():
-            _check_args(mode, timeout_minutes, check)
-            if not executors:
-                raise ValueError("Name at least one executor.")
-            repeated = sorted({n for n in executors if executors.count(n) > 1})
-            if repeated:
-                raise ValueError(f"Executor(s) named more than once: {', '.join(repeated)}.")
-            models = models or {}
-            stray = [n for n in models if n not in executors]
-            if stray:
-                raise ValueError(
-                    f"models names executor(s) not in executors: {', '.join(stray)}."
-                )
-            models = {n: _model(m, f"models[{n!r}]") for n, m in models.items()}
-            root = _toplevel(repo)
-            brief = _task(instruction, brief_path, repo, mode)
-            project = project_for(root)
-            with store.lock():
-                running = active_counts(store)
-                for name in executors:
-                    _check_named(name, known, running, project, jobs.executor_mode(mode))
-                # Every copy first, so a failure part way leaves nothing running.
-                created: list[Job] = []
-                try:
-                    for n in executors:
-                        created.append(create(project, instruction, n, mode, timeout_minutes,
-                                              check, brief, models.get(n)))
-                except BaseException:
-                    for job in created:
-                        shutil.rmtree(store.path(job.id), ignore_errors=True)
-                    raise
-                started = [launched(job) for job in created]
-            return {"jobs": [_summary(store, job) for job in started]}
+                jobs.launch(store, job)
+            return {**_summary(store, store.refresh(store.load(job.id))), **unknown}
 
     @server.tool()
     def revise(job_id: str, feedback: str, timeout_minutes: int | None = None) -> dict:
@@ -487,32 +326,22 @@ def build_server(
             if timeout_minutes is not None:
                 _check_timeout(timeout_minutes)
             job = store.load(job_id)
-            name = job.executor
-            if name not in executors or not executors[name]().is_available():
-                raise ValueError(
-                    f"Executor {name!r} is not available right now; discard the job "
-                    "and delegate it with another executor."
-                )
+            unknown = quota(job.model) if job.model else {}
             with store.lock():
-                running = active_counts(store)
-                cap = project_for(Path(job.repo)).max_parallel.get(name, DEFAULT_MAX_PARALLEL)
-                if cap is not None and running.get(name, 0) >= cap:
-                    raise ValueError(
-                        f"Executor {name!r} already has {running[name]} active job(s), its "
-                        f"limit of {cap}. Wait for one to finish."
-                    )
+                _check_ready(store, project_for(Path(job.repo)))
                 job = jobs.revise(
                     store, job_id, feedback,
                     timeout_seconds=timeout_minutes * 60 if timeout_minutes else None,
                 )
                 jobs.launch(store, job)
-            return _summary(store, store.refresh(store.load(job.id)))
+            return {**_summary(store, store.refresh(store.load(job.id))), **unknown}
 
     @server.tool()
     def status(job_id: str, wait_seconds: int = 0) -> dict:
-        """A job's state and the tail of its output so far, and once it has
-        finished, what it changed and whether its check passed. wait_seconds
-        (at most 240) blocks until the job finishes or the time runs out,
+        """A job's state; its latest agent events ("recent") and, while it
+        runs, the files it has touched so far; once it has finished, agy's
+        final response, what it changed and whether its check passed.
+        wait_seconds (at most 100) blocks until the job finishes or the time runs out,
         which is cheaper than polling. For more than one job, use wait."""
         with _anticipated():
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
@@ -537,10 +366,9 @@ def build_server(
         applied to the working tree and left unstaged. Refuses, changing
         nothing, if they don't apply cleanly to the repository as it is now
         (or git cannot write it: a locked index, say, with git's reason).
-        Call discard afterwards."""
+        Once every file is applied, the job is deleted."""
         with _anticipated():
-            files = jobs.apply(store, job_id, paths)
-            job = store.load(job_id)
+            files, job = jobs.apply(store, job_id, paths)
             if job.applied_unstaged:
                 msg = (f"Applied {len(files)} file(s) to the working tree, unstaged because "
                        f"they overlap unstaged edits; not committed: {', '.join(files)}")
@@ -561,7 +389,7 @@ def build_server(
 
     @server.tool()
     def cancel(job_id: str) -> dict:
-        """Stop a queued or running job and kill its agent."""
+        """Stop a queued or running job, kill its agent, and delete the job."""
         with _anticipated():
             return _summary(store, jobs.cancel(store, job_id))
 
@@ -573,7 +401,8 @@ def build_server(
                 {
                     "job_id": j.id,
                     "state": store.refresh(j).state,
-                    "executor": j.executor,
+                    "model": j.model,
+                    "mode": j.mode,
                     "project": j.project,
                     "created": datetime.fromtimestamp(j.created_at).isoformat(timespec="seconds"),
                     "instruction": j.instruction[:100],
@@ -583,17 +412,15 @@ def build_server(
         }
 
     @server.tool()
-    def usage(executor: str | None = None) -> dict:
-        """How much quota agy and cursor have left, as each CLI reports it:
-        limits, percentages, and reset times. Takes several seconds. Pass
-        executor ("agy" or "cursor") to check just one. delegate reuses the
-        result for a few minutes when choosing an executor."""
-        with _anticipated():
-            return {"usage": usage_cache.refresh([executor] if executor else None)}
+    def usage() -> dict:
+        """How much quota agy has left per model group (Gemini Models,
+        Gemini 4 Argon, ...): percentages and reset times. Takes several
+        seconds. delegate reuses the result for a few minutes."""
+        return {"usage": usage_cache.refresh()}
 
     @server.tool()
     def stats() -> dict:
-        """How each executor's (and model's) past jobs turned out: jobs,
+        """How past jobs turned out per executor and model: jobs,
         succeeded, revised, applied, discarded, cancelled, check pass rate, and median
         elapsed time. Counted when a job is applied, discarded, or cancelled."""
         return {"executors": ledger.summarize(ledger.read(store.root))}
@@ -612,14 +439,15 @@ def build_server(
 
     # wait lane
     @server.tool()
-    def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 120) -> dict:
+    def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 90) -> dict:
         """Block until any (until="any") or all (until="all") of job_ids have
-        finished, or wait_seconds (at most 240) runs out: one call in place
+        finished, or wait_seconds (at most 100) runs out: one call in place
         of status on each job in turn. "done" says whether that happened.
         "finished" and "active" list the ids by state, and "jobs" gives
         each finished job in full, as status would, and each active one only
-        as job_id, state, executor and elapsed_seconds. With "any", a job
-        already finished counts, so pass only the ids you still wait on."""
+        as job_id, state, elapsed_seconds and, while it runs, its last
+        events and the files it has touched. With "any", a job already
+        finished counts, so pass only the ids you still wait on."""
         with _anticipated():
             if until not in WAIT_UNTIL:
                 raise ValueError(f"until must be one of {', '.join(WAIT_UNTIL)}, not {until!r}.")
@@ -629,10 +457,10 @@ def build_server(
             if repeated:
                 raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
+            # An unknown id is refused before any waiting.
+            listed = [store.refresh(store.load(i)) for i in job_ids]
             while True:
-                # Every id is loaded on the first pass, so an unknown one is
-                # refused before any waiting.
-                listed = [store.refresh(store.load(i)) for i in job_ids]
+                listed = [_reload(store, j) for j in listed]
                 finished = [j.id for j in listed if j.state not in ACTIVE]
                 done = bool(finished) if until == "any" else len(finished) == len(listed)
                 if done or time.monotonic() >= deadline:
@@ -642,14 +470,16 @@ def build_server(
                 "done": done,
                 "finished": finished,
                 "active": [j.id for j in listed if j.state in ACTIVE],
-                "jobs": [_summary(store, j) if j.state not in ACTIVE else _brief(j)
+                "jobs": [_summary(store, j) if j.state not in ACTIVE else _brief(store, j)
                          for j in listed],
             }
 
     # --- apply_many lane ---
 
     @server.tool()
-    def apply_many(job_ids: list[str], dry_run: bool = False) -> dict:
+    def apply_many(
+        job_ids: list[str], dry_run: bool = False, paths: dict[str, list[str]] | None = None,
+    ) -> dict:
         """Stage several succeeded jobs in one repository, in the order given,
         without committing: all of them or, if any would not apply, none.
         Every patch is first checked on top of the ones before it, so jobs
@@ -659,10 +489,10 @@ def build_server(
         landed, the ones in "applied" are already staged. "overlaps" lists
         each file more than one job touched; "unstaged" the jobs left unstaged
         because they touch files with unstaged edits. dry_run only reports.
-        Whole jobs only: for a job partly applied, use apply. Use it after a
-        fan-out of separate tasks, not after delegate_many (apply one of
-        those). Call discard afterwards."""
+        paths maps a job id to the only files of that job to apply, as in
+        apply; for a job already partly applied, use apply. Each job applied
+        in full is deleted."""
         with _anticipated():
-            return jobs.apply_many(store, job_ids, dry_run)
+            return jobs.apply_many(store, job_ids, dry_run, paths)
 
     return server

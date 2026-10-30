@@ -11,18 +11,14 @@ import time
 import traceback
 from pathlib import Path
 
-from polyphony.executors import EXECUTORS, BaseExecutor, Mode
+from polyphony import agy
 from polyphony.jobs import (
-    REPORT, REPORT_FILE, JobDisowned, JobStore, claim, collect_report, executor_mode, prompt,
-    report_fingerprint, run_check, save_running, scrub_env, snapshot,
+    CODE, REPORT, REPORT_FILE, JobDisowned, JobNotFound, JobStore, claim, collect_report,
+    notify, prompt, report_fingerprint, run_check, save_running, scrub_env, snapshot,
 )
 
 
-def run(
-    job_dir: Path,
-    executors: dict[str, type[BaseExecutor]] = EXECUTORS,
-    attempt: int | None = None,
-) -> None:
+def run(job_dir: Path, attempt: int | None = None) -> None:
     """Run the job's `attempt`. None means its current one (tests, or a launch from
     before attempts were passed).
 
@@ -32,9 +28,12 @@ def run(
     """
     job_dir = Path(job_dir)
     store = JobStore(job_dir.parent.parent)
-    if attempt is None:
-        attempt = store.load(job_dir.name).attempt
-    job = claim(store, job_dir.name, attempt)
+    try:
+        if attempt is None:
+            attempt = store.load(job_dir.name).attempt
+        job = claim(store, job_dir.name, attempt)
+    except JobNotFound:
+        return  # cancelled, and so deleted, before it started
     if job is None:
         return  # cancelled before it started, or revised and owned by a newer worker
 
@@ -47,9 +46,8 @@ def run(
         if job.mode == REPORT:  # so a REPORT.md already there is not taken for this attempt's
             job.report_before = report_fingerprint(job)
             save_running(store, job)
-        result = executors[job.executor]().execute(
-            prompt(job), job.workdir, executor_mode(job.mode), job.model, job.timeout_seconds,
-            output_path=output, on_start=started,
+        result = agy.run(
+            prompt(job), job.workdir, job.model, output, job.timeout_seconds, on_start=started,
             env=scrub_env(os.environ, job.env_scrub) if job.env_scrub else None,
         )
         # Its group is gone; a recorded id could be reused by the OS and hit by cancel.
@@ -61,7 +59,7 @@ def run(
         snapshot(job)
         job.exit_code = result.exit_code
         job.error = result.error
-        if result.success and job.mode == Mode.CODE and job.check_command:
+        if result.success and job.mode == CODE and job.check_command:
             run_check(store, job)
         job.state = "succeeded" if result.success else "failed"
         if job.mode == REPORT:
@@ -86,6 +84,7 @@ def run(
         job.finished_at = time.time()
         try:
             save_running(store, job)
+            notify(job)
         except JobDisowned:
             pass
 
