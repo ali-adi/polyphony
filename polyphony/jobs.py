@@ -444,17 +444,18 @@ def launch(store: JobStore, job: Job) -> None:
         current.queued_at = time.time()
         store.save(current)
     try:
-        with open(job_dir / "worker.log", "ab") as log:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "polyphony.worker", str(job_dir), str(job.attempt)],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
-                start_new_session=True,
-                close_fds=True,
-            )
+        log = open(job_dir / "worker.log", "ab")
     except FileNotFoundError:
         raise gone from None
+    with log:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "polyphony.worker", str(job_dir), str(job.attempt)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+            close_fds=True,
+        )
     if proc.wait(timeout=30) != 0:
         job = store.load(job.id)
         job.state = "failed"

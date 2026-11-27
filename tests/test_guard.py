@@ -54,3 +54,18 @@ def test_the_xcrun_git_shim_is_skipped(monkeypatch):
         assert real != "/usr/bin/git" and os.access(real, os.X_OK)
     finally:
         guard.git_binary.cache_clear()
+
+
+def test_a_missing_xcrun_keeps_the_git_found(monkeypatch):
+    from polyphony import guard
+    monkeypatch.setattr(guard.shutil, "which", lambda name: "/usr/bin/git")
+
+    def no_xcrun(*a, **kw):
+        raise FileNotFoundError("xcrun")
+
+    monkeypatch.setattr(guard.subprocess, "run", no_xcrun)
+    guard.git_binary.cache_clear()
+    try:
+        assert guard.git_binary() == "/usr/bin/git"
+    finally:
+        guard.git_binary.cache_clear()

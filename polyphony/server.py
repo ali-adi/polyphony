@@ -243,6 +243,11 @@ def _watching(store: JobStore, job_ids: list[str]):
 
 
 async def wait_for(store: JobStore, job_ids: list[str], until: str, seconds: float) -> dict:
+    if not job_ids:
+        raise ValueError("Name at least one job.")
+    repeated = sorted(i for i, n in Counter(job_ids).items() if n > 1)
+    if repeated:
+        raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
     deadline = time.monotonic() + seconds
     listed = [store.load(i) for i in job_ids]
     with _watching(store, job_ids) as changed:
@@ -494,11 +499,6 @@ def build_server(
         with _anticipated():
             if until not in WAIT_UNTIL:
                 raise ValueError(f"until must be one of {', '.join(WAIT_UNTIL)}, not {until!r}.")
-            if not job_ids:
-                raise ValueError("Name at least one job.")
-            repeated = sorted(i for i, n in Counter(job_ids).items() if n > 1)
-            if repeated:
-                raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
             return await wait_for(store, job_ids, until, min(max(wait_seconds, 0), MAX_WAIT_SECONDS))
 
     @server.tool()

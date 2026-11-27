@@ -69,7 +69,7 @@ def wait(store, job_ids, until_all, timeout_seconds):
     try:
         result = anyio.run(wait_for, store, list(job_ids), "all" if until_all else "any",
                            timeout_seconds)
-    except JobNotFound as e:
+    except (JobNotFound, ValueError) as e:
         raise click.ClickException(str(e))
     click.echo(json.dumps(result, indent=2))
     if not result["done"]:

@@ -20,7 +20,10 @@ def git_binary() -> str:
     found = shutil.which("git") or "git"
     # /usr/bin/git is Apple's xcrun shim, which adds a lookup to every spawn
     if os.path.realpath(found) == "/usr/bin/git":
-        res = subprocess.run(["xcrun", "--find", "git"], capture_output=True, text=True)
+        try:
+            res = subprocess.run(["xcrun", "--find", "git"], capture_output=True, text=True)
+        except OSError:
+            return found
         real = res.stdout.strip()
         if res.returncode == 0 and os.access(real, os.X_OK):
             return real

@@ -117,7 +117,9 @@ class UsageCache:
         if entry and _ok(entry) and self._age(entry) < STALE_TTLS * self.ttl:
             threading.Thread(target=self._refresh_once, args=(False,), daemon=True).start()
             return entry["report"]
-        return self._refresh_once(True)
+        fresh = self._refresh_once(True)
+        assert fresh is not None
+        return fresh
 
     def _age(self, entry: dict) -> float:
         return time.time() - entry["checked_at"]

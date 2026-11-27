@@ -289,3 +289,8 @@ def test_wait_prints_a_finished_job_as_json(run, tmp_path):
 def test_wait_for_an_unknown_job_fails(run):
     result = run("wait", "nope")
     assert result.exit_code != 0 and "nope" in result.output
+
+
+def test_wait_refuses_a_job_named_twice(run):
+    result = run("wait", "a", "a")
+    assert result.exit_code != 0 and "more than once: a" in result.output
