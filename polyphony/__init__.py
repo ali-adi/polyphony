@@ -1,6 +1,8 @@
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
-
-try:
-    __version__ = _pkg_version("polyphony")
-except PackageNotFoundError:
-    __version__ = "0.0.0+unknown"
+def __getattr__(name: str) -> str:
+    if name != "__version__":
+        raise AttributeError(f"module 'polyphony' has no attribute {name!r}")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("polyphony")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"

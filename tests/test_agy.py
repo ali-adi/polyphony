@@ -26,7 +26,6 @@ def _gone(pid, timeout=5):
 
 @pytest.fixture
 def fast(monkeypatch):
-    monkeypatch.setattr(agy, "POLL_SECONDS", 0.05)
     monkeypatch.setattr(agy, "DONE_GRACE_SECONDS", 0.5)
 
 
@@ -47,7 +46,7 @@ def test_the_result_event_ends_a_run_that_idles_after_it(tmp_path, fake_agy):
     res = _run(tmp_path)
     assert time.monotonic() - started < 10
     assert res.success and res.error is None
-    assert agy.result_event(tmp_path / "out.ndjson")["response"] == "done\n"
+    assert agy.result_of(agy.events(tmp_path / "out.ndjson"))["response"] == "done\n"
     assert _gone(int((tmp_path / "child.pid").read_text())), "agy's children outlived it"
 
 
@@ -135,3 +134,42 @@ def test_events_from_a_large_stream_skip_the_cut_first_line(tmp_path, monkeypatc
 ])
 def test_ps_cpu_times_parse(text, seconds):
     assert agy._clock(text) == seconds
+
+
+def test_a_result_event_longer_than_the_tail_is_still_read(tmp_path):
+    import json
+    out = tmp_path / "out.ndjson"
+    response = "x" * (agy.TAIL_BYTES * 3)
+    out.write_text(json.dumps({"event": "init"}) + "\n"
+                   + json.dumps({"event": "result", "result": {"status": "SUCCESS",
+                                                               "response": response}}) + "\n")
+    assert agy.result_of(agy.events(out))["response"] == response
+
+
+def test_cpu_is_counted_for_the_whole_process_group():
+    import subprocess
+    busy = subprocess.Popen(["sh", "-c", "yes > /dev/null & yes > /dev/null; wait"],
+                            start_new_session=True)
+    try:
+        time.sleep(1.5)
+        assert agy._cpu_seconds(busy.pid) > 1.5
+    finally:
+        os.killpg(busy.pid, 9)
+        busy.wait()
+
+
+@pytest.mark.usefixtures("fast")
+def test_a_result_without_a_trailing_newline_still_ends_the_run(tmp_path, fake_agy):
+    fake_agy("printf '%s' '{\"event\": \"result\", \"result\": {\"status\": \"SUCCESS\"}}'; "
+             "sleep 60")
+    started = time.monotonic()
+    assert _run(tmp_path).success
+    assert time.monotonic() - started < 10
+
+
+def test_an_agy_that_exits_at_once_is_never_waited_on(tmp_path, fake_agy):
+    fake_agy("true")
+    for _ in range(40):
+        started = time.monotonic()
+        assert _run(tmp_path).success
+        assert time.monotonic() - started < 5

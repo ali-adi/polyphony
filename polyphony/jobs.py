@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import filecmp
 import fnmatch
+import hashlib
 import json
 import os
 import secrets
@@ -14,21 +15,26 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 from polyphony import ledger
 from polyphony.config import DEFAULT_HOME, ProjectConfig
 from polyphony.guard import run_git
-from polyphony.workspace import DIFF_FLAGS, Workspace, WorkspaceError, copy_git
+from polyphony.workspace import (
+    DIFF_FLAGS, Workspace, copy_git, git_in_copy, seal_git,
+)
 
-ACTIVE = ("queued", "running")
+ACTIVE = ("creating", "queued", "running")
 # agy takes the whole prompt as one argv string; Linux caps one argument at 128 KiB (MAX_ARG_STRLEN).
 MAX_PROMPT_BYTES = 120 * 1024
 MAX_BRIEF_BYTES = 100 * 1024
 QUEUE_GRACE_SECONDS = 60
+CREATE_GRACE_SECONDS = 3600
 CANCEL_GRACE_SECONDS = 2
 
 CODE = "code"
@@ -66,6 +72,7 @@ class Job:
     base_commit: str
     model: str | None = None
     link_paths: list[str] = field(default_factory=list)
+    provision_paths: list[str] = field(default_factory=list)
     state: str = "queued"
     pid: int | None = None
     pgid: int | None = None
@@ -151,35 +158,56 @@ class JobStore:
         return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
     @contextmanager
-    def lock(self):
-        if getattr(self._held, "depth", 0):
-            self._held.depth += 1
+    def lock(self, name: str = "delegate"):
+        depths = getattr(self._held, "depths", None)
+        if depths is None:
+            depths = self._held.depths = {}
+        if depths.get(name):
+            depths[name] += 1
             try:
                 yield
             finally:
-                self._held.depth -= 1
+                depths[name] -= 1
             return
         self.root.mkdir(parents=True, exist_ok=True)
-        with open(self.root / "delegate.lock", "w") as f:
+        with open(self.root / f"{name}.lock", "w") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            self._held.depth = 1
+            depths[name] = 1
             try:
                 yield
             finally:
-                self._held.depth = 0
+                depths[name] = 0
+
+    def repo_lock(self, repo: str):
+        return self.lock(f"apply-{hashlib.sha256(repo.encode()).hexdigest()[:16]}")
+
+    def remove(self, job_id: str) -> None:
+        trash = self.root / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        target = trash / f"{job_id}-{secrets.token_hex(4)}"
+        try:
+            os.rename(self.path(job_id), target)
+        except FileNotFoundError:
+            return
+        except OSError:
+            shutil.rmtree(self.path(job_id), ignore_errors=True)
+            return
+        threading.Thread(target=shutil.rmtree, args=(target,), kwargs={"ignore_errors": True},
+                         daemon=True).start()
+
+    def empty_trash(self) -> None:
+        trash = self.root / ".trash"
+        if trash.is_dir():
+            for entry in trash.iterdir():
+                shutil.rmtree(entry, ignore_errors=True)
 
     def refresh(self, job: Job) -> Job:
-        if job.state == "running" and job.pid and not _alive(job.pid):
-            error = "The worker process exited without recording a result."
-        elif job.state == "queued" and _stuck(job):
-            error = "The job's worker never started."
-        else:
+        if _death(job) is None:
             return job
         with self.lock():
             current = self.load(job.id)
-            if current.state != job.state or current.attempt != job.attempt:
-                return current
-            if current.state == "queued" and not _stuck(current):
+            error = _death(current)
+            if error is None:
                 return current
             if current.state == "running":
                 _signal_groups((current.executor_pgid, current.check_pgid), signal.SIGKILL)
@@ -193,6 +221,18 @@ class JobStore:
 
 def active_count(store: JobStore) -> int:
     return sum(j.state in ACTIVE for j in map(store.refresh, store.all()))
+
+
+def _death(job: Job) -> str | None:
+    if job.state == "running" and job.pid and not _alive(job.pid):
+        return "The worker process exited without recording a result."
+    if job.state == "queued" and _stuck(job):
+        return "The job's worker never started."
+    if job.state == "creating" and (
+            (job.pid and not _alive(job.pid))
+            or time.time() - job.created_at > CREATE_GRACE_SECONDS):
+        return "The process copying the repository exited before it finished."
+    return None
 
 
 def _stuck(job: Job) -> bool:
@@ -312,23 +352,10 @@ def create_job(
     check: str | None = None,
     check_timeout_seconds: int = 600,
     brief: tuple[Path, str] | None = None,
+    admit: Callable[[], None] | None = None,
 ) -> Job:
     job_id = new_job_id()
-    workdir = store.path(job_id) / "repo"
-    ws = Workspace.create(
-        project.path, workdir,
-        exclude=tuple(str(e.get("path", "")) for e in project.provision),
-        git_dir=store.path(job_id) / "git",
-        allow_secrets=tuple(project.allow_secrets),
-    )
-    try:
-        ws.provision(project.provision)
-    except WorkspaceError:
-        shutil.rmtree(store.path(job_id), ignore_errors=True)
-        raise
-    base_commit = _check(copy_git(["rev-parse", "HEAD"], ws.git_dir, ws.path)).stdout.strip()
-    if mode == REPORT:
-        _drop_untracked_report(ws, base_commit)
+    provisioned = [str(e.get("path", "")) for e in project.provision]
     job = Job(
         id=job_id,
         project=project.name,
@@ -336,44 +363,91 @@ def create_job(
         mode=mode,
         instruction=with_brief(instruction, brief[1] if brief else None),
         timeout_seconds=timeout_seconds,
-        workdir=str(ws.path),
-        git_dir=str(ws.git_dir),
-        base_commit=base_commit,
+        workdir=str(store.path(job_id) / "repo"),
+        git_dir=str(store.path(job_id) / "git"),
+        base_commit="",
         model=model,
         link_paths=[
             str(e["path"]).rstrip("/") for e in project.provision if e.get("mode") == "link"
         ],
-        overlay_skipped=ws.skipped,
+        provision_paths=[p.strip().rstrip("/") for p in provisioned if p.strip()],
+        state="creating",
+        pid=os.getpid(),
         check_command=check if mode == CODE else None,
         check_timeout_seconds=check_timeout_seconds,
-        queued_at=time.time(),
-        withheld=ws.withheld,
         env_scrub=list(project.env_scrub),
         brief_path=str(brief[0]) if brief else None,
     )
-    if brief:
-        store.brief_copy_path(job_id).write_text(brief[1], encoding="utf-8")
-    store.save(job)
-    return job
+    with store.lock():
+        if admit is not None:
+            admit()
+        store.save(job)
+    try:
+        if brief:
+            store.brief_copy_path(job_id).write_text(brief[1], encoding="utf-8")
+        ws = Workspace.create(
+            project.path, job.workdir,
+            exclude=(*provisioned, *([REPORT_FILE] if mode == REPORT else [])),
+            git_dir=job.git_dir,
+            allow_secrets=tuple(project.allow_secrets),
+        )
+        ws.provision(project.provision)
+        base_commit = _check(copy_git(["rev-parse", "HEAD"], ws.git_dir, ws.path)).stdout.strip()
+    except BaseException as e:
+        if _abandon(store, job_id) or not isinstance(e, Exception):
+            raise
+        shutil.rmtree(store.path(job_id), ignore_errors=True)
+        raise JobError(f"Job {job_id} was cancelled while its copy of the repository "
+                       "was being made.") from e
+    with store.lock():
+        current = _creating(store, job_id)
+        if current is None:
+            shutil.rmtree(store.path(job_id), ignore_errors=True)
+            raise JobError(f"Job {job_id} was cancelled while its copy of the repository "
+                           "was being made.")
+        current.base_commit = base_commit
+        current.overlay_skipped = ws.skipped
+        current.withheld = ws.withheld
+        current.state = "queued"
+        current.pid = None
+        current.queued_at = time.time()
+        store.save(current)
+    return current
 
 
-def _drop_untracked_report(ws: Workspace, base_commit: str) -> None:
-    stale = ws.path / REPORT_FILE
-    if not (stale.is_symlink() or stale.is_file()):
-        return
-    if copy_git(["cat-file", "-e", f"{base_commit}:{REPORT_FILE}"],
-                ws.git_dir, ws.path).returncode != 0:
-        stale.unlink()
+def _creating(store: JobStore, job_id: str) -> Job | None:
+    try:
+        job = store.load(job_id)
+    except JobNotFound:
+        return None
+    return job if job.state == "creating" else None
+
+
+def _abandon(store: JobStore, job_id: str) -> bool:
+    with store.lock():
+        if _creating(store, job_id) is None:
+            return False
+        store.remove(job_id)
+        return True
 
 
 def launch(store: JobStore, job: Job) -> None:
     job_dir = store.path(job.id)
+    gone = JobError(f"Job {job.id} was cancelled before its worker started.")
     with store.lock():
-        current = store.load(job.id)
-        if current.state == "queued" and current.attempt == job.attempt:
-            current.queued_at = time.time()
-            store.save(current)
-    with open(job_dir / "worker.log", "ab") as log:
+        try:
+            current = store.load(job.id)
+        except JobNotFound:
+            raise gone from None
+        if current.state != "queued" or current.attempt != job.attempt:
+            return
+        current.queued_at = time.time()
+        store.save(current)
+    try:
+        log = open(job_dir / "worker.log", "ab")
+    except FileNotFoundError:
+        raise gone from None
+    with log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "polyphony.worker", str(job_dir), str(job.attempt)],
             stdin=subprocess.DEVNULL,
@@ -409,8 +483,16 @@ def prompt(job: Job) -> str:
 
 
 def revise(
-    store: JobStore, job_id: str, feedback: str, timeout_seconds: int | None = None
+    store: JobStore, job_id: str, feedback: str, timeout_seconds: int | None = None,
+    admit: Callable[[], None] | None = None,
 ) -> Job:
+    with store.repo_lock(store.load(job_id).repo), store.lock():
+        if admit is not None:
+            admit()
+        return _revise(store, job_id, feedback, timeout_seconds)
+
+
+def _revise(store: JobStore, job_id: str, feedback: str, timeout_seconds: int | None) -> Job:
     job = store.load(job_id)
     if job.state in ACTIVE:
         raise JobError(f"Job {job.id} is still {job.state}; wait for it or cancel it first.")
@@ -469,20 +551,21 @@ def cancel(store: JobStore, job_id: str) -> Job:
         time.sleep(0.05)
         groups = [g for g in groups if _group_alive(g)]
     _signal_groups(groups, signal.SIGKILL)
-    shutil.rmtree(store.path(job.id), ignore_errors=True)
+    store.remove(job.id)
     return job
 
 
 def notify(job: Job) -> None:
-    if sys.platform != "darwin" or os.environ.get("POLYPHONY_NO_NOTIFY"):
+    if os.environ.get("POLYPHONY_NO_NOTIFY"):
         return
     script = ["-e", "on run argv", "-e",
               "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run"]
     try:
-        subprocess.run(["osascript", *script, f"Polyphony: {job.mode} job {job.state}",
-                        f"{job.id}: {job.instruction[:100]}"],
-                       stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+        subprocess.Popen(["osascript", *script, f"Polyphony: {job.mode} job {job.state}",
+                          f"{job.id}: {job.instruction[:100]}"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
         pass
 
 
@@ -493,20 +576,26 @@ def _record(store: JobStore, job: Job, outcome: str) -> None:
 
 
 def snapshot(job: Job) -> None:
-    _jgit(job, ["add", "-A"])
-    for path in job.link_paths:
-        _jgit(job, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", "--", path])
-    if _jgit(job, ["diff", "--cached", "--quiet"], check=False).returncode != 0:
-        _jgit(job, [
-            "-c", "user.name=Polyphony",
-            "-c", "user.email=polyphony@localhost",
-            "commit", "--no-verify", "-q", "-m", f"polyphony job {job.id}",
-        ])
-    job.head_commit = _jgit(job, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
-    # -z: git C-quotes non-ASCII, quote and newline paths otherwise.
-    names = _jgit(job, ["diff", "--name-only", "-z", _range(job)]).stdout
-    job.files_changed = [name for name in names.split("\0") if name]
-    job.diff_stat = _jgit(job, ["diff", "--stat", "--no-color", _range(job)]).stdout.rstrip()
+    with _sealed(job):
+        _jgit(job, ["add", "-A"])
+        if _kept_out(job):
+            _jgit(job, ["rm", "-r", "--cached", "--ignore-unmatch", "-q", "--", *_kept_out(job)])
+        if _jgit(job, ["diff", "--cached", "--quiet"], check=False).returncode != 0:
+            _jgit(job, [
+                "-c", "user.name=Polyphony",
+                "-c", "user.email=polyphony@localhost",
+                "commit", "--no-verify", "-q", "-m", f"polyphony job {job.id}",
+            ])
+        job.head_commit = _jgit(job, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
+        # -z: git C-quotes non-ASCII, quote and newline paths otherwise.
+        names = _jgit(job, ["diff", "--name-only", "-z", _range(job)]).stdout
+        job.files_changed = [name for name in names.split("\0") if name]
+        job.diff_stat = (_jgit(job, ["diff", "--stat", "--no-color", _range(job)]).stdout.rstrip()
+                         if job.files_changed else "")
+
+
+def _kept_out(job: Job) -> list[str]:
+    return sorted({p.rstrip("/") for p in (*job.link_paths, *job.provision_paths) if p.strip()})
 
 
 def pending_changes(job: Job) -> list[str]:
@@ -549,9 +638,9 @@ def collect_report(store: JobStore, job: Job) -> None:
             return
         if job.report_before is not None and _fingerprint(st) == job.report_before:
             return
-        tracked = _jgit(job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"],
-                        check=False)
-        if tracked.returncode == 0 and REPORT_FILE not in job.files_changed:
+        if REPORT_FILE not in job.files_changed and _jgit(
+                job, ["cat-file", "-e", f"{job.base_commit}:{REPORT_FILE}"],
+                check=False).returncode == 0:
             return
         data = f.read(REPORT_MAX_BYTES + 1)
     job.report_truncated = len(data) > REPORT_MAX_BYTES
@@ -571,14 +660,13 @@ def run_check(store: JobStore, job: Job) -> None:
             job.check_passed = False
             out.write(
                 "The check did not run: it runs code the executor may have written, so "
-                "Polyphony runs it only in a sandbox, and none was found (sandbox-exec on "
-                "macOS, bwrap on Linux).\n"
+                "Polyphony runs it only in a sandbox, and sandbox-exec was not found.\n"
             )
             return
         env = dict(scrub_env(os.environ, (*CHECK_SCRUB, *job.env_scrub)),
                    TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp),
                    XDG_CACHE_HOME=str(tmp / "cache"))
-        snapshot_head = _jgit(job, ["rev-parse", "HEAD"]).stdout.strip()
+        snapshot_head = job.head_commit or _jgit(job, ["rev-parse", "HEAD"]).stdout.strip()
         proc = subprocess.Popen(
             [*sandbox, "/bin/sh", "-c", job.check_command], cwd=job.workdir, env=env,
             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
@@ -619,7 +707,7 @@ def scrub_env(env: Mapping[str, str], patterns: Iterable[str]) -> dict[str, str]
 
 def _restore(job: Job, head: str) -> None:
     _jgit(job, ["reset", "--hard", "-q", head])
-    keep = [arg for path in job.link_paths for arg in ("-e", f"/{path}")]
+    keep = [arg for path in _kept_out(job) for arg in ("-e", f"/{path}")]
     _jgit(job, ["clean", "-f", "-d", "-q", *keep])
 
 
@@ -649,34 +737,39 @@ def _sandbox_argv(job: Job, tmp: Path) -> list[str] | None:
     work = Path(os.path.realpath(job.workdir))
     tmp = Path(os.path.realpath(tmp))
     gitdir = Path(os.path.realpath(job.git_dir)) if job.git_dir else work / ".git"
-    if sys.platform == "darwin":
-        exe = shutil.which("sandbox-exec") or (
-            "/usr/bin/sandbox-exec" if os.path.exists("/usr/bin/sandbox-exec") else None
-        )
-        if exe is None:
-            return None
-        return [exe, "-p", _SEATBELT_PROFILE,
-                "-D", f"WORKDIR={work}", "-D", f"TMP={tmp}", "-D", f"GITDIR={gitdir}"]
-    if sys.platform.startswith("linux"):
-        exe = shutil.which("bwrap")
-        if exe is None:
-            return None
-        # bwrap cannot mount a tmpfs on a symlink, and /var/run's target /run is already hidden.
-        hidden = [d for d in ("/run", "/var/run", "/tmp", "/var/tmp")
-                  if os.path.isdir(d) and not os.path.islink(d)]
-        linked = [os.path.realpath(Path(job.repo) / p) for p in job.link_paths]
-        return [exe, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
-                *(arg for d in hidden for arg in ("--tmpfs", d)),
-                *(arg for p in (str(work.parent), *linked) if os.path.exists(p)
-                  for arg in ("--ro-bind", p, p)),
-                "--bind", str(work), str(work), "--ro-bind", str(gitdir), str(gitdir),
-                "--bind", str(tmp), str(tmp),
-                "--unshare-all", "--new-session", "--die-with-parent", "--"]
-    return None
+    exe = shutil.which("sandbox-exec") or (
+        "/usr/bin/sandbox-exec" if os.path.exists("/usr/bin/sandbox-exec") else None
+    )
+    if exe is None:
+        return None
+    return [exe, "-p", _SEATBELT_PROFILE,
+            "-D", f"WORKDIR={work}", "-D", f"TMP={tmp}", "-D", f"GITDIR={gitdir}"]
+
+
+_SEALED: ContextVar[frozenset[str]] = ContextVar("sealed", default=frozenset())
+
+
+def _git_dir(job: Job) -> str:
+    return str(job.git_dir or Path(job.workdir) / ".git")
+
+
+@contextmanager
+def _sealed(*batch: Job):
+    # only where agy and the check have finished: either could plant a link between calls
+    done = _SEALED.get()
+    for job in batch:
+        if _git_dir(job) not in done:
+            seal_git(_git_dir(job), job.workdir)
+    token = _SEALED.set(done | {_git_dir(job) for job in batch})
+    try:
+        yield
+    finally:
+        _SEALED.reset(token)
 
 
 def _jgit(job: Job, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    res = copy_git(args, job.git_dir or Path(job.workdir) / ".git", job.workdir)
+    run = git_in_copy if _git_dir(job) in _SEALED.get() else copy_git
+    res = run(args, _git_dir(job), job.workdir)
     return _check(res) if check else res
 
 
@@ -736,6 +829,11 @@ def diff(store: JobStore, job_id: str, limit: int = DIFF_LIMIT) -> str:
 
 
 def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple[list[str], Job]:
+    with store.repo_lock(store.load(job_id).repo):
+        return _apply(store, job_id, paths)
+
+
+def _apply(store: JobStore, job_id: str, paths: list[str] | None) -> tuple[list[str], Job]:
     job = store.load(job_id)
     if job.mode == REPORT:
         raise JobError(
@@ -746,6 +844,11 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple
         raise JobError(f"Job {job.id} {job.state}; only a succeeded job can be applied.")
     if not job.files_changed:
         raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
+    with _sealed(job):
+        return _apply_sealed(store, job, paths)
+
+
+def _apply_sealed(store: JobStore, job: Job, paths: list[str] | None) -> tuple[list[str], Job]:
     files, pathspecs = _select(job, paths)
     _require_repo(job.repo)
 
@@ -778,8 +881,8 @@ def apply(store: JobStore, job_id: str, paths: list[str] | None = None) -> tuple
     store.save(job)
     if job.outcome is None:
         _record(store, job, "applied")
-    if all(f in job.applied_paths for f in job.files_changed):
-        shutil.rmtree(store.path(job.id), ignore_errors=True)
+    if set(job.files_changed) <= set(job.applied_paths):
+        store.remove(job.id)
     return files, job
 
 
@@ -871,13 +974,24 @@ def apply_many(
 ) -> dict:
     if not job_ids:
         raise ValueError("Name at least one job.")
-    repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
+    repeated = sorted(i for i, n in Counter(job_ids).items() if n > 1)
     if repeated:
         raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
     paths = paths or {}
     stray = sorted(set(paths) - set(job_ids))
     if stray:
         raise ValueError(f"paths names job(s) not in job_ids: {', '.join(stray)}.")
+    repos = sorted({store.load(i).repo for i in job_ids})
+    if len(repos) > 1:
+        raise JobError(f"The jobs are for different repositories ({', '.join(repos)}); "
+                       "apply_many applies to one.")
+    with store.repo_lock(repos[0]):
+        return _apply_many(store, job_ids, dry_run, paths)
+
+
+def _apply_many(
+    store: JobStore, job_ids: list[str], dry_run: bool, paths: dict[str, list[str]],
+) -> dict:
     batch = [store.load(i) for i in job_ids]
     for job in batch:
         if job.state != "succeeded":
@@ -887,18 +1001,24 @@ def apply_many(
                            "leave it out and read it with report().")
         if not job.files_changed:
             raise JobError(f"Job {job.id} changed nothing, so there is nothing to apply.")
-        if job.applied and all(f in job.applied_paths for f in job.files_changed):
+        if job.applied and set(job.files_changed) <= set(job.applied_paths):
             raise JobError(f"Job {job.id} is already applied; leave it out.")
         if job.applied:
             raise JobError(
                 f"Job {job.id} is already partly applied ({', '.join(job.applied_paths)}); "
                 "apply_many takes only whole jobs. Use apply for the rest of it."
             )
-    repos = sorted({job.repo for job in batch})
-    if len(repos) > 1:
-        raise JobError(f"The jobs are for different repositories ({', '.join(repos)}); "
-                       "apply_many applies to one.")
-    _require_repo(repos[0])
+    repo = batch[0].repo
+    _require_repo(repo)
+    with _sealed(*batch):
+        return _apply_batch(store, batch, job_ids, dry_run, paths)
+
+
+def _apply_batch(
+    store: JobStore, batch: list[Job], job_ids: list[str], dry_run: bool,
+    paths: dict[str, list[str]],
+) -> dict:
+    repo = batch[0].repo
 
     pathspecs = {job.id: _select(job, paths.get(job.id))[1] for job in batch}
     touched = {job.id: _covered(job, pathspecs[job.id]) for job in batch}
@@ -915,14 +1035,14 @@ def apply_many(
         "error": None,
     }
     patches = {job.id: _export(store, job, pathspecs[job.id]) for job in batch}
-    result["unstaged"], result["error"] = _precheck(store, repos[0], batch, patches, touched)
+    result["unstaged"], result["error"] = _precheck(store, repo, batch, patches, touched)
     if result["error"] or dry_run:
         return result
 
     result["unstaged"] = []
     for job in batch:
         try:
-            _, applied = apply(store, job.id, paths.get(job.id))
+            _, applied = _apply(store, job.id, paths.get(job.id))
         except JobError as e:
             result["error"] = (
                 f"Stopped at job {job.id}: the pre-check passed, so the repository changed "
@@ -930,9 +1050,10 @@ def apply_many(
             )
             break
         result["applied"].append(job.id)
-        result["not_applied"].remove(job.id)
         if applied.applied_unstaged:
             result["unstaged"].append(job.id)
+    done = set(result["applied"])
+    result["not_applied"] = [i for i in job_ids if i not in done]
     return result
 
 
@@ -1039,12 +1160,13 @@ def _renames(job: Job) -> dict[str, str]:
 
 
 def discard(store: JobStore, job_id: str) -> None:
-    job = store.load(job_id)
-    if job.state in ACTIVE:
-        raise JobError(f"Job {job.id} is {job.state}; cancel it before discarding.")
-    if job.outcome is None:
-        ledger.record(store.root, job, "discarded")
-    shutil.rmtree(store.path(job.id), ignore_errors=True)
+    with store.repo_lock(store.load(job_id).repo):
+        job = store.load(job_id)
+        if job.state in ACTIVE:
+            raise JobError(f"Job {job.id} is {job.state}; cancel it before discarding.")
+        if job.outcome is None:
+            ledger.record(store.root, job, "discarded")
+        store.remove(job.id)
 
 
 @dataclass
@@ -1058,7 +1180,9 @@ class GcRecord:
 AUTO_GC_SECONDS = 7 * 86400
 
 
-def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> list[GcRecord]:
+def gc(
+    store: JobStore, older_than_seconds: float, dry_run: bool = False, measure: bool = True,
+) -> list[GcRecord]:
     now = time.time()
 
     def expired(job: Job) -> bool:
@@ -1069,9 +1193,9 @@ def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> lis
     for job in store.all():
         if not expired(store.refresh(job)):
             continue
-        size = disk_usage(store.path(job.id))
+        size = disk_usage(store.path(job.id)) if measure else 0
         if not dry_run:
-            with store.lock():
+            with store.repo_lock(job.repo), store.lock():
                 try:
                     job = store.refresh(store.load(job.id))
                 except JobNotFound:
@@ -1080,7 +1204,7 @@ def gc(store: JobStore, older_than_seconds: float, dry_run: bool = False) -> lis
                     continue
                 if job.outcome is None:
                     ledger.record(store.root, job, "discarded", via="gc")
-                shutil.rmtree(store.path(job.id), ignore_errors=True)
+                store.remove(job.id)
         removed.append(GcRecord(job.id, job.state, now - (job.finished_at or job.created_at), size))
     return removed
 

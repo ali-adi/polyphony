@@ -151,12 +151,14 @@ def test_a_failure_after_the_pre_check_stops_and_says_what_landed(store, repo, m
     b = _done(store, repo, "echo b > b.txt")
     c = _done(store, repo, "echo c > c.txt")
 
+    real_apply = jobs._apply
+
     def apply_then_meddle(store, job_id, paths=None):
         if job_id == b.id:
             (repo / "b.txt").write_text("someone else\n")
-        return apply(store, job_id, paths)
+        return real_apply(store, job_id, paths)
 
-    monkeypatch.setattr(jobs, "apply", apply_then_meddle)
+    monkeypatch.setattr(jobs, "_apply", apply_then_meddle)
     result = apply_many(store, [a.id, b.id, c.id])
     assert result["applied"] == [a.id]
     assert result["not_applied"] == [b.id, c.id]

@@ -372,3 +372,35 @@ def test_environment_names_are_skipped_only_where_they_are_environments(repo, tm
     assert not (ws.path / "tools" / "venv").exists()
     assert not (ws.path / "pkg" / "node_modules").exists()
     assert not (ws.path / "env").exists(), "a top-level env/ is still an environment"
+
+
+def test_a_clean_repository_gets_no_snapshot_commit(tmp_path):
+    src = tmp_path / "clean"
+    src.mkdir()
+    for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"],
+                 ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=src, check=True)
+    (src / "app.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "app.py"], cwd=src, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=src, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True,
+                          text=True, check=True).stdout
+    ws = Workspace.create(src, tmp_path / "ws")
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=ws.path, capture_output=True,
+                          text=True, check=True).stdout == head
+
+
+def test_an_overlaid_file_is_a_separate_copy(repo, tmp_path):
+    (repo / "notes.txt").write_text("source\n")
+    ws = Workspace.create(repo, tmp_path / "ws")
+    (ws.path / "notes.txt").write_text("changed in the copy\n")
+    assert (repo / "notes.txt").read_text() == "source\n"
+
+
+def test_a_repository_with_no_commits_is_refused_before_copying(tmp_path):
+    src = tmp_path / "empty"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=src, check=True)
+    with pytest.raises(WorkspaceError, match="no commits"):
+        Workspace.create(src, tmp_path / "ws")
+    assert not (tmp_path / "ws").exists()

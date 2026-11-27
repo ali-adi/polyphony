@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -11,13 +12,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-POLL_SECONDS = 1
 # 2026-10-30: two report jobs printed agy's final message, then ran on until cancelled.
 DONE_GRACE_SECONDS = 10
 STALL_SECONDS = 600
 CPU_SAMPLE_SECONDS = 30
 CPU_WORK_SECONDS = 1.0
 TAIL_BYTES = 64 * 1024
+MAX_TAIL_BYTES = 16 * 1024 * 1024
 
 
 @dataclass
@@ -66,7 +67,7 @@ def run(
         err.seek(0)
         stderr = err.read().decode(errors="replace").strip()
 
-    final = result_event(output_path)
+    final = result_of(events(output_path))
     if ended == "timeout":
         return Result(False, f"agy timed out after {timeout_seconds}s.", 124)
     if ended == "stalled":
@@ -83,36 +84,86 @@ def run(
 
 def _watch(proc: subprocess.Popen, output: Path, timeout_seconds: int) -> str | None:
     start = last_progress = cpu_at = time.monotonic()
-    size, cpu = -1, _cpu_seconds(proc.pid)
-    while True:
+    cpu = _cpu_seconds(proc.pid)
+    lines = _Lines(output)
+    out_fd = os.open(output, os.O_EVTONLY)
+    kq = None
+    try:
+        kq = select.kqueue()
+        kq.control([select.kevent(out_fd, select.KQ_FILTER_VNODE,
+                                  select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                  select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND)], 0, 0)
         try:
-            proc.wait(timeout=POLL_SECONDS)
+            kq.control([select.kevent(proc.pid, select.KQ_FILTER_PROC,
+                                      select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                      select.KQ_NOTE_EXIT)], 0, 0)
+        except ProcessLookupError:
+            # macOS refuses the watch once the process has begun exiting
+            proc.wait()
             return None
-        except subprocess.TimeoutExpired:
-            pass
-        now = time.monotonic()
-        if now - start >= timeout_seconds:
-            return "timeout"
-        grown = output.stat().st_size
-        if grown != size:
-            size, last_progress = grown, now
-            if result_event(output) is not None:
-                try:
-                    proc.wait(timeout=DONE_GRACE_SECONDS)
-                    return None
-                except subprocess.TimeoutExpired:
-                    return "done"
-        if now - cpu_at >= CPU_SAMPLE_SECONDS:
-            sample = _cpu_seconds(proc.pid)
-            if sample - cpu >= CPU_WORK_SECONDS:
+        while True:
+            if proc.poll() is not None:
+                return None
+            now = time.monotonic()
+            if now - start >= timeout_seconds:
+                return "timeout"
+            if lines.grew():
                 last_progress = now
-            cpu, cpu_at = sample, now
-        if now - last_progress >= STALL_SECONDS:
-            return "stalled"
+                if lines.result:
+                    try:
+                        proc.wait(timeout=DONE_GRACE_SECONDS)
+                        return None
+                    except subprocess.TimeoutExpired:
+                        return "done"
+            if now - cpu_at >= CPU_SAMPLE_SECONDS:
+                sample = _cpu_seconds(proc.pid)
+                if sample - cpu >= CPU_WORK_SECONDS:
+                    last_progress = now
+                cpu, cpu_at = sample, now
+            if now - last_progress >= STALL_SECONDS:
+                return "stalled"
+            next_due = min(start + timeout_seconds, cpu_at + CPU_SAMPLE_SECONDS,
+                           last_progress + STALL_SECONDS)
+            fired = kq.control(None, 8, max(0.0, next_due - time.monotonic()))
+            if any(event.filter == select.KQ_FILTER_PROC for event in fired):
+                proc.wait()
+                return None
+    finally:
+        os.close(out_fd)
+        if kq is not None:
+            kq.close()
+
+
+class _Lines:
+    def __init__(self, path: Path):
+        self.path, self.offset, self.partial, self.result = path, 0, b"", False
+
+    def grew(self) -> bool:
+        with open(self.path, "rb") as f:
+            f.seek(self.offset)
+            data = f.read()
+        if not data:
+            return False
+        self.offset += len(data)
+        *done, self.partial = (self.partial + data).split(b"\n")
+        closed = (self.partial,) if self.partial.rstrip().endswith(b"}") else ()
+        self.result = self.result or any(map(_is_result, (*done, *closed)))
+        return True
+
+
+def _is_result(line: bytes) -> bool:
+    if b'"result"' not in line:
+        return False
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(event, dict) and event.get("event") == "result"
 
 
 def _cpu_seconds(pgid: int) -> float:
-    res = subprocess.run(["ps", "-A", "-o", "pgid=,time="], capture_output=True, text=True)
+    res = subprocess.run(["ps", "-o", "pgid=,time=", "-g", str(pgid)],
+                         capture_output=True, text=True)
     total = 0.0
     for line in res.stdout.splitlines():
         group, _, used = line.strip().partition(" ")
@@ -132,11 +183,18 @@ def _clock(text: str) -> float:
 def events(path: Path) -> list[dict | str]:
     try:
         with open(path, "rb") as f:
-            f.seek(max(0, f.seek(0, os.SEEK_END) - TAIL_BYTES))
-            lines = f.read().decode("utf-8", errors="replace").splitlines()
+            size = f.seek(0, os.SEEK_END)
+            want = TAIL_BYTES
+            while True:
+                f.seek(max(0, size - want))
+                data = f.read()
+                if want >= size or want >= MAX_TAIL_BYTES or b"\n" in data.rstrip(b"\n"):
+                    break
+                want *= 4
     except FileNotFoundError:
         return []
-    if len(lines) > 1 and os.path.getsize(path) > TAIL_BYTES:
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if len(lines) > 1 and size > want:
         lines = lines[1:]
     parsed: list[dict | str] = []
     for line in filter(str.strip, lines):
@@ -149,8 +207,8 @@ def events(path: Path) -> list[dict | str]:
     return parsed
 
 
-def result_event(path: Path) -> dict | None:
-    for event in reversed(events(path)):
+def result_of(stream: list[dict | str]) -> dict | None:
+    for event in reversed(stream):
         if isinstance(event, dict) and event.get("event") == "result":
             return event.get("result") or {}
     return None

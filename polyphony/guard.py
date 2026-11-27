@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import functools
+import os
+import shutil
 import subprocess
 from typing import List
 
@@ -10,6 +13,21 @@ _FLAGS_WITH_VALUES = {
 }
 
 _FORBIDDEN_SUBCOMMANDS = {"push"}
+
+
+@functools.cache
+def git_binary() -> str:
+    found = shutil.which("git") or "git"
+    # /usr/bin/git is Apple's xcrun shim, which adds a lookup to every spawn
+    if os.path.realpath(found) == "/usr/bin/git":
+        try:
+            res = subprocess.run(["xcrun", "--find", "git"], capture_output=True, text=True)
+        except OSError:
+            return found
+        real = res.stdout.strip()
+        if res.returncode == 0 and os.access(real, os.X_OK):
+            return real
+    return found
 
 
 class ForbiddenGitCommand(Exception):
@@ -39,7 +57,7 @@ def run_git(
             f"the operator's decision, not Polyphony's."
         )
     return subprocess.run(
-        ["git", *args],
+        [git_binary(), *args],
         cwd=cwd,
         capture_output=True,
         text=True,

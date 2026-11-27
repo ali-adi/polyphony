@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -15,6 +16,8 @@ from polyphony import agy
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 QUOTA_FLOOR_PERCENT = 5
 USAGE_TTL_SECONDS = 300
+FAILURE_TTL_SECONDS = 30
+STALE_TTLS = 2
 
 
 # agy's /usage in print mode prints tab-separated rows, one per model group and window.
@@ -87,6 +90,7 @@ class UsageCache:
         ttl: float = USAGE_TTL_SECONDS,
     ):
         self.file = Path(root) / "usage-cache.json"
+        self.lock_file = Path(root) / "usage.lock"
         self.check = check
         self.ttl = ttl
 
@@ -108,9 +112,38 @@ class UsageCache:
 
     def report(self) -> dict:
         entry = self.cached()
-        if entry and time.time() - entry["checked_at"] < self.ttl:
+        if self._fresh(entry):
             return entry["report"]
-        return self.refresh()
+        if entry and _ok(entry) and self._age(entry) < STALE_TTLS * self.ttl:
+            threading.Thread(target=self._refresh_once, args=(False,), daemon=True).start()
+            return entry["report"]
+        fresh = self._refresh_once(True)
+        assert fresh is not None
+        return fresh
+
+    def _age(self, entry: dict) -> float:
+        return time.time() - entry["checked_at"]
+
+    def _fresh(self, entry: dict | None) -> bool:
+        if not entry:
+            return False
+        return self._age(entry) < (self.ttl if _ok(entry) else min(self.ttl, FAILURE_TTL_SECONDS))
+
+    def _refresh_once(self, wait: bool) -> dict | None:
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.lock_file, "w") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
+            entry = self.cached()
+            if self._fresh(entry):
+                return entry["report"]
+            return self.refresh()
+
+
+def _ok(entry: dict) -> bool:
+    return isinstance(entry.get("report"), dict) and bool(entry["report"].get("ok"))
 
 
 def format_usage(report: dict) -> str:
