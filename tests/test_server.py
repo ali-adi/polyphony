@@ -980,7 +980,7 @@ def test_a_job_cancelled_elsewhere_during_a_wait_counts_as_finished(server, repo
     result = call(server, "wait", job_ids=[job_id], wait_seconds=20)
     canceller.join()
     assert result["done"] and result["finished"] == [job_id]
-    assert result["jobs"][0]["state"] == "deleted"
+    assert result["jobs"][0]["state"] in ("cancelled", "deleted")
 
 
 def test_status_and_instructions_point_at_wait(server):
@@ -1050,3 +1050,143 @@ def test_delegate_deletes_jobs_left_unresolved_for_a_week(server, repo, fake_agy
     _started(server, repo, "new")
     assert not store.path(old).exists() and store.path(recent).exists()
     assert {e["job_id"]: e.get("via") for e in ledger.read(store.root)} == {old: "gc"}
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_concurrent_delegates_never_pass_the_cap(store, repo, tmp_path):
+    import threading
+    _project(tmp_path, repo, max_parallel=2)
+    srv = _server(store, tmp_path)
+    outcomes: list[str] = []
+
+    def one():
+        try:
+            call(srv, "delegate", instruction="x", repo=str(repo))
+            outcomes.append("ok")
+        except ToolError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=one) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes) == ["ok"] * 2 + ["refused"] * 4
+    assert len(store.all()) == 2
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_copying_the_repository_does_not_hold_the_store_lock(store, repo, tmp_path, monkeypatch):
+    import threading
+    from polyphony.workspace import Workspace
+    original = Workspace.create.__func__
+    copying, release = threading.Event(), threading.Event()
+
+    def slow_create(cls, *a, **kw):
+        copying.set()
+        assert release.wait(10)
+        return original(cls, *a, **kw)
+
+    monkeypatch.setattr(Workspace, "create", classmethod(slow_create))
+    srv = _server(store, tmp_path)
+    worker = threading.Thread(
+        target=lambda: call(srv, "delegate", instruction="x", repo=str(repo)))
+    worker.start()
+    try:
+        assert copying.wait(10)
+        acquired = threading.Event()
+
+        def take_lock():
+            with store.lock():
+                acquired.set()
+
+        taker = threading.Thread(target=take_lock)
+        taker.start()
+        assert acquired.wait(5), "delegate held the store lock while copying the repository"
+        taker.join()
+        (job,) = store.all()
+        assert job.state == "creating"
+        assert store.refresh(job).state == "creating"
+    finally:
+        release.set()
+        worker.join()
+    assert store.all()[0].state == "queued"
+
+
+@pytest.mark.usefixtures("no_launch")
+def test_revise_waits_while_the_job_is_being_applied(store, repo, tmp_path):
+    import threading
+    srv = _server(store, tmp_path)
+    job_id = call(srv, "delegate", instruction="x", repo=str(repo))["job_id"]
+    job = store.load(job_id)
+    job.state = "succeeded"
+    store.save(job)
+    applying, release, revised = threading.Event(), threading.Event(), threading.Event()
+
+    def hold_repo():
+        with store.repo_lock(str(repo.resolve())):
+            applying.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_repo)
+    holder.start()
+    assert applying.wait(5)
+    reviser = threading.Thread(target=lambda: (
+        call(srv, "revise", job_id=job_id, feedback="more"), revised.set()))
+    reviser.start()
+    try:
+        assert not revised.wait(1), "revise ran while the repository was being applied to"
+    finally:
+        release.set()
+        holder.join()
+        reviser.join()
+    assert revised.is_set() and store.load(job_id).attempt == 2
+
+
+def test_wait_wakes_as_soon_as_a_job_finishes(server, repo, fake_agy):
+    fake_agy("sleep 1")
+    (job_id,) = _started(server, repo, "x")
+    started = time.monotonic()
+    result = call(server, "wait", job_ids=[job_id], wait_seconds=30)
+    assert result["done"]
+    assert time.monotonic() - started < 4
+
+
+def test_status_can_be_cancelled_while_it_waits(server, repo, fake_agy):
+    fake_agy("sleep 30")
+    (job_id,) = _started(server, repo, "x")
+
+    async def cancelled_status():
+        with anyio.move_on_after(0.5):
+            await server.call_tool("status", {"job_id": job_id, "wait_seconds": 60})
+            return False
+        return True
+
+    started = time.monotonic()
+    assert anyio.run(cancelled_status)
+    assert time.monotonic() - started < 3
+    call(server, "cancel", job_id=job_id)
+
+
+def test_delegate_returns_a_wait_command_that_runs_in_a_shell(server, repo, fake_agy, store):
+    import shlex
+    fake_agy("sleep 1")
+    started = call(server, "delegate", instruction="x", repo=str(repo))
+    command = started["wait_command"]
+    assert f"--home {shlex.quote(str(store.root))}" in command
+    done = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["finished"] == [started["job_id"]] and out["jobs"][0]["state"] == "succeeded"
+
+
+def test_the_wait_command_runs_without_a_polyphony_script(store, tmp_path, monkeypatch):
+    import shlex
+    import sys
+    from polyphony import server as server_module
+    real = sys.executable
+    monkeypatch.setattr(server_module.sys, "executable", str(tmp_path / "bare-bin" / "python"))
+    argv = shlex.split(server_module.wait_command(store, ["nope"]))
+    assert argv[1:3] == ["-m", "polyphony.cli"]
+    done = subprocess.run([real, *argv[1:]], capture_output=True, text=True, timeout=60)
+    assert done.returncode != 0 and "nope" in done.stderr

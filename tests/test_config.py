@@ -84,9 +84,8 @@ def test_find_project_tolerates_missing_projects_dir(tmp_path):
 def test_real_medicoder_config_provisions_what_its_tests_need():
     cfg = load_project(PROJECTS_DIR / "medicoder" / "project.yaml")
     assert cfg.provision == [
-        {"path": "env", "mode": "clone"},
-        {"path": "datasets/smoke", "mode": "clone"},
-        {"path": "datasets/tuning", "mode": "clone"},
+        {"path": "env", "mode": "link"},
+        {"path": "datasets/smoke", "mode": "link"},
     ]
     assert cfg.models["report"].startswith("gemini-4-argon")
     assert "flash" in cfg.models["code"]

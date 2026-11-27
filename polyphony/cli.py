@@ -53,6 +53,30 @@ def mcp(store, projects_dir):
 
 
 @cli.command()
+@click.argument("job_ids", nargs=-1, required=True)
+@click.option("--all", "until_all", is_flag=True, help="Wait for every job, not the first.")
+@click.option("--timeout", "timeout_seconds", type=float, default=4 * 3600, show_default=True,
+              help="Give up after this many seconds.")
+@click.pass_obj
+def wait(store, job_ids, until_all, timeout_seconds):
+    """Block until a job finishes, then print its result as JSON. Meant to run in the background."""
+    import json
+
+    import anyio
+
+    from polyphony.server import wait_for
+
+    try:
+        result = anyio.run(wait_for, store, list(job_ids), "all" if until_all else "any",
+                           timeout_seconds)
+    except JobNotFound as e:
+        raise click.ClickException(str(e))
+    click.echo(json.dumps(result, indent=2))
+    if not result["done"]:
+        raise SystemExit(2)
+
+
+@cli.command()
 @click.argument("job_id", required=False)
 @click.pass_obj
 def jobs(store, job_id):
@@ -97,6 +121,7 @@ def discard(store, job_id):
     """Delete a finished job: its copy of the repository and its record."""
     try:
         discard_job(store, job_id)
+        store.empty_trash()
     except (JobNotFound, JobError) as e:
         raise click.ClickException(str(e))
     click.echo(f"Discarded job {job_id}.")
@@ -148,6 +173,7 @@ def _size(n: float) -> str:
 def gc(store, older_than, dry_run):
     """Delete finished jobs older than a threshold, applied or not."""
     records = gc_jobs(store, older_than, dry_run=dry_run)
+    store.empty_trash()
     if not records:
         click.echo("Nothing to remove.")
         return
@@ -198,3 +224,7 @@ def usage_cmd():
     from polyphony.usage import agy_usage, format_usage
 
     click.echo(format_usage(agy_usage()))
+
+
+if __name__ == "__main__":
+    cli()

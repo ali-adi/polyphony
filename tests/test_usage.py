@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -106,4 +107,50 @@ def test_cache_stores_a_failed_check_too(tmp_path):
 @pytest.mark.parametrize("content", ["{not json", '{"cursor": {}}', "[]"])
 def test_cache_survives_a_corrupt_or_old_file(tmp_path, content):
     (tmp_path / "usage-cache.json").write_text(content)
+    assert UsageCache(tmp_path, check=_report).report() == _report()
+
+
+def _age_cache(tmp_path, seconds, report):
+    data = {"agy": {"checked_at": time.time() - seconds, "report": report}}
+    (tmp_path / "usage-cache.json").write_text(json.dumps(data))
+
+
+def test_concurrent_cold_reads_check_once(tmp_path):
+    import threading
+    calls = []
+
+    def slow():
+        calls.append(1)
+        time.sleep(0.3)
+        return _report()
+
+    cache = UsageCache(tmp_path, check=slow)
+    threads = [threading.Thread(target=cache.report) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(calls) == 1
+
+
+def test_a_failed_check_is_retried_after_thirty_seconds(tmp_path):
+    _age_cache(tmp_path, 31, {"ok": False, "error": "timed out"})
+    assert UsageCache(tmp_path, check=_report).report() == _report()
+
+
+def test_a_recently_stale_report_is_served_while_it_refreshes(tmp_path):
+    import threading
+    refreshed = threading.Event()
+    _age_cache(tmp_path, 400, _report(argon=1.0))
+
+    def check():
+        refreshed.set()
+        return _report()
+
+    assert UsageCache(tmp_path, check=check).report() == _report(argon=1.0)
+    assert refreshed.wait(5)
+
+
+def test_a_report_older_than_twice_the_ttl_is_not_used(tmp_path):
+    _age_cache(tmp_path, 700, _report(argon=1.0))
     assert UsageCache(tmp_path, check=_report).report() == _report()

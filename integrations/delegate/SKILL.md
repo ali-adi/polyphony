@@ -42,14 +42,20 @@ more, point the agent at files in the repository.
    reset time; pick another model or wait. `quota_unknown` in the result means the
    quota could not be read and the job ran anyway. In code mode, pass the brief's
    check command as `check` unless the repository configures one.
-2. `status(job_id, wait_seconds=90)` until `state` is `succeeded`, `failed`, or
-   `died`. While it runs, `recent` shows agy's latest steps and `files_touched` what
-   it has changed so far; `cancel` a job that is plainly off track (this deletes it).
-   A job with no output and no CPU use for 10 minutes fails as stalled, keeping its
-   partial work and report.
-3. With more than one job out, `wait(job_ids=[...], wait_seconds=90)` returns as soon
-   as any finishes (`until="all"` waits for every one). Handle the `finished` ones,
-   then wait again on the ids still `active`.
+2. Wait in the background when you can run a shell command that way (Claude Code:
+   Bash with `run_in_background`). Run the `wait_command` the result gives; you are
+   notified when it exits, and the user can keep talking to you meanwhile. Its output
+   is the finished job as `status` would show it. Add more job ids to the command to
+   wait for the first of several, or `--all` for every one. Exit code 2 means it
+   timed out with jobs still active.
+3. Without a background shell, `status(job_id, wait_seconds=90)` until `state` is
+   `succeeded`, `failed`, or `died`, or with more than one job out,
+   `wait(job_ids=[...], wait_seconds=90)`, which returns as soon as any finishes
+   (`until="all"` waits for every one); handle the `finished` ones, then wait again on
+   the ids still `active`. While a job runs, `recent` shows agy's latest steps and
+   `files_touched` what it has changed so far; `cancel` a job that is plainly off
+   track (this deletes it). A job with no output and no CPU use for 10 minutes fails
+   as stalled, keeping its partial work and report.
 
 ## 4. Read a report
 

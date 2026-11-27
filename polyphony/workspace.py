@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import ctypes
 import fnmatch
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from polyphony.guard import run_git
+from polyphony.guard import git_binary, run_git
 
 OVERLAY_SKIP = frozenset({
     ".git", "env", "venv", ".venv", "__pycache__", "node_modules",
@@ -63,6 +66,8 @@ class Workspace:
         dest = Path(path).expanduser().resolve()
         if git_dir is not None:
             git_dir = Path(git_dir).expanduser().resolve()
+        if run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=str(source_path)).returncode != 0:
+            raise WorkspaceError(f"{source_path} has no commits to work from.")
         dest.parent.mkdir(parents=True, exist_ok=True)
         separate = ["--separate-git-dir", str(git_dir)] if git_dir is not None else []
         # --no-hardlinks: hard-linked objects would let the copy write into the source repository
@@ -77,9 +82,6 @@ class Workspace:
         if res.returncode != 0:
             ws.remove()
             raise WorkspaceError(f"Could not copy {source_path}: {res.stderr.strip()}")
-        if run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=str(dest)).returncode != 0:
-            ws.remove()
-            raise WorkspaceError(f"{source_path} has no commits to work from.")
         run_git(["remote", "remove", "origin"], cwd=str(dest))
         try:
             ws._overlay_working_tree(exclude)
@@ -110,7 +112,7 @@ class Workspace:
         edited_secrets = [r for r in edited if self._is_withheld(r)]
         self.withheld += edited_secrets
         patch = subprocess.run(
-            ["git", "diff", "--binary", *DIFF_FLAGS, "HEAD", "--",
+            [git_binary(), "diff", "--binary", *DIFF_FLAGS, "HEAD", "--",
              *(f":(exclude,literal){r}" for r in edited_secrets)],
             cwd=src, capture_output=True, timeout=120,
         )
@@ -118,18 +120,21 @@ class Workspace:
             raise WorkspaceError(f"Could not read uncommitted edits: {patch.stderr.decode().strip()}")
         if patch.stdout:
             res = subprocess.run(
-                ["git", "apply", "--binary", "--whitespace=nowarn", "-"],
+                [git_binary(), "apply", "--binary", "--whitespace=nowarn", "-"],
                 cwd=self.path, input=patch.stdout, capture_output=True,
             )
             if res.returncode != 0:
                 raise WorkspaceError(f"Could not copy uncommitted edits: {res.stderr.decode().strip()}")
 
+        copied = 0
         # --directory lists an ignored directory as one entry, so _copy_tree walks it
         for flags in (["--others", "--exclude-standard"],
                       ["--others", "--ignored", "--exclude-standard", "--directory"]):
             for rel in _git_names(["ls-files", "-z", *flags], src):
-                self._copy_tree(rel.rstrip("/"), patterns, anchored)
+                copied += self._copy_tree(rel.rstrip("/"), patterns, anchored)
         self.withheld = sorted(set(self.withheld))
+        if not patch.stdout and not copied:
+            return
 
         run_git(["add", "-A"], cwd=str(self.path))
         if run_git(["diff", "--cached", "--quiet"], cwd=str(self.path)).returncode != 0:
@@ -141,7 +146,7 @@ class Workspace:
             if res.returncode != 0:
                 raise WorkspaceError(f"Could not snapshot the working tree: {res.stderr.strip()}")
 
-    def _copy_tree(self, rel: str, patterns: list[str], anchored: list[str]) -> None:
+    def _copy_tree(self, rel: str, patterns: list[str], anchored: list[str]) -> int:
         def skipped_name(parts: tuple[str, ...], i: int) -> bool:
             if parts[i] not in OVERLAY_SKIP:
                 return False
@@ -162,6 +167,8 @@ class Workspace:
                 for p in patterns
             )
 
+        if excluded(rel):
+            return 0
         root = self.source / rel
         if root.is_dir() and not root.is_symlink():
             files = []
@@ -171,6 +178,7 @@ class Workspace:
                 files += [str(base / f) for f in filenames]
         else:
             files = [rel]
+        copied = 0
         for r in files:
             if excluded(r):
                 continue
@@ -186,8 +194,11 @@ class Workspace:
             d.parent.mkdir(parents=True, exist_ok=True)
             if s.is_symlink():
                 d.symlink_to(os.readlink(s))
+                copied += 1
             elif s.is_file():
-                shutil.copy2(s, d)
+                _clone_file(s, d)
+                copied += 1
+        return copied
 
     def _is_withheld(self, rel: str) -> bool:
         # case-insensitive on both sides: on macOS `.ENV` and `.env` can be the same file
@@ -258,6 +269,27 @@ class Workspace:
         return provisioned
 
 
+def _load_clonefile():
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).clonefile
+    except (OSError, AttributeError):
+        return None
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    fn.restype = ctypes.c_int
+    return fn
+
+
+_CLONEFILE = _load_clonefile()
+CLONE_NOFOLLOW = 0x0001
+
+
+def _clone_file(src: Path, dst: Path) -> None:
+    # APFS copy-on-write: no data blocks are copied, and writes to either side stay apart
+    if _CLONEFILE is not None and _CLONEFILE(os.fsencode(src), os.fsencode(dst), CLONE_NOFOLLOW) == 0:
+        return
+    shutil.copy2(src, dst)
+
+
 def normalize_rel(path: str) -> str:
     rel = posixpath.normpath(path.strip())
     return "" if rel == "." else rel
@@ -265,7 +297,7 @@ def normalize_rel(path: str) -> str:
 
 def _git_names(args: list[str], cwd: str) -> list[str]:
     # git paths need not be UTF-8, so decode as Python does file names (surrogateescape)
-    res = subprocess.run(["git", *args], cwd=cwd, capture_output=True, timeout=120)
+    res = subprocess.run([git_binary(), *args], cwd=cwd, capture_output=True, timeout=120)
     if res.returncode != 0:
         raise WorkspaceError(f"git {args[0]} failed: {res.stderr.decode(errors='replace').strip()}")
     return [os.fsdecode(n) for n in res.stdout.split(b"\0") if n]
@@ -278,6 +310,11 @@ def trusted_config(git_dir: str | Path) -> Path:
 def copy_git(
     args: list[str], git_dir: str | Path, work_tree: str | Path, timeout: int = 30
 ) -> subprocess.CompletedProcess:
+    seal_git(git_dir, work_tree)
+    return git_in_copy(args, git_dir, work_tree, timeout)
+
+
+def seal_git(git_dir: str | Path, work_tree: str | Path) -> None:
     gd, wt = Path(git_dir), Path(work_tree)
     # git writes through symlinks in its git dir (index, objects/, refs/), so refuse rather than repair
     if gd.is_symlink():
@@ -290,8 +327,7 @@ def copy_git(
         )
     trusted = trusted_config(gd)
     if trusted.is_file() and not trusted.is_symlink():
-        _unlink(gd / "config")
-        shutil.copyfile(trusted, gd / "config")
+        _replace(gd / "config", trusted.read_bytes())
     # commondir and alternates point git at another repository's objects
     _unlink(gd / "commondir")
     _unlink(gd / "objects" / "info" / "alternates")
@@ -300,14 +336,15 @@ def copy_git(
         if info.is_symlink() or not info.is_dir():
             _unlink(info)
         info.mkdir(exist_ok=True)
-        _unlink(info / "attributes")
-        (info / "attributes").write_text(NEUTRAL_ATTRIBUTES)
+        _replace(info / "attributes", NEUTRAL_ATTRIBUTES.encode())
     if not gd.is_relative_to(wt):
-        pointer = wt / ".git"
-        wanted = f"gitdir: {gd}\n"
-        if pointer.is_symlink() or not pointer.is_file() or pointer.read_bytes() != wanted.encode():
-            _unlink(pointer)
-            pointer.write_text(wanted)
+        _replace(wt / ".git", f"gitdir: {gd}\n".encode())
+
+
+def git_in_copy(
+    args: list[str], git_dir: str | Path, work_tree: str | Path, timeout: int = 30
+) -> subprocess.CompletedProcess:
+    gd, wt = Path(git_dir), Path(work_tree)
     # hooks and fsmonitor run code named in the copy's config
     return run_git(
         ["--git-dir", str(gd), "--work-tree", str(wt),
@@ -324,6 +361,27 @@ def _first_symlink(git_dir: Path) -> Path | None:
             if path.is_symlink():
                 return path
     return None
+
+
+def _replace(path: Path, data: bytes) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        fd = None
+    if fd is not None:
+        with os.fdopen(fd, "rb") as f:
+            if stat.S_ISREG(os.fstat(fd).st_mode) and f.read(len(data) + 1) == data:
+                return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _unlink(path: Path) -> None:

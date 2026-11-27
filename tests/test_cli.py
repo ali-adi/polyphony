@@ -266,3 +266,26 @@ def test_report_without_one_fails_readably(run, tmp_path, repo):
     assert result.exit_code != 0
     assert "no report" in result.output
     assert "No job" in run("report", "nope").output
+
+
+def test_wait_prints_a_finished_job_as_json(run, tmp_path):
+    import json
+    store = JobStore(tmp_path / "home")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    import subprocess
+    for args in (["init", "-q", "-b", "main"], ["-c", "user.email=t@e", "-c", "user.name=T",
+                                                  "commit", "-q", "--allow-empty", "-m", "i"]):
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    job = create_job(store, ProjectConfig(name="r", path=repo), "x", "code")
+    job.state, job.finished_at = "succeeded", time.time()
+    store.save(job)
+    result = run("wait", job.id)
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["done"] and out["finished"] == [job.id]
+
+
+def test_wait_for_an_unknown_job_fails(run):
+    result = run("wait", "nope")
+    assert result.exit_code != 0 and "nope" in result.output

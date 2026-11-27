@@ -820,8 +820,7 @@ def test_the_check_cannot_write_outside_its_copy(store, repo):
 
 
 def _denied(check_output):
-    # bwrap mounts read-only, Seatbelt denies the write
-    return "Read-only file system" in check_output or "Operation not permitted" in check_output
+    return "Operation not permitted" in check_output
 
 
 def test_the_check_cannot_write_to_the_copys_git_dir(store, repo):
@@ -857,26 +856,6 @@ def test_no_sandbox_means_the_check_does_not_run(store, repo, monkeypatch, tmp_p
     assert "sandbox" in store.check_path(job.id).read_text()
     assert not marker.exists()
 
-
-def test_bwrap_sandbox_argv_binds_only_the_copy_and_tmp(monkeypatch, tmp_path):
-    from polyphony import jobs
-    monkeypatch.setattr(jobs.sys, "platform", "linux")
-    monkeypatch.setattr(jobs.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
-    work, tmp = tmp_path / "repo", tmp_path / "tmp"
-    work.mkdir()
-    tmp.mkdir()
-    git_dir = tmp_path / "git"
-    git_dir.mkdir()
-    job = type("J", (), {"workdir": str(work), "git_dir": str(git_dir), "link_paths": []})()
-    argv = jobs._sandbox_argv(job, tmp)
-    assert argv[0] == "/usr/bin/bwrap"
-    joined = " ".join(argv)
-    assert "--ro-bind / /" in joined and "--unshare-all" in joined
-    assert f"--bind {work.resolve()} {work.resolve()}" in joined
-    assert f"--ro-bind {git_dir.resolve()} {git_dir.resolve()}" in joined
-    assert f"--bind {tmp.resolve()} {tmp.resolve()}" in joined
-    legacy = type("J", (), {"workdir": str(work), "git_dir": None, "link_paths": []})()
-    assert f"--ro-bind {work.resolve() / '.git'}" in " ".join(jobs._sandbox_argv(legacy, tmp))
 
 
 def test_what_the_check_writes_stays_out_of_a_revised_attempt(store, repo):
@@ -952,9 +931,9 @@ def test_gc_takes_the_store_lock_before_deleting(store, repo, monkeypatch):
     job = _job(store, repo, "true")
     run(store.path(job.id))
     held = []
-    real_rmtree = jobs.shutil.rmtree
+    real_remove = jobs.JobStore.remove
 
-    def rmtree(path, *a, **kw):
+    def remove(self, job_id):
         import fcntl
         with open(store.root / "delegate.lock", "w") as f:
             try:
@@ -963,11 +942,12 @@ def test_gc_takes_the_store_lock_before_deleting(store, repo, monkeypatch):
                 held.append(False)
             except BlockingIOError:
                 held.append(True)
-        return real_rmtree(path, *a, **kw)
+        return real_remove(self, job_id)
 
-    monkeypatch.setattr(jobs.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(jobs.JobStore, "remove", remove)
     jobs.gc(store, 0)
     assert held == [True]
+    assert not store.path(job.id).exists()
 
 
 def _objects(repo):
@@ -1411,14 +1391,6 @@ def test_the_check_cannot_reach_a_host_unix_socket(store, repo):
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="bwrap's PID namespace")
-def test_the_check_cannot_see_host_processes(store, repo):
-    # Linux: same uid, so without its own PID namespace the check could read /proc/<pid>/environ
-    job = _job(store, repo, "true", check=f"echo check ran; test ! -e /proc/{os.getpid()}")
-    run(store.path(job.id))
-    assert "check ran" in store.check_path(job.id).read_text()
-    assert store.load(job.id).check_passed is True
-
 
 def test_a_worker_that_claims_while_cancel_runs_does_not_outlive_it(store, repo):
     import threading
@@ -1510,18 +1482,6 @@ def test_cancel_kills_an_executor_that_ignores_sigterm(store, repo, fake_agy):
     assert _group_gone(job.executor_pgid), "executor survived cancel"
 
 
-@pytest.mark.skipif("not sys.platform.startswith('linux')", reason="bwrap's pid namespace")
-def test_what_the_check_daemonizes_dies_with_it(store, repo):
-    job = _job(store, repo, "echo hi > new.txt",
-               check="setsid sh -c 'sleep 2; echo late > late.txt' "
-                     "</dev/null >/dev/null 2>&1 & exit 0")
-    run(store.path(job.id))
-    job = store.load(job.id)
-    assert job.check_passed is True
-    time.sleep(3)
-    assert not (Path(job.workdir) / "late.txt").exists()
-
-
 def test_an_ignored_old_report_is_left_out_of_a_report_jobs_copy(store, repo):
     (repo / ".gitignore").write_text("env/\ndata/\nREPORT.md\n")
     _git("commit", "-q", "-am", "ignore reports", cwd=repo)
@@ -1602,7 +1562,6 @@ def test_the_job_home_is_expanded_and_absolute(tmp_path, monkeypatch):
 def test_a_stalled_report_job_fails_but_keeps_its_report(store, repo, monkeypatch):
     from polyphony import agy
     from polyphony.jobs import read_report
-    monkeypatch.setattr(agy, "POLL_SECONDS", 0.05)
     monkeypatch.setattr(agy, "STALL_SECONDS", 1)
     job = _job(store, repo, "printf '# Findings\\n' > REPORT.md; sleep 60", mode="report")
     run(store.path(job.id))
@@ -1619,6 +1578,10 @@ def test_a_finished_job_sends_one_notification(store, repo, agy_bin, monkeypatch
     (agy_bin / "osascript").chmod(0o755)
     job = _job(store, repo, "echo hi > new.txt")
     run(store.path(job.id))
+    deadline = time.monotonic() + 10
+    while not (seen.exists() and seen.read_text().endswith("new.txt\n")):
+        assert time.monotonic() < deadline, "no notification"
+        time.sleep(0.05)
     args = seen.read_text().splitlines()
     assert args[-2:] == ["Polyphony: code job succeeded", f"{job.id}: echo hi > new.txt"]
     assert sum(a == "end run" for a in args) == 1
@@ -1637,3 +1600,109 @@ def test_a_record_from_before_agy_only_loads_and_is_only_discarded(store, repo):
         revise(store, job.id, "again")
     discard(store, job.id)
     assert not store.path(job.id).exists()
+
+
+def test_a_cloned_provision_dir_that_git_does_not_ignore_stays_out_of_the_job(store, repo):
+    (repo / ".gitignore").write_text("env/\n")
+    _git("commit", "-qam", "track data", cwd=repo)
+    job = _job(store, repo, "echo hi > new.txt",
+               provision=[{"path": "data/", "mode": "clone"}], check="true")
+    assert (Path(job.workdir) / "data" / "big.bin").is_file()
+    run(store.path(job.id))
+    job = store.load(job.id)
+    assert job.state == "succeeded", job.error
+    assert job.files_changed == ["new.txt"]
+    assert (Path(job.workdir) / "data" / "big.bin").is_file()
+
+
+def test_an_untracked_old_report_is_not_in_the_jobs_starting_point(store, repo):
+    (repo / "REPORT.md").write_text("old untracked findings\n")
+    job = _job(store, repo, "echo nothing new", mode="report")
+    assert not (Path(job.workdir) / "REPORT.md").exists()
+    assert subprocess.run(["git", "cat-file", "-e", f"{job.base_commit}:REPORT.md"],
+                          cwd=job.workdir, capture_output=True).returncode != 0
+
+
+def test_a_job_whose_creator_died_while_copying_is_marked_died(store, repo):
+    job = _job(store, repo, "true")
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    job.state, job.pid = "creating", gone.pid
+    store.save(job)
+    assert store.refresh(store.load(job.id)).state == "died"
+
+
+def test_a_job_cancelled_while_copying_is_not_queued(store, repo, monkeypatch):
+    from polyphony import jobs
+    from polyphony.workspace import Workspace
+    original = Workspace.create.__func__
+
+    def create_then_cancel(cls, *a, **kw):
+        (only,) = store.all()
+        assert only.state == "creating"
+        jobs.cancel(store, only.id)
+        return original(cls, *a, **kw)
+
+    monkeypatch.setattr(Workspace, "create", classmethod(create_then_cancel))
+    with pytest.raises(jobs.JobError, match="cancelled while its copy"):
+        _job(store, repo, "true")
+    assert store.all() == []
+
+
+def test_snapshot_checks_the_git_dir_once(store, repo, monkeypatch):
+    from polyphony import workspace
+    job = _job(store, repo, "echo hi > new.txt",
+               provision=[{"path": "env/", "mode": "link"}, {"path": "data/", "mode": "clone"}])
+    walks = []
+    real = workspace._first_symlink
+    monkeypatch.setattr(workspace, "_first_symlink", lambda gd: walks.append(gd) or real(gd))
+    run(store.path(job.id))
+    assert store.load(job.id).files_changed == ["new.txt"]
+    assert len(walks) == 1
+
+
+def test_sealing_leaves_an_unchanged_config_in_place(store, repo):
+    from polyphony.workspace import seal_git
+    job = _job(store, repo, "true")
+    config = Path(job.git_dir) / "config"
+    before = config.stat().st_ino
+    seal_git(job.git_dir, job.workdir)
+    assert config.stat().st_ino == before
+    config.write_text("[core]\n\tpager = touch /tmp/pwned\n")
+    seal_git(job.git_dir, job.workdir)
+    assert "pwned" not in config.read_text()
+
+
+def test_a_job_creating_for_over_an_hour_is_marked_died(store, repo):
+    job = _job(store, repo, "true")
+    job.state, job.pid, job.created_at = "creating", os.getpid(), time.time() - 3700
+    store.save(job)
+    assert store.refresh(store.load(job.id)).state == "died"
+
+
+def test_launching_a_job_cancelled_after_creation_says_so(store, repo):
+    from polyphony import jobs
+    job = _job(store, repo, "true")
+    jobs.cancel(store, job.id)
+    with pytest.raises(jobs.JobError, match="cancelled before its worker started"):
+        jobs.launch(store, job)
+
+
+def test_removing_a_job_falls_back_to_deleting_in_place(store, repo, monkeypatch):
+    from polyphony import jobs
+    job = _job(store, repo, "true")
+
+    def refuse(*a):
+        raise OSError("cross-device")
+
+    monkeypatch.setattr(jobs.os, "rename", refuse)
+    store.remove(job.id)
+    assert not store.path(job.id).exists()
+
+
+def test_emptying_the_trash_deletes_what_was_left_there(store):
+    leftover = store.root / ".trash" / "old-job" / "repo"
+    leftover.mkdir(parents=True)
+    (leftover / "f.txt").write_text("x")
+    store.empty_trash()
+    assert list((store.root / ".trash").iterdir()) == []

@@ -1,11 +1,10 @@
 name: medicoder
 path: /Users/ali/root/work/medicoder/medicoder/medicoder
 
-# Without all three the test suite cannot run.
+# Without both the test suite cannot run.
 provision:
-  - { path: env/, mode: clone }
-  - { path: datasets/smoke/, mode: clone }
-  - { path: datasets/tuning/, mode: clone }
+  - { path: env/, mode: link }
+  - { path: datasets/smoke/, mode: link }
 
 models:
   report: gemini-4-argon-high

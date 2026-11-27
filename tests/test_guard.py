@@ -1,4 +1,7 @@
+import os
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -39,3 +42,15 @@ def test_words_containing_push_are_not_refused(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     res = run_git(["branch", "--list", "pushover"], cwd=str(tmp_path))
     assert res.returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("xcrun"), reason="macOS shim")
+def test_the_xcrun_git_shim_is_skipped(monkeypatch):
+    from polyphony import guard
+    monkeypatch.setattr(guard.shutil, "which", lambda name: "/usr/bin/git")
+    guard.git_binary.cache_clear()
+    try:
+        real = guard.git_binary()
+        assert real != "/usr/bin/git" and os.access(real, os.X_OK)
+    finally:
+        guard.git_binary.cache_clear()

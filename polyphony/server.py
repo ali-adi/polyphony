@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import os
+import select
+import shlex
+import sys
+import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+import anyio
+from anyio import to_thread
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -21,6 +28,7 @@ from polyphony.workspace import WorkspaceError
 
 # MCP clients time a tool call out at about 120 s.
 MAX_WAIT_SECONDS = 100
+REFRESH_SECONDS = 5
 RECENT_EVENTS = 8
 FILES_SHOWN = 50
 CHECK_TAIL_CHARS = 4000
@@ -39,7 +47,10 @@ INSTRUCTIONS = (
     "judgment. Loop: delegate, status with wait_seconds, diff, then apply, "
     "revise with feedback, or discard; read a report-mode result with report. "
     "apply stages the changes without committing. With more than one job "
-    "running, call the wait tool on all of them instead of status on each."
+    "running, call the wait tool on all of them instead of status on each. "
+    "If you can run a shell command in the background, run the wait_command "
+    "that delegate and revise return that way instead, so waiting does not "
+    "block the conversation; it prints the result and exits when the job ends."
 )
 
 
@@ -126,7 +137,7 @@ def _activity(store: JobStore, job: Job) -> dict:
         if not recent or recent[-1] != line:
             recent.append(line)
     info: dict = {"recent": recent[-RECENT_EVENTS:]}
-    final = agy.result_event(store.output_path(job.id))
+    final = agy.result_of(stream)
     if final is not None:
         info["response"] = final.get("response")
     if job.state == "running" and Path(job.workdir).is_dir():
@@ -153,7 +164,7 @@ def _summary(store: JobStore, job: Job) -> dict:
         info.update(withheld=job.withheld, withheld_note=WITHHELD_NOTE)
     if job.brief_path:
         info["brief_path"] = job.brief_path
-    if job.state == "queued":
+    if job.state in ("creating", "queued"):
         return info
     info.update(_activity(store, job), output_path=str(store.output_path(job.id)))
     if job.state not in ACTIVE:
@@ -203,6 +214,61 @@ def _brief(store: JobStore, job: Job) -> dict:
     return info
 
 
+@contextmanager
+def _watching(store: JobStore, job_ids: list[str]):
+    # replacing job.json writes the job dir; a worker that dies writes nothing, hence the periodic wake
+    kq = select.kqueue()
+    fds = []
+    try:
+        for job_id in job_ids:
+            try:
+                fds.append(os.open(store.path(job_id), os.O_EVTONLY))
+            except OSError:
+                continue
+        kq.control([select.kevent(fd, select.KQ_FILTER_VNODE,
+                                  select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                  select.KQ_NOTE_WRITE | select.KQ_NOTE_DELETE
+                                  | select.KQ_NOTE_RENAME) for fd in fds], 0, 0)
+
+        async def changed(deadline: float) -> None:
+            with anyio.move_on_after(max(0.0, min(REFRESH_SECONDS, deadline - time.monotonic()))):
+                await anyio.wait_readable(kq.fileno())
+            kq.control(None, 64, 0)
+
+        yield changed
+    finally:
+        for fd in fds:
+            os.close(fd)
+        kq.close()
+
+
+async def wait_for(store: JobStore, job_ids: list[str], until: str, seconds: float) -> dict:
+    deadline = time.monotonic() + seconds
+    listed = [store.load(i) for i in job_ids]
+    with _watching(store, job_ids) as changed:
+        while True:
+            listed = await to_thread.run_sync(lambda: [_reload(store, j) for j in listed])
+            finished = [j.id for j in listed if j.state not in ACTIVE]
+            done = bool(finished) if until == "any" else len(finished) == len(listed)
+            if done or time.monotonic() >= deadline:
+                break
+            await changed(deadline)
+    jobs_now = await to_thread.run_sync(lambda: [
+        _summary(store, j) if j.state not in ACTIVE else _brief(store, j) for j in listed])
+    return {
+        "done": done,
+        "finished": finished,
+        "active": [j.id for j in listed if j.state in ACTIVE],
+        "jobs": jobs_now,
+    }
+
+
+def wait_command(store: JobStore, job_ids: list[str]) -> str:
+    exe = Path(sys.executable).parent / "polyphony"
+    base = [str(exe)] if exe.is_file() else [sys.executable, "-m", "polyphony.cli"]
+    return shlex.join([*base, "--home", str(store.root), "wait", *job_ids])
+
+
 def _reload(store: JobStore, job: Job) -> Job:
     try:
         return store.refresh(store.load(job.id))
@@ -217,6 +283,7 @@ def build_server(
     usage_ttl: float = USAGE_TTL_SECONDS,
 ) -> MCPServer:
     store = store or JobStore()
+    threading.Thread(target=store.empty_trash, daemon=True).start()
     server = MCPServer(name="polyphony", instructions=INSTRUCTIONS)
     usage_cache = UsageCache(store.root, check=usage_check, ttl=usage_ttl)
 
@@ -273,23 +340,23 @@ def build_server(
             brief = _checked_brief(instruction, brief_path, repo, mode)
             project = project_for(root)
             model = model or project.models[mode]
-            jobs.gc(store, jobs.AUTO_GC_SECONDS)
+            jobs.gc(store, jobs.AUTO_GC_SECONDS, measure=False)
             unknown = quota(model)
-            with store.lock():
-                _check_ready(store, project)
-                job = jobs.create_job(
-                    store,
-                    project=project,
-                    instruction=instruction,
-                    mode=mode,
-                    model=model,
-                    timeout_seconds=timeout_minutes * 60,
-                    check=project.check if check is None else (check.strip() or None),
-                    check_timeout_seconds=project.check_timeout_minutes * 60,
-                    brief=brief,
-                )
-                jobs.launch(store, job)
-            return {**_summary(store, store.refresh(store.load(job.id))), **unknown}
+            job = jobs.create_job(
+                store,
+                project=project,
+                instruction=instruction,
+                mode=mode,
+                model=model,
+                timeout_seconds=timeout_minutes * 60,
+                check=project.check if check is None else (check.strip() or None),
+                check_timeout_seconds=project.check_timeout_minutes * 60,
+                brief=brief,
+                admit=lambda: _check_ready(store, project),
+            )
+            jobs.launch(store, job)
+            return {**_summary(store, store.refresh(store.load(job.id))), **unknown,
+                    "wait_command": wait_command(store, [job.id])}
 
     @server.tool()
     def revise(job_id: str, feedback: str, timeout_minutes: int | None = None) -> dict:
@@ -305,17 +372,18 @@ def build_server(
                 _check_timeout(timeout_minutes)
             job = store.load(job_id)
             unknown = quota(job.model) if job.model else {}
-            with store.lock():
-                _check_ready(store, project_for(Path(job.repo)))
-                job = jobs.revise(
-                    store, job_id, feedback,
-                    timeout_seconds=timeout_minutes * 60 if timeout_minutes else None,
-                )
-                jobs.launch(store, job)
-            return {**_summary(store, store.refresh(store.load(job.id))), **unknown}
+            project = project_for(Path(job.repo))
+            job = jobs.revise(
+                store, job_id, feedback,
+                timeout_seconds=timeout_minutes * 60 if timeout_minutes else None,
+                admit=lambda: _check_ready(store, project),
+            )
+            jobs.launch(store, job)
+            return {**_summary(store, store.refresh(store.load(job.id))), **unknown,
+                    "wait_command": wait_command(store, [job.id])}
 
     @server.tool()
-    def status(job_id: str, wait_seconds: int = 0) -> dict:
+    async def status(job_id: str, wait_seconds: int = 0) -> dict:
         """A job's state and latest agent events ("recent"); while running, the
         files touched so far; once finished, agy's final response, files
         changed and whether the check passed. wait_seconds (at most 100)
@@ -323,11 +391,12 @@ def build_server(
         For more than one job, use wait."""
         with _anticipated():
             deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
-            while True:
-                job = store.refresh(store.load(job_id))
-                if job.state not in ACTIVE or time.monotonic() >= deadline:
-                    return _summary(store, job)
-                time.sleep(1)
+            with _watching(store, [job_id]) as changed:
+                while True:
+                    job = await to_thread.run_sync(lambda: store.refresh(store.load(job_id)))
+                    if job.state not in ACTIVE or time.monotonic() >= deadline:
+                        return await to_thread.run_sync(_summary, store, job)
+                    await changed(deadline)
 
     @server.tool()
     def diff(job_id: str) -> str:
@@ -413,7 +482,7 @@ def build_server(
             return jobs.report(store, job_id, offset, limit)
 
     @server.tool()
-    def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 90) -> dict:
+    async def wait(job_ids: list[str], until: str = "any", wait_seconds: int = 90) -> dict:
         """Block until any (until="any") or all (until="all") of job_ids have
         finished, or wait_seconds (default 90, at most 100) runs out: one call
         in place of status on each job. "done" says whether that happened;
@@ -427,25 +496,10 @@ def build_server(
                 raise ValueError(f"until must be one of {', '.join(WAIT_UNTIL)}, not {until!r}.")
             if not job_ids:
                 raise ValueError("Name at least one job.")
-            repeated = sorted({i for i in job_ids if job_ids.count(i) > 1})
+            repeated = sorted(i for i, n in Counter(job_ids).items() if n > 1)
             if repeated:
                 raise ValueError(f"Job(s) named more than once: {', '.join(repeated)}.")
-            deadline = time.monotonic() + min(max(wait_seconds, 0), MAX_WAIT_SECONDS)
-            listed = [store.refresh(store.load(i)) for i in job_ids]
-            while True:
-                listed = [_reload(store, j) for j in listed]
-                finished = [j.id for j in listed if j.state not in ACTIVE]
-                done = bool(finished) if until == "any" else len(finished) == len(listed)
-                if done or time.monotonic() >= deadline:
-                    break
-                time.sleep(1)
-            return {
-                "done": done,
-                "finished": finished,
-                "active": [j.id for j in listed if j.state in ACTIVE],
-                "jobs": [_summary(store, j) if j.state not in ACTIVE else _brief(store, j)
-                         for j in listed],
-            }
+            return await wait_for(store, job_ids, until, min(max(wait_seconds, 0), MAX_WAIT_SECONDS))
 
     @server.tool()
     def apply_many(

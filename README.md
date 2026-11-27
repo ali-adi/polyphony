@@ -13,7 +13,7 @@ on a judgement (a report-mode audit) and for mechanical code changes.
 
 | Tool | What it does |
 |---|---|
-| `delegate(instruction?, repo, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a `code` or `report` job in a fresh copy of the repo; returns a `job_id` at once. A model at 5% quota or less is refused |
+| `delegate(instruction?, repo, mode?, timeout_minutes?, check?, brief_path?, model?)` | Start a `code` or `report` job in a fresh copy of the repo; returns a `job_id` at once, and a `wait_command` to run in the background (`polyphony wait <job_id>`) so waiting does not block the conversation. A model at 5% quota or less is refused |
 | `status(job_id, wait_seconds?)` | State, agy's recent steps and touched files, and once finished its response, changed files and check result. Blocks up to 100 s |
 | `wait(job_ids, until?, wait_seconds?)` | Block until `any` or `all` of several jobs finish, up to 100 s |
 | `report(job_id, offset?, limit?)` | A report job's `REPORT.md`, paged |
@@ -27,6 +27,8 @@ on a judgement (a report-mode audit) and for mechanical code changes.
 Jobs left unresolved for 7 days are deleted on the next `delegate`.
 
 ## Install
+
+macOS only: the check runs under Seatbelt (`sandbox-exec`) and copies use APFS clones.
 
 ```bash
 uv sync
@@ -60,7 +62,7 @@ matched by `path`. `polyphony doctor` prints which file applies.
 name: medicoder
 path: /absolute/path/to/repo
 provision:                          # gitignored paths a fresh copy lacks
-  - { path: env/, mode: clone }     # clone = copy-on-write; link = symlink
+  - { path: env/, mode: clone }     # clone = copy-on-write; link = symlink the agent can write through
 models:                             # agy model per mode (default: gemini-3.8-flash-low)
   report: gemini-4-argon-high
   code: gemini-3.8-flash-low
@@ -73,9 +75,11 @@ env_scrub: [AWS_*, OPENAI_API_KEY]  # env vars kept from both the agent and the 
 
 ## Command line
 
-`polyphony mcp` serves the tools on stdio. `polyphony jobs [JOB_ID]`, `discard`,
-`report`, `usage`, `stats`, `doctor` and `gc --older-than 7d [--dry-run]` are for
-checking by hand.
+`polyphony mcp` serves the tools on stdio. `polyphony wait JOB_ID... [--all]` blocks
+until a job finishes and prints it as JSON: the command `delegate` returns as
+`wait_command`, for an agent to run in the background. `polyphony jobs [JOB_ID]`,
+`discard`, `report`, `usage`, `stats`, `doctor` and `gc --older-than 7d [--dry-run]`
+are for checking by hand.
 
 ## Development
 
